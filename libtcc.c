@@ -63,6 +63,10 @@ static int nb_states;
 #elif defined(TCC_TARGET_RISCV64)
 #include "riscv64-gen.c"
 #include "riscv64-link.c"
+#elif defined(TCC_TARGET_TRANSPUTER)
+#include "transputer-gen.c"
+#include "transputer-link.c"
+#include "transputer-asm.c"
 #else
 #error unknown target
 #endif

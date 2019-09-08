@@ -15,6 +15,8 @@
 # define TRIPLET_ARCH "aarch64"
 #elif defined(__riscv) && defined(__LP64__)
 # define TRIPLET_ARCH "riscv64"
+#elif defined(__transputer__)
+# define TRIPLET_ARCH "transputer"
 #else
 # define TRIPLET_ARCH "unknown"
 #endif

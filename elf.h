@@ -263,6 +263,7 @@ typedef struct
 #define EM_TILEPRO	188		/* Tilera TILEPro */
 #define EM_TILEGX	191		/* Tilera TILE-Gx */
 #define EM_RISCV	243	        /* RISC-V */
+#define EM_TRANSPUTER	805	        /* T805 */
 #define EM_NUM		253
 
 /* If it is necessary to assign new unofficial EM_* values, please
@@ -3300,5 +3301,14 @@ typedef Elf32_Addr Elf32_Conflict;
 
 #define R_RISCV_NUM		58
 
+/* TRANSPUTER ELF Flags */
+
+/* TRANSPUTER relocations.  */
+#define R_TRANSPUTER_NONE	0	/* No reloc */
+#define R_TRANSPUTER_32		1
+#define R_TRANSPUTER_64		2
+#define R_TRANSPUTER_RELATIVE	3
+#define R_TRANSPUTER_COPY	4
+#define R_TRANSPUTER_JUMP_SLOT	5
 
 #endif	/* elf.h */

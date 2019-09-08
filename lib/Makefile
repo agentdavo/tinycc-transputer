@@ -44,6 +44,7 @@ X86_64_O = libtcc1.o alloca86_64.o alloca86_64-bt.o
 ARM_O = libtcc1.o armeabi.o alloca-arm.o armflush.o
 ARM64_O = lib-arm64.o
 RISCV64_O = lib-arm64.o
+TRANSPUTER_O = lib-transputer.o
 WIN_O = crt1.o crt1w.o wincrt1.o wincrt1w.o dllcrt1.o dllmain.o
 
 OBJ-i386 = $(I386_O) $(BCHECK_O) $(DSO_O)
@@ -60,6 +61,7 @@ OBJ-arm-eabi = $(ARM_O) $(DSO_O)
 OBJ-arm-eabihf = $(ARM_O) $(DSO_O)
 OBJ-arm-wince = $(ARM_O) $(WIN_O)
 OBJ-riscv64 = $(RISCV64_O) $(DSO_O)
+OBJ-transputer = $(TRANSPUTER_O) $(DSO_O)
 
 $(BIN) : $(patsubst %.o,$(X)%.o,$(OBJ-$T))
 	$(XAR) rcs $@ $^

@@ -79,6 +79,7 @@ NATIVE_DEFINES_$(CONFIG_arm_eabi) += -DTCC_ARM_EABI
 NATIVE_DEFINES_$(CONFIG_arm_vfp) += -DTCC_ARM_VFP
 NATIVE_DEFINES_$(CONFIG_arm64) += -DTCC_TARGET_ARM64
 NATIVE_DEFINES_$(CONFIG_riscv64) += -DTCC_TARGET_RISCV64
+NATIVE_DEFINES_$(CONFIG_transputer) += -DTCC_TARGET_TRANSPUTER
 NATIVE_DEFINES += $(NATIVE_DEFINES_yes)
 
 ifeq ($(INCLUDED),no)
@@ -94,11 +95,13 @@ all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 # cross compiler targets to build
 TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm-wince c67
 TCC_X += riscv64
+TCC_X += transputer
 # TCC_X += arm-fpa arm-fpa-ld arm-vfp arm-eabi
 
 # cross libtcc1.a targets to build
 LIBTCC1_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm-wince
-LIBTCC1_X = riscv64
+LIBTCC1_X += riscv64
+LIBTCC1_X += transputer
 
 PROGS_CROSS = $(foreach X,$(TCC_X),$X-tcc$(EXESUF))
 LIBTCC1_CROSS = $(foreach X,$(LIBTCC1_X),$X-libtcc1.a)
@@ -137,6 +140,7 @@ DEF-arm-eabi    = -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI
 DEF-arm-eabihf  = -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI -DTCC_ARM_HARDFLOAT
 DEF-arm         = $(DEF-arm-eabihf)
 DEF-riscv64     = -DTCC_TARGET_RISCV64
+DEF-transputer  = -DTCC_TARGET_TRANSPUTER
 DEF-$(NATIVE_TARGET) = $(NATIVE_DEFINES)
 
 DEFINES += $(DEF-$T) $(DEF-all)
@@ -177,6 +181,7 @@ arm-eabihf_FILES  = $(arm_FILES)
 arm64_FILES = $(CORE_FILES) arm64-gen.c arm64-link.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c
+transputer_FILES = $(CORE_FILES) transputer-gen.c transputer-link.c transputer-asm.c transputer-asm.h
 
 # libtcc sources
 LIBTCC_SRC = $(filter-out tcc.c tcctools.c,$(filter %.c,$($T_FILES)))
