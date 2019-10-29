@@ -155,6 +155,8 @@ static const char version[] =
         "ARM"
 #elif defined TCC_TARGET_ARM64
         "AArch64"
+#elif defined TCC_TARGET_TRANSPUTER
+        "Transputer"
 #endif
 #ifdef TCC_ARM_HARDFLOAT
         " Hard Float"

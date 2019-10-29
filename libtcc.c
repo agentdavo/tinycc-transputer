@@ -822,6 +822,7 @@ LIBTCCAPI TCCState *tcc_new(void)
     tcc_define_symbol(s, "__riscv_fdiv", NULL);
     tcc_define_symbol(s, "__riscv_fsqrt", NULL);
     tcc_define_symbol(s, "__riscv_float_abi_double", NULL);
+// #elif defined TCC_TARGET_TRANSPUTER (include Transputer target defines)
 #endif
 
 #ifdef TCC_TARGET_PE
