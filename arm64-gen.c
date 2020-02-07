@@ -40,9 +40,13 @@
 
 #define CHAR_IS_UNSIGNED
 
+/* define if return values need to be extended explicitely
+   at caller side (for interfacing with non-TCC compilers) */
+#define PROMOTE_RET
 /******************************************************/
 #else /* ! TARGET_DEFS_ONLY */
 /******************************************************/
+#define USING_GLOBALS
 #include "tcc.h"
 #include <assert.h>
 
@@ -445,7 +449,7 @@ static void arm64_load_cmp(int r, SValue *sv);
 ST_FUNC void load(int r, SValue *sv)
 {
     int svtt = sv->type.t;
-    int svr = sv->r & ~VT_LVAL_TYPE;
+    int svr = sv->r;
     int svrv = svr & VT_VALMASK;
     uint64_t svcul = (uint32_t)sv->c.i;
     svcul = svcul >> 31 & 1 ? svcul - ((uint64_t)1 << 32) : svcul;
@@ -545,7 +549,7 @@ ST_FUNC void load(int r, SValue *sv)
 ST_FUNC void store(int r, SValue *sv)
 {
     int svtt = sv->type.t;
-    int svr = sv->r & ~VT_LVAL_TYPE;
+    int svr = sv->r;
     int svrv = svr & VT_VALMASK;
     uint64_t svcul = (uint32_t)sv->c.i;
     svcul = svcul >> 31 & 1 ? svcul - ((uint64_t)1 << 32) : svcul;
@@ -958,11 +962,7 @@ ST_FUNC void gfunc_call(int nb_args)
     {
         int rt = return_type->t;
         int bt = rt & VT_BTYPE;
-        if (bt == VT_BYTE || bt == VT_SHORT)
-            // Promote small integers:
-            o(0x13001c00 | (bt == VT_SHORT) << 13 |
-              (uint32_t)!!(rt & VT_UNSIGNED) << 30); // [su]xt[bh] w0,w0
-        else if (bt == VT_STRUCT && !(a[0] & 1)) {
+        if (bt == VT_STRUCT && !(a[0] & 1)) {
             // A struct was returned in registers, so write it out:
             gv(RC_R(8));
             --vtop;
@@ -996,8 +996,9 @@ static int arm64_func_va_list_gr_offs;
 static int arm64_func_va_list_vr_offs;
 static int arm64_func_sub_sp_offset;
 
-ST_FUNC void gfunc_prolog(CType *func_type)
+ST_FUNC void gfunc_prolog(Sym *func_sym)
 {
+    CType *func_type = &func_sym->type;
     int n = 0;
     int i = 0;
     Sym *sym;
@@ -1037,7 +1038,7 @@ ST_FUNC void gfunc_prolog(CType *func_type)
                    a[i] < 32 ? 16 + (a[i] - 16) / 2 * 16 :
                    224 + ((a[i] - 32) >> 1 << 1));
         sym_push(sym->v & ~SYM_FIELD, &sym->type,
-                 (a[i] & 1 ? VT_LLOCAL : VT_LOCAL) | lvalue_type(sym->type.t),
+                 (a[i] & 1 ? VT_LLOCAL : VT_LOCAL) | VT_LVAL,
                  off);
 
         if (a[i] < 16) {
@@ -1124,7 +1125,7 @@ ST_FUNC void gen_va_arg(CType *t)
     gaddrof();
     r0 = intr(gv(RC_INT));
     r1 = get_reg(RC_INT);
-    vtop[0].r = r1 | lvalue_type(t->t);
+    vtop[0].r = r1 | VT_LVAL;
     r1 = intr(r1);
 
     if (!hfa) {
@@ -1716,6 +1717,16 @@ ST_FUNC void gen_cvt_sxtw(void)
     o(0x93407c00 | r | r << 5); // sxtw x(r),w(r)
 }
 
+/* char/short to int conversion */
+ST_FUNC void gen_cvt_csti(int t)
+{
+    int r = intr(gv(RC_INT));
+    o(0x13001c00
+        | ((t & VT_BTYPE) == VT_SHORT) << 13
+        | (uint32_t)!!(t & VT_UNSIGNED) << 30
+        | r | r << 5); // [su]xt[bh] w(r),w(r)
+}
+
 ST_FUNC void gen_cvt_itof(int t)
 {
     if (t == VT_LDOUBLE) {
@@ -1775,7 +1786,7 @@ ST_FUNC void gen_cvt_ftoi(int t)
 
 ST_FUNC void gen_cvt_ftof(int t)
 {
-    int f = vtop[0].type.t;
+    int f = vtop[0].type.t & VT_BTYPE;
     assert(t == VT_FLOAT || t == VT_DOUBLE || t == VT_LDOUBLE);
     assert(f == VT_FLOAT || f == VT_DOUBLE || f == VT_LDOUBLE);
     if (t == f)

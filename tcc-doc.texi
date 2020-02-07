@@ -354,12 +354,30 @@ fault}.
 Generate additional support code to check
 memory allocations and array/pointer bounds. @option{-g} is implied. Note
 that the generated code is slower and bigger in this case.
+The bound checking code is not included in shared libaries. The main executable should always be compiled with the @option{-b}.
 
-Note: @option{-b} is only available on i386 when using libtcc for the moment.
+There are five environment variables that can be used:
+@table @option
+@item TCC_BOUNDS_WARN_POINTER_ADD
+Print warning when pointer add creates an illegal pointer.
+@item TCC_BOUNDS_PRINT_CALLS
+Print bound checking calls. Can be used for debugging.
+@item TCC_BOUNDS_PRINT_HEAP
+Print heap objects that are not freed at exit of program.
+@item TCC_BOUNDS_PRINT_STATISTIC
+Print statistic information at exit of program.
+@item TCC_BOUNDS_NEVER_FATAL
+Try to continue in case of a bound checking error.
+@end table
 
-@item -bt N
-Display N callers in stack traces. This is useful with @option{-g} or
-@option{-b}.
+Note: @option{-b} is only available on i386 (linux and windows) and x86_64 (linux and windows) for the moment.
+
+@item -bt[N]
+Display N callers in stack traces. This is useful with @option{-g} or @option{-b}.
+With executables, additional support for stack traces is included.
+
+A function @code{ int tcc_backtrace(const char *fmt, ...); } is provided
+to trigger a stack trace with a message on demand.
 
 @end table
 
@@ -901,7 +919,7 @@ Here are some examples of caught errors:
     int *tab;
     tab = malloc(20 * sizeof(int));
     for(i=0;i<21;i++) @{
-        sum += tab4[i];
+        sum += tab[i];
     @}
     free(tab);
 @}
@@ -914,7 +932,7 @@ Here are some examples of caught errors:
     tab = malloc(20 * sizeof(int));
     free(tab);
     for(i=0;i<20;i++) @{
-        sum += tab4[i];
+        sum += tab[i];
     @}
 @}
 @end example
@@ -930,6 +948,40 @@ Here are some examples of caught errors:
 @end example
 
 @end table
+
+Signal handlers are not compatible with bounds checking. The code
+below can be used to protect signal handlers.
+The call to __bound_checking(1) will disable bounds checking in the
+whole application.
+
+The BOUNDS_CHECKING_OFF and BOUNDS_CHECKING_ON can also be used to
+disable bounds checking for some code. This is not recommended.
+It is better to fix the code.
+
+@example
+
+#ifdef __BOUNDS_CHECKING_ON
+extern void __bound_checking (int no_check);
+#define BOUNDS_CHECKING_OFF __bound_checking(1)
+#define BOUNDS_CHECKING_ON  __bound_checking(-1)
+#else
+#define BOUNDS_CHECKING_OFF
+#define BOUNDS_CHECKING_ON
+#endif
+
+void real_signal_handler(int sig, siginfo_t *info, void *ucontext)
+@{
+    ...
+@}
+
+void signal_handler(int sig, void *info, void *ucontext)
+@{
+    BOUNDS_CHECKING_OFF;
+    real_signal_handler(sig, info, data);
+    BOUNDS_CHECKING_ON;
+@}
+
+@end example
 
 @node Libtcc
 @chapter The @code{libtcc} library

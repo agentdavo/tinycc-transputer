@@ -16,6 +16,10 @@
 
 #endif
 
+#ifndef __TINYC__
+typedef __SIZE_TYPE__ uintptr_t;
+#endif
+
 #if defined(_WIN32)
 #define LONG_LONG_FORMAT "%lld"
 #define ULONG_LONG_FORMAT "%llu"
@@ -80,6 +84,7 @@ void scope_test();
 void scope_test2();
 void forward_test();
 void funcptr_test();
+void if_test();
 void loop_test();
 void switch_test();
 void goto_test();
@@ -123,6 +128,7 @@ void math_cmp_test(void);
 void callsave_test(void);
 void builtin_frame_address_test(void);
 void attrib_test(void);
+void bounds_check1_test(void);
 
 int fib(int n);
 void num(int n);
@@ -508,6 +514,40 @@ void string_test()
     }
 }
 
+void if1t(int n, int a, int b, int c)
+{
+    if (a && b) printf("if1t: %d 1 %d %d\n", n, a, b);
+    if (a && !b) printf("if1t: %d 2 %d %d\n", n, a, b);
+    if (!a && b) printf("if1t: %d 3 %d %d\n", n, a, b);
+    if (!a && !b) printf("if1t: %d 4 %d %d\n", n, a, b);
+    if (a || b) printf("if1t: %d 5 %d %d\n", n, a, b);
+    if (a || !b) printf("if1t: %d 6 %d %d\n", n, a, b);
+    if (!a || b) printf("if1t: %d 7 %d %d\n", n, a, b);
+    if (!a || !b) printf("if1t: %d 8 %d %d\n", n, a, b);
+    if (a && b || c) printf("if1t: %d 9 %d %d %d\n", n, a, b, c);
+    if (a || b && c) printf("if1t: %d 10 %d %d %d\n", n, a, b, c);
+    if (a > b - 1 && c) printf("if1t: %d 11 %d %d %d\n", n, a, b, c);
+    if (a > b - 1 || c) printf("if1t: %d 12 %d %d %d\n", n, a, b, c);
+    if (a > 0 && 1) printf("if1t: %d 13 %d %d %d\n", n, a, b, c);
+    if (a > 0 || 0) printf("if1t: %d 14 %d %d %d\n", n, a, b, c);
+}
+
+void if2t(void)
+{
+    if (0 && 1 || printf("if2t:ok\n") || 1)
+      printf("if2t:ok2\n");
+    printf("if2t:ok3\n");
+}
+
+void if_test(void)
+{
+    if1t(1, 0, 0, 0);
+    if1t(2, 0, 3, 0);
+    if1t(3, 2, 0, 0);
+    if1t(4, 2, 3, 0);
+    if2t();
+}
+
 void loop_test()
 {
     int i;
@@ -723,6 +763,7 @@ int main(int argc, char **argv)
     scope_test2();
     forward_test();
     funcptr_test();
+    if_test();
     loop_test();
     switch_test();
     goto_test();
@@ -771,6 +812,7 @@ int main(int argc, char **argv)
     if (via_volatile (42) != 42)
       printf ("via_volatile broken\n");
     attrib_test();
+    bounds_check1_test();
     return 0; 
 }
 
@@ -944,6 +986,8 @@ void expr2_test()
     printf("res= %d %d\n", a, b);
 }
 
+int const_len_ar[sizeof(1/0)]; /* div-by-zero, but in unevaluated context */
+
 void constant_expr_test()
 {
     int a;
@@ -952,6 +996,7 @@ void constant_expr_test()
     printf("%d\n", a * 16);
     printf("%d\n", a * 1);
     printf("%d\n", a + 0);
+    printf("%d\n", sizeof(const_len_ar));
 }
 
 int tab4[10];
@@ -1161,7 +1206,7 @@ void struct_test()
     s->f3 = 1;
     printf("st2: %d %d %d\n",
            s->f1, s->f2, s->f3);
-    printf("str_addr=%x\n", (int)st1.str - (int)&st1.f1);
+    printf("str_addr=%x\n", (int)(uintptr_t)st1.str - (int)(uintptr_t)&st1.f1);
 
     /* align / size tests */
     printf("aligntest1 sizeof=%d alignof=%d\n",
@@ -1201,17 +1246,24 @@ void struct_test()
     printf("Large: offsetof(compound_head)=%d\n", (int)((char*)&ls.compound_head - (char*)&ls));
 }
 
+/* simulate char/short return value with undefined upper bits */
+static int __csf(int x) { return x; }
+static void *_csf = __csf;
+#define csf(t,n) ((t(*)(int))_csf)(n)
+
 /* XXX: depend on endianness */
 void char_short_test()
 {
     int var1, var2;
+    signed char var3;
+    long long var4;
 
     printf("char_short:\n");
 
     var1 = 0x01020304;
     var2 = 0xfffefdfc;
     printf("s8=%d %d\n", 
-           *(char *)&var1, *(char *)&var2);
+           *(signed char *)&var1, *(signed char *)&var2);
     printf("u8=%d %d\n", 
            *(unsigned char *)&var1, *(unsigned char *)&var2);
     printf("s16=%d %d\n", 
@@ -1222,12 +1274,44 @@ void char_short_test()
            *(int *)&var1, *(int *)&var2);
     printf("u32=%d %d\n", 
            *(unsigned int *)&var1, *(unsigned int *)&var2);
-    *(char *)&var1 = 0x08;
+    *(signed char *)&var1 = 0x08;
     printf("var1=%x\n", var1);
     *(short *)&var1 = 0x0809;
     printf("var1=%x\n", var1);
     *(int *)&var1 = 0x08090a0b;
     printf("var1=%x\n", var1);
+
+    var1 = 0x778899aa;
+    var4 = 0x11223344aa998877ULL;
+    var1 = var3 = var1 + 1;
+    var4 = var3 = var4 + 1;
+    printf("promote char/short assign %d "LONG_LONG_FORMAT"\n", var1, var4);
+    var1 = 0x778899aa;
+    var4 = 0x11223344aa998877ULL;
+    printf("promote char/short assign VA %d %d\n", var3 = var1 + 1, var3 = var4 + 1);
+    printf("promote char/short cast VA %d %d\n", (signed char)(var1 + 1), (signed char)(var4 + 1));
+#if !defined(__arm__)
+    /* We can't really express GCC behaviour of return type promotion in
+       the presence of undefined behaviour (like __csf is).  */
+    var1 = csf(unsigned char,0x89898989);
+    var4 = csf(signed char,0xabababab);
+    printf("promote char/short funcret %d "LONG_LONG_FORMAT"\n", var1, var4);
+    printf("promote char/short fumcret VA %d %d %d %d\n",
+        csf(unsigned short,0xcdcdcdcd),
+        csf(short,0xefefefef),
+        csf(_Bool,0x33221100),
+        csf(_Bool,0x33221101));
+#endif
+    var3 = -10;
+    var1 = (signed char)(unsigned char)(var3 + 1);
+    var4 = (signed char)(unsigned char)(var3 + 1);
+    printf("promote multicast (char)(unsigned char) %d "LONG_LONG_FORMAT"\n", var1, var4);
+    var4 = 0x11223344aa998877ULL;
+    var4 = (unsigned)(int)(var4 + 1);
+    printf("promote multicast (unsigned)(int) "LONG_LONG_FORMAT"\n", var4);
+    var4 = 0x11223344bbaa9988ULL;
+    var4 = (unsigned)(signed char)(var4 + 1);
+    printf("promote multicast (unsigned)(char) "LONG_LONG_FORMAT"\n", var4);
 }
 
 /******************/
@@ -1792,6 +1876,8 @@ arrtype2 sinit22 = {5,6,7};
 int sinit23[2] = { "astring" ? sizeof("astring") : -1,
 		   &sinit23 ? 42 : -1 };
 
+int sinit24 = 2 || 1 / 0; /* exception in constant but unevaluated context */
+
 extern int external_inited = 42;
 
 void init_test(void)
@@ -1906,6 +1992,7 @@ void init_test(void)
     printf("arrtype6: %d\n", sizeof(arrtype2));
 
     printf("sinit23= %d %d\n", sinit23[0], sinit23[1]);
+    printf("sinit24=%d\n", sinit24);
     printf("linit18= %d %d\n", linit18[0], linit18[1]);
 }
 
@@ -2345,7 +2432,7 @@ void funcptr_test()
 
     /* Check that we can align functions */
     func = aligned_function;
-    printf("aligned_function (should be zero): %d\n", ((int)func) & 15);
+    printf("aligned_function (should be zero): %d\n", ((int)(uintptr_t)func) & 15);
 }
 
 void lloptest(long long a, long long b)
@@ -2546,6 +2633,9 @@ void longlong_test(void)
     /* shortening followed by widening */
     unsigned long long u = 0x8000000000000001ULL;
     u = (unsigned)(u + 1);
+    printf("long long u=" ULONG_LONG_FORMAT "\n", u);
+    u = 0x11223344aa998877ULL;
+    u = (unsigned)(int)(u + 1);
     printf("long long u=" ULONG_LONG_FORMAT "\n", u);
 
     /* was a problem with missing save_regs in gen_opl on 32-bit platforms */
@@ -2894,10 +2984,6 @@ void c99_vla_test(int size1, int size2)
     printf("\n");
 #endif
 }
-
-#ifndef __TINYC__
-typedef __SIZE_TYPE__ uintptr_t;
-#endif
 
 void sizeof_test(void)
 {
@@ -3268,6 +3354,20 @@ void override_func2 (void)
 extern int bug_table[] __attribute__((section("__bug_table")));
 char * get_asm_string (void)
 {
+  /* On i386 when -fPIC is enabled this would cause a compile error with GCC,
+     the problem being the "i" constraint used with a symbolic operand
+     resolving to a local label.  That check is overly zealous as the code
+     within the asm makes sure to use it only in PIC-possible contexts,
+     but all GCC versions behave like so.  We arrange for PIC to be disabled
+     for compiling tcctest.c in the Makefile.
+
+     Additionally the usage of 'c' in "%c0" in the template is actually wrong,
+     as that would expect an operand that is a condition code.  The operand
+     as is (a local label) is accepted by GCC in non-PIC mode, and on x86-64.
+     What the linux kernel really wanted is 'p' to disable the addition of '$'
+     to the printed operand (as in "$.LC0" where the template only wants the
+     bare operand ".LC0").  But the code below is what the linux kernel
+     happens to use and as such is the one we want to test.  */
   extern int some_symbol;
   asm volatile (".globl some_symbol\n"
 		"jmp .+6\n"
@@ -3334,7 +3434,7 @@ void clobber_r12(void)
 }
 #endif
 
-void test_high_clobbers(void)
+void test_high_clobbers_really(void)
 {
 #if defined __x86_64__ && !defined _WIN64
     register long val asm("r12");
@@ -3347,6 +3447,20 @@ void test_high_clobbers(void)
     clobber_r12();
     asm volatile("mov %%r12, %0" : "=r" (val2) : "r" (val): "memory");
     printf("asmhc: 0x%x\n", val2);
+#endif
+}
+
+void test_high_clobbers(void)
+{
+#if defined __x86_64__ && !defined _WIN64
+    long x1, x2;
+    asm volatile("mov %%r12,%0" :: "m" (x1)); /* save r12 */
+    test_high_clobbers_really();
+    asm volatile("mov %%r12,%0" :: "m" (x2)); /* new r12 */
+    asm volatile("mov %0,%%r12" :: "m" (x1)); /* restore r12 */
+    /* should be 0 but tcc doesn't save r12 automatically, which has
+       bad effects when gcc helds TCCState *s in r12 in tcc.c:main */
+    //printf("r12-clobber-diff: %lx\n", x2 - x1);
 #endif
 }
 
@@ -3622,6 +3736,9 @@ void builtin_test(void)
     printf("res = %d\n", __builtin_constant_p(&constant_p_var));
     printf("res = %d\n", __builtin_constant_p(constant_p_var));
     printf("res = %d\n", __builtin_constant_p(100000 / constant_p_var));
+    printf("res = %d\n", __builtin_constant_p(i && 0));
+    printf("res = %d\n", __builtin_constant_p(i && 1));
+    printf("res = %d\n", __builtin_constant_p(i && 0 ? i : 34));
     s = 1;
     ll = 2;
     i = __builtin_choose_expr (1 != 0, ll, s);
@@ -3960,4 +4077,19 @@ int __get_order(unsigned long long size)
 int force_get_order(unsigned long s)
 {
     return __get_order(s);
+}
+
+#define pv(m) printf(sizeof (s->m + 0) == 8 ? "%016llx\n" : "%02x\n", s->m)
+
+/* Test failed when using bounds checking */
+void bounds_check1_test (void)
+{
+    struct s {
+        int x;
+        long long y;
+    } _s, *s = &_s;
+    s->x = 10;
+    s->y = 20;
+    pv(x);
+    pv(y);
 }

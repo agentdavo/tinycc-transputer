@@ -30,7 +30,7 @@ ifdef CONFIG_WIN32
  CFGWIN = -win
  NATIVE_TARGET = $(ARCH)-win$(if $(findstring arm,$(ARCH)),ce,32)
 else
- LIBS=-lm
+ LIBS=-lm -lpthread
  ifneq ($(CONFIG_ldl),no)
   LIBS+=-ldl
  endif
@@ -243,11 +243,11 @@ XTCC ?= ./tcc$(EXESUF)
 
 # TinyCC runtime libraries
 libtcc1.a : tcc$(EXESUF) FORCE
-	@$(MAKE) -C lib DEFINES='$(DEF-$T)'
+	@$(MAKE) -C lib
 
 # Cross libtcc1.a
 %-libtcc1.a : %-tcc$(EXESUF) FORCE
-	@$(MAKE) -C lib DEFINES='$(DEF-$*)' CROSS_TARGET=$*
+	@$(MAKE) -C lib CROSS_TARGET=$*
 
 .PRECIOUS: %-libtcc1.a
 FORCE:
@@ -279,11 +279,12 @@ IBw = $(call IB,$(wildcard $1),$2)
 IF = $(if $1,mkdir -p $2 && $(INSTALL) $1 $2)
 IFw = $(call IF,$(wildcard $1),$2)
 IR = mkdir -p $2 && cp -r $1/. $2
+B_O = bcheck.o bt-exe.o bt-log.o bt-dll.o
 
 # install progs & libs
 install-unx:
 	$(call IBw,$(PROGS) $(PROGS_CROSS),"$(bindir)")
-	$(call IFw,$(LIBTCC1) $(LIBTCC1_U),"$(tccdir)")
+	$(call IFw,$(LIBTCC1) $(B_O) $(LIBTCC1_U),"$(tccdir)")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
 	$(call $(if $(findstring .so,$(LIBTCC)),IBw,IFw),$(LIBTCC),"$(libdir)")
 	$(call IF,$(TOPSRC)/libtcc.h,"$(includedir)")
@@ -308,7 +309,7 @@ uninstall-unx:
 install-win:
 	$(call IBw,$(PROGS) $(PROGS_CROSS) $(subst libtcc.a,,$(LIBTCC)),"$(bindir)")
 	$(call IF,$(TOPSRC)/win32/lib/*.def,"$(tccdir)/lib")
-	$(call IFw,libtcc1.a $(LIBTCC1_W),"$(tccdir)/lib")
+	$(call IFw,libtcc1.a $(B_O) $(LIBTCC1_W),"$(tccdir)/lib")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
 	$(call IR,$(TOPSRC)/win32/include,"$(tccdir)/include")
 	$(call IR,$(TOPSRC)/win32/examples,"$(tccdir)/examples")
