@@ -59,7 +59,7 @@
 #define RC_F7      0x4000
 #endif
 #define RC_IRET    RC_R0  /* function return: integer register */
-#define RC_LRET    RC_R1  /* function return: second integer register */
+#define RC_IRE2    RC_R1  /* function return: second integer register */
 #define RC_FRET    RC_F0  /* function return: float register */
 
 /* pretty names for the registers */
@@ -89,7 +89,7 @@ enum {
 
 /* return registers for function */
 #define REG_IRET TREG_R0 /* single word int return register */
-#define REG_LRET TREG_R1 /* second word return register (for long long) */
+#define REG_IRE2 TREG_R1 /* second word return register (for long long) */
 #define REG_FRET TREG_F0 /* float return register */
 
 #ifdef TCC_ARM_EABI
@@ -132,6 +132,7 @@ enum {
 /******************************************************/
 #else /* ! TARGET_DEFS_ONLY */
 /******************************************************/
+#define USING_GLOBALS
 #include "tcc.h"
 
 enum float_abi float_abi;
@@ -170,7 +171,7 @@ ST_FUNC void arm_init(struct TCCState *s)
 
     float_abi = s->float_abi;
 #ifndef TCC_ARM_HARDFLOAT
-    tcc_warning("soft float ABI currently not supported: default to softfp");
+# warning "soft float ABI currently not supported: default to softfp"
 #endif
 }
 #else
@@ -1264,8 +1265,9 @@ void gfunc_call(int nb_args)
 }
 
 /* generate function prolog of type 't' */
-void gfunc_prolog(CType *func_type)
+void gfunc_prolog(Sym *func_sym)
 {
+  CType *func_type = &func_sym->type;
   Sym *sym,*sym2;
   int n, nf, size, align, rs, struct_ret = 0;
   int addr, pn, sn; /* pn=core, sn=stack */
@@ -1361,7 +1363,7 @@ from_stack:
       addr = (n + nf + sn) * 4;
       sn += size;
     }
-    sym_push(sym->v & ~SYM_FIELD, type, VT_LOCAL | lvalue_type(type->t),
+    sym_push(sym->v & ~SYM_FIELD, type, VT_LOCAL | VT_LVAL,
              addr + 12);
   }
   last_itod_magic=0;
@@ -1540,7 +1542,7 @@ void gen_opi(int op)
     case '%':
 #ifdef TCC_ARM_EABI
       func=TOK___aeabi_idivmod;
-      retreg=REG_LRET;
+      retreg=REG_IRE2;
 #else
       func=TOK___modsi3;
 #endif
@@ -1549,7 +1551,7 @@ void gen_opi(int op)
     case TOK_UMOD:
 #ifdef TCC_ARM_EABI
       func=TOK___aeabi_uidivmod;
-      retreg=REG_LRET;
+      retreg=REG_IRE2;
 #else
       func=TOK___umodsi3;
 #endif
@@ -1940,7 +1942,7 @@ void gen_opf(int op)
 
 /* convert integers to fp 't' type. Must handle 'int', 'unsigned int'
    and 'long long' cases. */
-ST_FUNC void gen_cvt_itof1(int t)
+ST_FUNC void gen_cvt_itof(int t)
 {
   uint32_t r, r2;
   int bt;
@@ -2073,7 +2075,7 @@ void gen_cvt_ftoi(int t)
     gfunc_call(1);
     vpushi(0);
     if(t == VT_LLONG)
-      vtop->r2 = REG_LRET;
+      vtop->r2 = REG_IRE2;
     vtop->r = REG_IRET;
     return;
   }

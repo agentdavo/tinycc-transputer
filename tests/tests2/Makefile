@@ -24,12 +24,16 @@ ifeq (,$(filter i386,$(ARCH)))
 endif
 ifeq (,$(filter i386 x86_64,$(ARCH)))
  SKIP += 85_asm-outside-function.test
+ SKIP += 112_backtrace.test 113_btdll.test
 endif
 ifeq (-$(findstring gcc,$(CC))-,--)
  SKIP += $(patsubst %.expect,%.test,$(GEN-ALWAYS))
 endif
 ifeq (-$(CONFIG_WIN32)-$(CONFIG_i386)$(CONFIG_arm)-,--yes-)
  SKIP += 95_bitfields%.test # type_align is different on 32bit-non-windows
+endif
+ifneq (-$(CONFIG_WIN32)$(CONFIG_WIN64)-,--)
+ SKIP += 106_pthread.test # No pthread support
 endif
 
 # Some tests might need arguments
@@ -57,24 +61,39 @@ GEN-ALWAYS =
 95_bitfields_ms.test : GEN = $(GEN-MSC)
 
 # this test compiles/links two files:
-104_inline.test : FLAGS += $(SRC)/104+_inline.c
+104_inline.test : FLAGS += $(subst 104,104+,$1)
 104_inline.test : GEN = $(GEN-TCC)
 
+# this test needs pthread
+106_pthread.test: FLAGS += -pthread
+106_pthread.test: NORUN = true
+
+# constructor/destructor
+108_constructor.test: NORUN = true
+
+112_backtrace.test: FLAGS += -dt -b
+112_backtrace.test 113_btdll.test: FILTER += \
+    -e 's;[0-9A-Fa-fx]\{8,\};........;g' \
+    -e 's;0x[0-9A-Fa-f]\+;0x?;g'
+
+# this test creates two DLLs and an EXE
+113_btdll.test: NORUN = true
+113_btdll.test: FLAGS += \
+    -bt $1 -shared -D DLL=1 -o a1$(DLLSUF) && $(TCC) \
+    -bt $1 -shared -D DLL=2 -o a2$(DLLSUF) && $(TCC) \
+    -bt a1$(DLLSUF) a2$(DLLSUF) -Wl,-rpath=.
+
 # Filter source directory in warnings/errors (out-of-tree builds)
-FILTER = 2>&1 | sed 's,$(SRC)/,,g'
-# Filter some always-warning
-ifeq (-$(findstring arm,$(ARCH))-,-arm-)
-FILTER += 2>&1 | grep -v 'warning: soft float ABI currently not supported'
-endif
+FILTER = 2>&1 | sed -e 's,$(SRC)/,,g'
 
 all test tests2.all: $(filter-out $(SKIP),$(TESTS)) ;
 
 %.test: %.c %.expect
 	@echo Test: $*...
-	@$(if $(NORUN),$(T1),$(T2)) $(if $(NODIFF),,$(T3))
+	@$(call T1,$<) $(T3)
 
-T1 = $(TCC) $(FLAGS) $< -o a.exe && ./a.exe $(ARGS)
-T2 = $(TCC) $(FLAGS) -run $< $(ARGS)
+T1 = $(TCC) $(FLAGS) $(T2) $(ARGS)
+T2 = $(if $(NORUN),$1 -o a.exe && ./a.exe,-run $1)
 T3 = $(FILTER) >$*.output 2>&1 || true \
      && diff -Nbu $(filter %.expect,$^) $*.output \
      && rm -f $*.output $(filter $*.expect,$(GEN-ALWAYS))
@@ -85,7 +104,7 @@ tests2.%+:
 
 # just run tcc to see the output, e.g. "make tests2.37-"
 tests2.%-:
-	@$(MAKE) $(call F1,$*) NODIFF=true --no-print-directory
+	@$(MAKE) $(call F1,$*) T3= --no-print-directory
 
 # run single test, e.g. "make tests2.37"
 tests2.%:
@@ -101,9 +120,9 @@ F2 = $1 UPDATE="$(patsubst %.test,%.expect,$1)"
 	@rm -f *.exe *.obj *.pdb
 
 # using TCC for .expect if -dt in FLAGS
-GEN = $(if $(filter -dt,$(FLAGS)),$(GEN-TCC),$(GEN-CC))
+GEN = $(if $(filter -dt -bt -b,$(FLAGS)),$(GEN-TCC),$(GEN-CC))
 GEN-CC = $(CC) -w -std=gnu99 $(FLAGS) $1 -o a.exe && ./a.exe $(ARGS)
-GEN-TCC = $(TCC) $(FLAGS) -run $1 $(ARGS)
+GEN-TCC = $(T1)
 GEN-MSC = $(MS-CC) $1 && ./$(basename $@).exe
 MS-CC = cl
 
@@ -114,5 +133,5 @@ MS-CC = cl
 $(sort $(GEN-ALWAYS) $(UPDATE)) : force
 force:
 
-clean:
-	rm -f fred.txt *.output a.exe $(GEN-ALWAYS)
+clean tests2.clean :
+	rm -f fred.txt *.output a.exe *.dll *.so *.def $(GEN-ALWAYS)

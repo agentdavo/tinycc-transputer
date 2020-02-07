@@ -50,15 +50,12 @@ int test4(void)
     int i, sum = 0;
     int *tab4;
 
-    fprintf(stderr, "%s start\n", __FUNCTION__);
-
     tab4 = malloc(20 * sizeof(int));
     for(i=0;i<20;i++) {
         sum += tab4[i];
     }
     free(tab4);
 
-    fprintf(stderr, "%s end\n", __FUNCTION__);
     return sum;
 }
 
@@ -68,20 +65,16 @@ int test5(void)
     int i, sum = 0;
     int *tab4;
 
-    fprintf(stderr, "%s start\n", __FUNCTION__);
-
     tab4 = malloc(20 * sizeof(int));
     for(i=0;i<21;i++) {
         sum += tab4[i];
     }
     free(tab4);
 
-    fprintf(stderr, "%s end\n", __FUNCTION__);
     return sum;
 }
 
 /* error */
-/* XXX: currently: bug */
 int test6(void)
 {
     int i, sum = 0;
@@ -199,16 +192,12 @@ int test16()
     char *demo = "This is only a test.";
     char *p;
 
-    fprintf(stderr, "%s start\n", __FUNCTION__);
-
     p = alloca(16);
     strcpy(p,"12345678901234");
-    printf("alloca: p is %s\n", p);
 
     /* Test alloca embedded in a larger expression */
-    printf("alloca: %s\n", strcpy(alloca(strlen(demo)+1),demo) );
+    printf("alloca : %s : %s\n", p, strcpy(alloca(strlen(demo)+1),demo) );
 
-    fprintf(stderr, "%s end\n", __FUNCTION__);
     return 0;
 }
 
@@ -218,16 +207,12 @@ int test17()
     char *demo = "This is only a test.";
     char *p;
 
-    fprintf(stderr, "%s start\n", __FUNCTION__);
-
     p = alloca(16);
     strcpy(p,"12345678901234");
-    printf("alloca: p is %s\n", p);
 
     /* Test alloca embedded in a larger expression */
-    printf("alloca: %s\n", strcpy(alloca(strlen(demo)),demo) );
+    printf("alloca : %s : %s\n", p, strcpy(alloca(strlen(demo)),demo) );
 
-    fprintf(stderr, "%s end\n", __FUNCTION__);
     return 0;
 }
 
@@ -248,14 +233,24 @@ int (*table_test[])(void) = {
     test14,
     test15,
     test16,
-    test17,
+    test17
 };
 
 int main(int argc, char **argv)
 {
+    int i;
+    char *cp;
     int index;
     int (*ftest)(void);
     int index_max = sizeof(table_test)/sizeof(table_test[0]);
+
+    /* check bounds checking main arg */
+    for (i = 0; i < argc; i++) {
+        cp = argv[i];
+        while (*cp) {
+            cp++;
+        }
+    }
 
     if (argc < 2) {
         printf(

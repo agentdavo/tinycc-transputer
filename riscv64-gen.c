@@ -13,9 +13,11 @@
 #define RC_F(x) (1 << (10 + (x))) // x = 0..7
 
 #define RC_IRET (RC_R(0)) // int return register class
+#define RC_IRE2 (RC_R(1)) // int 2nd return register class
 #define RC_FRET (RC_F(0)) // float return register class
 
 #define REG_IRET (TREG_R(0)) // int return register number
+#define REG_IRE2 (TREG_R(1)) // int 2nd return register number
 #define REG_FRET (TREG_F(0)) // float return register number
 
 #define PTR_SIZE 8
@@ -28,6 +30,7 @@
 #define CHAR_IS_UNSIGNED
 
 #else
+#define USING_GLOBALS
 #include "tcc.h"
 #include <assert.h>
 
@@ -566,7 +569,7 @@ ST_FUNC void gfunc_call(int nb_args)
                 test_lvalue();
                 vpushv(vtop);
             }
-            vtop->type.t = loadt;
+            vtop->type.t = loadt | (vtop->type.t & VT_UNSIGNED);
             gv(r < 8 ? RC_R(r) : RC_F(r - 8));
             vtop->type = origtype;
 
@@ -585,7 +588,7 @@ ST_FUNC void gfunc_call(int nb_args)
                     loadt = (ii >> 16) & VT_BTYPE;
                 }
                 save_reg_upstack(r2, 1);
-                vtop->type.t = loadt;
+                vtop->type.t = loadt | (vtop->type.t & VT_UNSIGNED);
                 load(r2, vtop);
                 assert(r2 < VT_CONST);
                 vtop--;
@@ -614,8 +617,9 @@ ST_FUNC void gfunc_call(int nb_args)
 
 static int func_sub_sp_offset, num_va_regs, func_va_list_ofs;
 
-ST_FUNC void gfunc_prolog(CType *func_type)
+ST_FUNC void gfunc_prolog(Sym *func_sym)
 {
+    CType *func_type = &func_sym->type;
     int i, addr, align, size;
     int param_addr = 0;
     int areg[2];
@@ -677,7 +681,7 @@ ST_FUNC void gfunc_prolog(CType *func_type)
             }
         }
         sym_push(sym->v & ~SYM_FIELD, &sym->type,
-                 (byref ? VT_LLOCAL : VT_LOCAL) | lvalue_type(sym->type.t),
+                 (byref ? VT_LLOCAL : VT_LOCAL) | VT_LVAL,
                  param_addr);
     }
     func_va_list_ofs = addr;
@@ -742,8 +746,8 @@ ST_FUNC void gfunc_epilog(void)
     EI(0x03, 3, 8, 2, d - 16 - num_va_regs * 8); // ld s0, v-16(sp)
     EI(0x13, 0, 2, 2, d);      // addi sp, sp, v
     EI(0x67, 0, 0, 1, 0);      // jalr x0, 0(x1), aka ret
+    large_ofs_ind = ind;
     if (v >= (1 << 11)) {
-        large_ofs_ind = ind;
         EI(0x13, 0, 8, 2, d - num_va_regs * 8);      // addi s0, sp, d
         o(0x37 | (5 << 7) | ((0x800 + (v-16)) & 0xfffff000)); //lui t0, upper(v)
         EI(0x13, 0, 5, 5, (v-16) << 20 >> 20); // addi t0, t0, lo(v)

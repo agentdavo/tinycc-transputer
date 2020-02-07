@@ -151,6 +151,10 @@ int ga = 0.42 { 2 };
 struct S { int a, b; };
 struct T { struct S x; };
 struct T gt = { 42 a: 1, 43 };
+#elif defined test_invalid_4
+enum E {
+    x = 1 / 0
+};
 #elif defined test_conflicting_types
 int i;
 void foo(void) {
@@ -216,14 +220,15 @@ int x[3];
  || defined test_func_2 \
  || defined test_func_3 \
  || defined test_func_4 \
- || defined test_func_5
+ || defined test_func_5 \
+ || defined test_func_6
 #if defined test_func_1
 int hello(int);
 #elif defined test_func_4
 static int hello(int);
 #endif
 int main () {
-#if defined test_func_5
+#if defined test_func_6
     static
 #endif
     int hello(int);
@@ -272,6 +277,28 @@ int main ()
 }
 int xxx[1] = {1};
 int bar() { P(3, xxx[0]); return 0; }
+
+#elif defined test_var_4
+struct yyy { int y; };
+struct zzz;
+void f1() {
+    extern char *x;
+    extern char **xx;
+    extern struct yyy y;
+    extern struct yyy *yy;
+    extern struct zzz z;
+    extern struct zzz *zz;
+}
+void f2() {
+    extern char *x;
+    extern char **xx;
+    extern struct yyy y;
+    extern struct yyy *yy;
+    extern struct zzz z;
+    extern struct zzz *zz;
+}
+struct yyy y, *yy;
+struct zzz { int z; } z, *zz;
 
 /******************************************************************/
 #endif
