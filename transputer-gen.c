@@ -57,13 +57,13 @@ ST_DATA const int reg_classes[NB_REGS] = {
 
 enum TPOPCodes {
 #define OP(name, str, n) TP_OP_ ## name = n,
-#include "tranpsuter-opcodes.h"
+#include "transputer-opcodes.h"
 #undef OP
 };
 
 char *tp_opcodes_str[] = {
 #define OP(name, str, n) [n] = str,
-#include "tranpsuter-opcodes.h"
+#include "transputer-opcodes.h"
 #undef OP
 };
 
