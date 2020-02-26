@@ -3,7 +3,7 @@
  * 
  
 /* number of available registers */
-#define NB_REGS 7
+#define NB_REGS 8
 
 #define DEFAULT_ALIGN 1
 /* maximum alignment (for aligned attribute support) */
@@ -17,14 +17,15 @@
 #define RC_IST1     0x0004    /* top int stack - 1     */
 #define RC_IST2     0x0008    /* top int stack - 2     */
 #define RC_WREG	    0x0010    /* workspace register    */
+#define RC_IPREG    0x0020
 
-#define RC_FST      0x0020    /* any float stack entry */
-#define RC_FST0     0x0040    /* top of float stack    */
-#define RC_FST1     0x0080    /* top float stack - 1   */
-#define RC_FST2     0x0100    /* top float stack - 2   */
+#define RC_FST      0x0040    /* any float stack entry */
+#define RC_FST0     0x0080    /* top of float stack    */
+#define RC_FST1     0x0100    /* top float stack - 1   */
+#define RC_FST2     0x0200    /* top float stack - 2   */
 
-#define RC_INT      0x0200      /* generic integer register */
-#define RC_FLOAT    0x0400      /* generic float register   */
+#define RC_INT      0x0400      /* generic integer register */
+#define RC_FLOAT    0x0800      /* generic float register   */
 
 #define REG_IRET     RC_IST0  /* single word int return register */
 #define REG_LRET     RC_IST1  /* second word int return register for long long */
@@ -43,13 +44,14 @@ if !((v1 + l1 >= v2 && v1 <= v2) || (v2 + l2 >= v1 && v2 <= v2))
 
 /* pretty names for the registers */
 enum {
-    REG_IST0 = 0,
-    REG_IST1,
-    REG_IST2,
+	REG_IST0 = 0,
+	REG_IST1,
+	REG_IST2,
 	REG_WREG,
+	REG_IPTR,
 	REG_FST0,
-    REG_FST1,
-    REG_FST2,
+	REG_FST1,
+	REG_FST2,
 };
 
 
@@ -58,6 +60,7 @@ ST_DATA const int reg_classes[NB_REGS] = {
     /* IST1 */ RC_IST | RC_IST1,
     /* IST2 */ RC_IST | RC_IST2,
 	/* WREG */ RC_IST | RC_WREG,
+	/* IPTR */ RC_IST | RC_IPTR,
 	/* FST0 */ RC_FST | RC_FST0,
     /* FST1 */ RC_FST | RC_FST1,
     /* FST2 */ RC_FST | RC_FST2,
@@ -68,6 +71,7 @@ static char *reg_names[] =  {
     "Breg",
     "Creg",
     "Wreg",
+    "Iptr",
     "FAreg",
     "FBreg",
     "FCreg"
@@ -197,10 +201,10 @@ ST_FUNC void load(int r, SValue *sv)
 				Transputer_LDPL(v);		// LDPL n = *v into Areg address offset relative to Wptreg
 			} else if (size == 4) {
 				Transputer_LDPL(v);
-				Transputer_FPLDNLSN(v);	// load 64 bit non-local offset from Areg load previously into FPareg
+				Transputer_FPLDNLSN();	// load 64 bit non-local offset from Areg load previously into FPareg
 			} else if (size == 8) {
 				Transputer_LDPL(v);
-				Transputer_FPLDNLDB(v);
+				Transputer_FPLDNLDB();
 			}
 			// We only need Areg and Breg
 			if r == REG_IST1
@@ -211,69 +215,135 @@ ST_FUNC void load(int r, SValue *sv)
 	    		greloc(cur_text_section, sv->sym, ind, R_C60HI16);	// rem the inst need to be patched
 	    		greloc(cur_text_section, sv->sym, ind + 4, R_C60HI16);
 
-	    		Transputer_LDC(fc);
-
 	    		if (size == 1 || size == 2) {
-		   		Transputer_LDLNP(0);	
+		   		Transputer_LDLNP(fc);	
 	    		} else if (size == 4) {
-				Transputer_LDLNP(0);
-				Transputer_FPLDNLSN(v);
+				Transputer_LDLNP(fc);
+				Transputer_FPLDNLSN();
 	    		} else if (size == 8) {
-				Transputer_LDLNP(0);
-				Transputer_FPLDNLDB(v);
+				Transputer_LDLNP(fc);
+				Transputer_FPLDNLDB();
 	    		}
 
 	    		gen_fill_nops(4);		// NOP 4
 	    		return;
 		}
 	} else {
-        if (v == VT_CONST) {
+		if (v == VT_CONST) {
 			if (fr & VT_SYM) {
 				greloc(cur_text_section, sv->sym, ind, R_C60LO16);	// rem the inst need to be patched
 				greloc(cur_text_section, sv->sym, ind + 4, R_C60HI16);
 			}
 			Transputer_LDC(fc);	//fc contant to load into Areg
-            //printf("ldi %s, %d\n", reg_names[r], fc);
-        } else if (v == VT_LOCAL) {
-		Transputer_LDL(fc + 8);
-		Transputer_ADD();
-        } else if (v == VT_CMP) {
-		
-        } else if (v == VT_JMP || v == VT_JMPI) {
-        } else if (v != r) {
-            printf("mov %s, %s\n", reg_names[r], reg_names[v]);
-        }
-    }
-	
+		} else if (v == VT_LOCAL) {
+			Transputer_LDL(fc);
+		} else if (v == VT_CMP) {
+			Transputer_LDL(r);
+			Transputer_REV();
+		} else if (v == VT_JMP || v == VT_JMPI) {
+			t = v & 1;
+			Transputer_LDC(ind+1);
+			gsym(fc);
+		} else if (v != r) {
+		   	printf("mov %s, %s\n", reg_names[r], reg_names[v]);
+			Transputer_LDL(v);
+		}
+	}	
 }
 
 
 /* store register 'r' in lvalue 'v' */
 ST_FUNC void store(int r, SValue * v)
 {
-    printf("store(r=%d, v=%p)\n", r, v);
+	printf("store(r=%d, v=%p)\n", r, v);
 
-    int fr, bt, ft, fc;
+	int fr, bt, ft, fc;
 
-    ft = v->type.t;
-    fc = v->c.ul;
-    fr = v->r & VT_VALMASK;
-    bt = ft & VT_BTYPE;
+	ft = v->type.t;
+	fc = v->c.ul;
+	fr = v->r & VT_VALMASK;
+	bt = ft & VT_BTYPE;
 
-    if (bt == VT_FLOAT) {
-    } else if (bt == VT_DOUBLE) {
-    } else if (bt == VT_LDOUBLE) {
-    } else {
-        if (bt == VT_SHORT) {
-        } if (bt == VT_BYTE || bt == VT_BOOL) {
-        } else {
-        }
-    }
-    if (fr == VT_CONST || fr == VT_LOCAL || (v->r & VT_LVAL)) {
-        printf("std Y%+d, %s\n", fc, reg_names[r]);
-    } else if (fr != r) {
-        printf("mov %s, %s\n", reg_names[fr], reg_names[r]);
-    }
+	if (bt == VT_FLOAT)
+		size = 4;
+	else if (bt == VT_DOUBLE)
+		size = 8;
+	else if (bt == VT_LDOUBLE)
+		tcc_error("long double not supported");
+	else if (bt == VT_SHORT)
+		size = 2;	
+	else if (bt == VT_BYTE || bt == VT_BOOL)
+		size = 1;
+	else
+		size = 4;
+
+	if ((v->r & VT_VALMASK) == VT_CONST) {
+	    /* constant memory reference */
+
+		if (v->r & VT_SYM) {
+			greloc(cur_text_section, v->sym, ind, R_C60LO16);	// rem the inst need to be patched
+			greloc(cur_text_section, v->sym, ind + 4, R_C60HI16);
+		}
+		
+		Transputer_LDC(fc);	// Load constant into Areg
+
+		if (size == 1 || size == 2)
+			Transputer_STL(r);	// Store content into relative Wptr address in Areg
+		else if (size == 4)
+			Transputer_FPSTNLSN(r);
+		else
+			Transputer_FPSTNLDB(r);
+
+	} else if ((v->r & VT_VALMASK) == VT_LOCAL) {
+	    // check case of storing to passed argument that
+	    // tcc thinks is on the stack but for Transputer is
+	    // passed as a reg.  However it may have been
+	    // saved to the stack, if that reg was required
+	    // for a call to a child function
+
+		if (fc > 0)		// argument ??
+	    	{
+			// walk through sizes and figure which param
+
+			int stack_pos = 8;
+
+			for (t = 0; t < NoCallArgsPassedOnStack; t++) {
+		    		if (fc == stack_pos)
+					break;
+
+		    	stack_pos += TranslateStackToReg[t];
+			}
+
+			// param has been pushed on stack, get it like a local var
+			fc = ParamLocOnStack[t] - 8;
+	    	}
+
+		if (size == 8)
+			element = 4;
+	    	else
+			element = size;
+
+		// divide offset in bytes to create word index
+		Transputer_LDC((fc / element) + 8 / element);
+
+		if (size == 1 || size == 2)
+			Transputer_STNL(r);
+		else if (size == 4)
+			Transputer_STNL(r);
+			Transputer_FPSTNLSN();
+		else
+			Transputer_STNL(r);
+			Transputer_FPSTNLDB();
+	} else {
+		if (size == 1 || size == 2)
+			Transputer_STNL(fr);
+		else if (size == 4)
+			Transputer_STNL(fr);
+			Transputer_FPSTNLSN();
+		else
+			Transputer_STNL(fr);
+			Transputer_FPSTNLDB();
+	}
 }
 
 /* Need remapping of registers?
@@ -300,15 +370,34 @@ int Transputer_map_regn(int r)
 }
 */
 
+/* Return the number of registers needed to return the struct, or 0 if
+   returning via struct pointer. Same as i386-gen. */
 ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret,
                        int *ret_align, int *regsize)
 {
-    /* generic code can only deal with structs of pow(2) sizes
-       (it always deals with whole registers), so go through our own
-       code.  */
-    tcc_error("implement me: %s", __FUNCTION__);
+#ifdef TCC_TARGET_PE
+	int size, align;
+	*ret_align = DEFAULT_ALIGN;	// Never have to re-align return values for Transputer
+	*regsize = 4;
+	size = type_size(vt, &align);
+	    
+	if (size > 8 || (size & (size - 1)))
+		return 0;
+	if (size == 8)
+		ret->t = VT_LLONG;
+	else if (size == 4)
+		ret->t = VT_INT;
+	else if (size == 2)
+		ret->t = VT_SHORT;
+	else
+		ret->t = VT_BYTE;
+		ret->ref = NULL;
+		return 1;
+#else
+	*ret_align = 1;
+	return 0;
+#endif
 }
-
 
 /* 'is_jmp' is '1' if it is a jump */
 static void gcall_or_jmp(int is_jmp)
@@ -446,13 +535,21 @@ ST_FUNC void gen_fill_nops(int bytes)
 ST_FUNC int gjmp(int t)
 {
     printf("gjmp(t=%d)\n", t);
+	
 }
 
 
 /* generate a jump to a fixed address */
 ST_FUNC void gjmp_addr(int a)
 {
-    printf("gjmp_addr(a=%d)\n", a);
+	printf("gjmp_addr(a=%d)\n", a);
+
+	int r;
+	r = a - ind - 2;	// a-L relative to org address (absolute address) - 2 bytes for instruction
+	g((0x20 << 12) 		| \
+	  (prefix(r) << 8) 	| \
+	  (0x0F) << 4 		| \ 
+	  (0x0F & r));
 }
 
 int prefix(int v)
@@ -477,24 +574,29 @@ void Transputer_MOVE(int v1, int v2, int l1, int l2)
 	Transputer_LDPL(v1);
 	Transputer_LDPL(v2);
 	Transputer_LDC(l1);
-	gen_l16(0x24FA);
+	gen_le16(0x24FA);
 	// out_op(TP_OP_MOVE);
 }
 
-void Transputer_GAJW()
+void Transputer_GAJW() 
 {
-	gen_l16(0x23FC);
+	gen_le16(0x23FC);
 }
 
-void Transputer_AJW(int v)
+void Transputer_AJW(int v) 
 {
 	g(0x20 | prefix(v));
 	g(0xB | (0x0F & v));
 }
 
+void Transputer_NOP() 
+{
+	gen_le16(0x63F0);
+}
+
 void Transputer_LDPI()
 {
-	gen_l16(0x21FB);
+	gen_le16(0x21FB);
 }
 
 void Transputer_REV()
@@ -510,7 +612,7 @@ void Transputer_LB()
 
 void Transputer_SUM()
 {
-	gen_l16(0x25F2);
+	gen_le16(0x25F2);
 	// out_op(TP_OP_SUM);
 }
 
@@ -528,82 +630,82 @@ void Transputer_PROD()
 
 void Transputer_OR()
 {
-	gen_l16(0x24FB);
+	gen_le16(0x24FB);
 	// out_op(TP_OP_OR);
 }
 
 void Transputer_DIV()
 {
-	gen_l16(0x22FC);
+	gen_le16(0x22FC);
 	// out_op(TP_OP_DIV);
 }
 
 void Transputer_AND()
 {
-	gen_l16(0x24F6);
+	gen_le16(0x24F6);
 	// out_op(TP_OP_AND);
 }
 
 void Transputer_LDPI()
 {
-	gen_l16(0x21FB);
+	gen_le16(0x21FB);
 	// out_op(TP_OP_LDPI);
 }
 
 void Transputer_SHR()
 {
-	gen_l16(0x24F0);
+	gen_le16(0x24F0);
 	// out_op(TP_OP_SHR);
 }
 
 void Transputer_LADD()
 {
-	gen_l16(0x21F6);
+	gen_le16(0x21F6);
 	// out_op(TP_OP_LADD);
 }
 
 void Transputer_LSUB()
 {
-	gen_l16(0x23F8);
+	gen_le16(0x23F8);
 	// out_op(TP_OP_LSUB);
 }
 
 void Transputer_LMUL()
 {
-	gen_l16(0x23F1);
+	gen_le16(0x23F1);
 	// out_op(TP_OP_LMUL);
 }
 
 #if defined Transputer9000
 void Transputer_XBWORD()
 {
-	gen_l16(0x2BF8);
+	gen_le16(0x2BF8);
 }
 
 #endif
 
 void Transputer_XWORD() 
 {
-	gen_l16(0x23FA);
+	gen_le16(0x23FA);
 	// out_op(TP_OP_XWORD);
 }
 
 void Transputer_LDIV()
 {
-	gen_l16(0x21FA);
+	gen_le16(0x21FA);
 	// out_op(TP_OP_LDIV);
 }
 
 
 void Transputer_SHL()
 {
-	gen_l16(0x24F1);
+	gen_le16(0x24F1);
 	// out_op(TP_OP_SHL);
 }
 
 void Transputer_FPLDNLSN(int v)
 {
-	gen_l16(0x28FE);
+	gen_le16(0x28FE);
 	// out_op(TP_OP_FPLDNLSN);
 }
 
@@ -619,7 +721,7 @@ void Transputer_STL(int v)
 
 void Transputer_DUP() 
 {
-	g(0x25FA);
+	gen_le16(0x25FA);
 	// out_op(TP_OP_DUP);
 }
 
@@ -689,59 +791,59 @@ void Transputer_SUB()
 
 void Transputer_FPADD() 
 {
-	g(0x28F7);
+	gen_le16(0x28F7);
 }
 
 void Transputer_FPSUB() 
 {
-	g(0x28F9);
+	gen_le16(0x28F9);
 }
 
 void Transputer_FPMUL() 
 {
-	g(0x28FB);
+	gen_le16(0x28FB);
 }
 
 void Transputer_FPDIV() 
 {
-	g(0x28FC);
+	gen_le16(0x28FC);
 }
 
 void Transputer_FPEXPDEC32() 
 {
-	g(0x2DF9);
+	gen_le16(0x2DF9);
 }
 
 void Transputer_FPEXPINC32() 
 {
-	g(0x2DFA);
+	gen_le16(0x2DFA);
 }
 
 void Transputer_FPRZ()
 {
-	g(0x2DF6);
+	gen_le16(0x2DF6);
 }
 
 void Transputer_FPRN() 
 {
-	g(0x2DF0);
+	gen_le16(0x2DF0);
 }
 
 void Transputer_FPI32TOR64()
 {
-	g(0x29F8);
+	gen_le16(0x29F8);
 	// out_op(TP_OP_FPI32TOR64);
 }
 
 void Transputer_FPB32TOR64()
 {
-	g(0x29FA);
+	gen_le16(0x29FA);
 	// out_op(TP_OP_FPB32TOR64);
 }
 
 void Transputer_FPI32TOR32()
 {
-	g(0x29F6);
+	gen_le16(0x29F6);
 	// out_op(TP_OP_FPI32TOR32);
 }
 
@@ -825,7 +927,7 @@ void gen_opi(int op)
 			    	/* constant case */
 			    	//c = vtop->c.i & 0x1f;
 			    	//Transputer_LDC(c);
-				gen_l16((0x02 << 12) | \
+				gen_le16((0x02 << 12) | \
 					(prefix(opc) << 8) \
 					(0xF0 | (0x0F & opc)));
 			} else {
@@ -833,7 +935,7 @@ void gen_opi(int op)
 					opc += -9;
 				}
 				gv(REG_IST1);
-			    	gen_l16((0x02 << 12) | \
+			    	gen_le16((0x02 << 12) | \
 					(prefix(opc) << 8) \
 					(0xF0 | (0x0F & opc)));
 			}
@@ -849,7 +951,7 @@ void gen_opi(int op)
 					Transputer_ADC(c);
 				} else {
 					gv(REG_IST1);
-					gen_l16((0x02 << 12) | \
+					gen_le16((0x02 << 12) | \
 						(prefix(opc) << 8) \
 						(0xF0 | (0x0F & opc)));
 				}
@@ -867,7 +969,7 @@ void gen_opi(int op)
 				if (op == '+' || op == '-') {
 					g(0xF0 | opc);
 				} else {
-					gen_l16((0x02 << 12) | \
+					gen_le16((0x02 << 12) | \
 						(prefix(opc) << 8) \
 						(0xF0 | (0x0F & opc)));
 				}
@@ -1084,6 +1186,20 @@ ST_FUNC void g(int c)
         section_realloc(cur_text_section, ind1);
     cur_text_section->data[ind] = c;
     ind = ind1;
+}
+
+ST_FUNC void gen_le16(int v)
+{
+    g(v);
+    g(v >> 8);
+}
+
+ST_FUNC void gen_le32(int c)
+{
+    g(c);
+    g(c >> 8);
+    g(c >> 16);
+    g(c >> 24);
 }
 
 
