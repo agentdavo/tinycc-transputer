@@ -1616,6 +1616,10 @@ ST_FUNC void gen_addrpc32(int r, Sym *sym, int c);
 ST_FUNC void gen_cvt_csti(int t);
 #endif
 
+/* ------------ Transputer-gen.c ------------ */
+#ifdef TCC_TARGET_TRANSPUTER
+#endif
+
 #ifdef CONFIG_TCC_BCHECK
 ST_FUNC void gen_bounded_ptr_add(void);
 ST_FUNC void gen_bounded_ptr_deref(void);

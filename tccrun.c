@@ -653,6 +653,9 @@ static void rt_getcontext(ucontext_t *uc, rt_context *rc)
     rc->ip = uc->uc_mcontext.pc;
     rc->fp = uc->uc_mcontext.regs[29];
 #endif
+# if defined (__TRANSPUTER__)
+	// TODO: Context switching registers for Transputer arch Wptreg, Iptreg
+# endif 
 }
 
 /* ------------------------------------------------------------- */

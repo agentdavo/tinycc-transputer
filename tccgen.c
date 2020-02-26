@@ -478,6 +478,9 @@ ST_FUNC int tccgen_compile(TCCState *s1)
 #ifdef TCC_TARGET_ARM
     arm_init(s1);
 #endif
+#ifdef TCC_TARGET_TRANSPUTER
+	transputer_init(s1);
+#endif
 #ifdef INC_DEBUG
     printf("%s: **** new file\n", file->filename);
 #endif

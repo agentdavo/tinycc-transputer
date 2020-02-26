@@ -685,7 +685,9 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
        Other threads need to wait until we're done.
 
        Alternatively we could use thread local storage for those global
-       variables, which may or may not have advantages */
+       variables, which may or may not have advantages 
+	   TODO: Transputer Support
+	   */
 
     WAIT_SEM();
     tcc_state = s1;
@@ -846,6 +848,9 @@ LIBTCCAPI TCCState *tcc_new(void)
     tcc_define_symbol(s, "__riscv_fsqrt", NULL);
     tcc_define_symbol(s, "__riscv_float_abi_double", NULL);
 // #elif defined TCC_TARGET_TRANSPUTER (include Transputer target defines)
+#endif
+#if defined(TCC_TARGET_TRANSPUTER)
+	tcc_define_symbol(s, "__TRANSPUTER__", NULL)
 #endif
 
 #ifdef TCC_TARGET_PE
