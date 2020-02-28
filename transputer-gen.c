@@ -119,17 +119,47 @@ ST_FUNC void transputer_init(struct TCCState *s)
 
 }
 
+/* 
+ *	All transputers address bytes
+ * 	from org 0x800000 (roles over after all 32 bit set) 
+ * 	to 0x7FFFFF where 0x000000 is the middle
+ */
+
 /* output a symbol and patch all calls to it */
-ST_FUNC void gsym_addr(int t, int a)
+ST_FUNC void gsym_addr(int t_, int a_)
 {
-    printf("gsym_addr(t=%d, a=%d)\n", t, a);
+   	printf("gsym_addr(t=%d, a=%d)\n", t, a);
+
+	uint32_t t = t_;
+    	uint32_t a = a_;
+
+   	while (t) {
+		unsigned char *ptr = cur_text_section->data + t;
+		uint32_t next = read32le(ptr);
+		uint32_t r = a - t, imm;
+
+		if !((a - t + 0x800000 < 0x100000000) || (a-t < 0x7FFFFF))
+            		tcc_error("branch out of range");
+		write32le(ptr, a - t == 4 ? 0x63F0 : ((0x02 << 12) | \
+			 (prefix(imm) << 8) | 0xF0 | (imm & 0x0F))); // nop || j imm
+		t = next;
+    	}
 }
 
-
-ST_FUNC void gsym(int t)
+static int oad(int c, int s)
 {
-    printf("gsym(t=%d)\n", t);
+	int t;
+	if (nocode_wanted)
+		return s;
+	t = ind;
+  	g((0x02 << 12) | \
+	  (prefix(s)) << 8 | \
+	  (c | (v & 0x0F)));
+
+	return t;
 }
+
+#define gjmp2(instr,lbl) oad(instr,lbl)
 
 /* load 'r' from value 'sv' */
 ST_FUNC void load(int r, SValue *sv)
@@ -151,13 +181,26 @@ ST_FUNC void load(int r, SValue *sv)
     	printf("v=%x\n", v);
 	
     	if (fr & VT_LVAL) {
-        	if (v == VT_LLOCAL) {
-            	v1.type.t = VT_INT;
-            	v1.r = VT_LOCAL | VT_LVAL;
-            	v1.c.i = fc;
-            	load(fr, &v1);
-		fr = r;
-        	} else if ((ft & VT_BTYPE) == VT_FLOAT) {
+		if ((ft & VT_BTYPE) == VT_STRUCT) {
+	    		int align;
+	    		switch (type_size(&sv->type, &align)) {
+				case 1: ft = VT_BYTE; break;
+				case 2: ft = VT_SHORT; break;
+				case 4: ft = VT_INT; break;
+				case 8: ft = VT_LLONG; break;
+				default:
+		    			tcc_error("invalid aggregate type for register load");
+		    			break;
+	    		}
+		} else if (v == VT_LLOCAL) {
+            		v1.type.t = VT_INT;
+            		v1.r = VT_LOCAL | VT_LVAL;
+            		v1.c.i = fc;
+            		load(fr, &v1);
+			fr = r;
+        	} else if ((ft & VT_BTYPE) == VT_FUNC) {
+			size = PTR_SIZE;
+		} else if ((ft & VT_BTYPE) == VT_FLOAT) {
 			size = 4;
         	} else if ((ft & VT_BTYPE) == VT_DOUBLE) {
 			size = 8;
@@ -165,7 +208,6 @@ ST_FUNC void load(int r, SValue *sv)
 			tcc_error("long double not supported");
         	} else if ((ft & VT_TYPE) == VT_BYTE) {
 			size = 1;
-			out_op(TP_OP_LDL)
         	} else if ((ft & VT_TYPE) == (VT_BYTE | VT_UNSIGNED)) {
 			size = 1;
 			Unsigned = TRUE;
@@ -198,12 +240,12 @@ ST_FUNC void load(int r, SValue *sv)
 		if ((fr & VT_VALMASK) < VT_CONST)	// check for pure indirect
 		{
 			if (size == 1 || size == 2) {
-				Transputer_LDPL(v);		// LDPL n = *v into Areg address offset relative to Wptreg
+				Transputer_LDLP(v);		// LDPL n = *v into Areg address offset relative to Wptreg
 			} else if (size == 4) {
-				Transputer_LDPL(v);
+				Transputer_LDLP(v);
 				Transputer_FPLDNLSN();	// load 64 bit non-local offset from Areg load previously into FPareg
 			} else if (size == 8) {
-				Transputer_LDPL(v);
+				Transputer_LDLP(v);
 				Transputer_FPLDNLDB();
 			}
 			// We only need Areg and Breg
@@ -212,8 +254,7 @@ ST_FUNC void load(int r, SValue *sv)
 			gen_fill_nops(4);
 			return;
     		} else if (fr & VT_SYM) {
-	    		greloc(cur_text_section, sv->sym, ind, R_C60HI16);	// rem the inst need to be patched
-	    		greloc(cur_text_section, sv->sym, ind + 4, R_C60HI16);
+	    		greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_IPREL32);	// rem the inst need to be patched
 
 	    		if (size == 1 || size == 2) {
 		   		Transputer_LDLNP(fc);	
@@ -230,10 +271,9 @@ ST_FUNC void load(int r, SValue *sv)
 		}
 	} else {
 		if (v == VT_CONST) {
-			if (fr & VT_SYM) {
-				greloc(cur_text_section, sv->sym, ind, R_C60LO16);	// rem the inst need to be patched
-				greloc(cur_text_section, sv->sym, ind + 4, R_C60HI16);
-			}
+			if (fr & VT_SYM)
+				greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_IPREL32);
+	
 			Transputer_LDC(fc);	//fc contant to load into Areg
 		} else if (v == VT_LOCAL) {
 			Transputer_LDL(fc);
@@ -241,9 +281,11 @@ ST_FUNC void load(int r, SValue *sv)
 			Transputer_LDL(r);
 			Transputer_REV();
 		} else if (v == VT_JMP || v == VT_JMPI) {
-			t = v & 1;
-			Transputer_LDC(ind+1);
+			t = v & 1;		// didn't found any description of near or far jumps
+			Transputer_LDC(t);
+			gjmp_addr(ind + 4);
 			gsym(fc);
+			Transputer_LDC(t ^ 1);
 		} else if (v != r) {
 		   	printf("mov %s, %s\n", reg_names[r], reg_names[v]);
 			Transputer_LDL(v);
@@ -278,23 +320,22 @@ ST_FUNC void store(int r, SValue * v)
 		size = 4;
 
 	if ((v->r & VT_VALMASK) == VT_CONST) {
-	    /* constant memory reference */
+	    	/* constant memory reference */
 
-		if (v->r & VT_SYM) {
-			greloc(cur_text_section, v->sym, ind, R_C60LO16);	// rem the inst need to be patched
-			greloc(cur_text_section, v->sym, ind + 4, R_C60HI16);
-		}
+		if (v->r & VT_SYM)
+			greloc(cur_text_section, v->sym, ind, R_TRANSPUTER_IPREL32);
 		
 		Transputer_LDC(fc);	// Load constant into Areg
 
 		if (size == 1 || size == 2)
 			Transputer_STL(r);	// Store content into relative Wptr address in Areg
 		else if (size == 4)
-			Transputer_FPSTNLSN(r);
+			Transputer_FPSTNLSN();
 		else
-			Transputer_FPSTNLDB(r);
+			Transputer_FPSTNLDB();
 
 	} else if ((v->r & VT_VALMASK) == VT_LOCAL) {
+
 	    // check case of storing to passed argument that
 	    // tcc thinks is on the stack but for Transputer is
 	    // passed as a reg.  However it may have been
@@ -404,7 +445,6 @@ static void gcall_or_jmp(int is_jmp)
 {
     printf("gcall_or_jmp(is_jmp=%d)\n", is_jmp);
 }
-
 
 /* generate function call with address in (vtop->t, vtop->c) and free function
    context. Stack entry is popped */
@@ -525,19 +565,96 @@ ST_FUNC void gen_fill_nops(int bytes)
     if ((bytes & 3))
       tcc_error("alignment of code section not multiple of 4");
     while (bytes > 0) {
-	TP_OP_NOP(4);
+	Transputer_NOP(4);
+	//TP_OP_NOP(4);
 	bytes -= 4;
     }
 }
 
 
+// z = memory address of local variable
+// a = long var X
+// b = long var Y 
+void Transputer_LMUL_OP(long int a, long int b, long int z)
+{
+	Transputer_LDC(0);
+
+	Transputer_LDL(a);
+	Transputer_LDL(b);
+	Transputer_LMUL();
+	Transputer_STL(z);
+	
+	Transputer_LDL(a);
+	Transputer_LDL(b + 4);
+	Transputer_LMUL();
+	Transputer_REV();
+	Transputer_STL(z+8);
+	
+	Transputer_LDL(a+4);
+	Transputer_LDL(b);
+	Transputer_LMUL();
+	Transputer_STL(z+4);
+	
+	Transputer_LDL(a+4);
+	Transputer_LDL(b+4);
+	Transputer_LMUL();
+	Transputer_STL(z+12);
+	
+	Transputer_LDC(0);
+	Transputer_REV();
+	Transputer_LDL(z+8);
+	Transputer_LSUM();
+	Transputer_STL(z+8);
+
+	Transputer_LDL(z+12);
+	Transputer_SUM();
+	Transputer_STL(z+12);
+}
+
+void Transputer_LLSHL(long int a, long int s)
+{
+	Transputer_LDL(a);
+	Transputer_LDL(a+4);
+	Transputer_LDL(s);
+	Transputer_LSHL();
+	Transputer_STL(a);
+	Transputer_STL(a+4);
+}
+
+void Transputer_LLSHR(long int a, long int s)
+{
+	Transputer_LDL(a);
+	Transputer_LDL(a+4);
+	Transputer_LDL(s);
+	Transputer_LSHR();
+	Transputer_STL(a);
+	Transputer_STL(a+4);
+}
+
+void Transputer_SLSHL(long int a, long int s)
+{
+	Transputer_LDL(a);
+	Transputer_XDBLE();
+	Transputer_LDL(s);
+	Transputer_LSHL();
+	Transputer_STL(a);
+}
+
+void Transputer_SLSHR(long int a, long int s)
+{
+	Transputer_LDL(a);
+	Transputer_XDBLE();
+	Transputer_LDL(s);
+	Transputer_LSHR();
+	Transputer_STL(a);
+}
+
 /* generate a jump to a label */
 ST_FUNC int gjmp(int t)
 {
-    printf("gjmp(t=%d)\n", t);
-	
+	printf("gjmp(t=%d)\n", t);
+	return gjmp2(0x00, t);
 }
-
 
 /* generate a jump to a fixed address */
 ST_FUNC void gjmp_addr(int a)
@@ -550,6 +667,18 @@ ST_FUNC void gjmp_addr(int a)
 	  (prefix(r) << 8) 	| \
 	  (0x0F) << 4 		| \ 
 	  (0x0F & r));
+}
+
+// op = gt, gtu, eqc, diff
+// t = absoulte address
+ST_FUNC int gjmp_cond(int op, int t)
+{
+	g(0xF0 | op);
+
+	// Areg holds result of operation Areg 
+	
+	t = gjmp2(0x0A, t);	// handle return address and jump to address t
+    	return t;
 }
 
 int prefix(int v)
@@ -571,8 +700,8 @@ void Transputer_MOVE(int v1, int v2, int l1, int l2)
 	ALWAYS_ASSERT((l1 > l2) || BETWEEN(v1,l1,v2,l2) \
 			|| (v1 % ALIGNEMENT || v2 % ALIGNEMENT);
 
-	Transputer_LDPL(v1);
-	Transputer_LDPL(v2);
+	Transputer_LDLP(v1);
+	Transputer_LDLP(v2);
 	Transputer_LDC(l1);
 	gen_le16(0x24FA);
 	// out_op(TP_OP_MOVE);
@@ -676,12 +805,11 @@ void Transputer_LMUL()
 	// out_op(TP_OP_LMUL);
 }
 
-#if defined Transputer9000
+#if TARGET_CPU_DEFAULT == 9000
 void Transputer_XBWORD()
 {
 	gen_le16(0x2BF8);
 }
-
 #endif
 
 void Transputer_XWORD() 
@@ -709,6 +837,31 @@ void Transputer_FPLDNLSN(int v)
 	// out_op(TP_OP_FPLDNLSN);
 }
 
+void Transputer_FPSTNLSN()
+{
+	gen_le16(0x28F8);
+}
+
+void Transputer_FPSTNLDB()
+{
+	gen_le16(0x28F4);
+}
+
+void Transputer_FPLDNLDBI()
+{
+	gen_le16(0x28F2);
+}
+
+void Transputer_FPLDNLSNI()
+{
+	gen_le16(0x28F6);
+}
+
+void Transputer_FPLDNLDB()
+{
+	gen_le16(0x28FA);
+}
+
 /*	Direct Functions 	*/
 
 // v = offset from Wpreg
@@ -717,6 +870,13 @@ void Transputer_STL(int v)
 	g(0x20 | prefix(v));
 	g(0xD0 | 0x0F & v);
 	// out_op(TP_OP_STL);
+}
+
+void Transputer_J(int v)
+{
+	gen_le16((0x02 << 12) | \
+		 (prefix(v) << 8) | \
+		 (0x0F & v));
 }
 
 void Transputer_DUP() 
@@ -762,6 +922,12 @@ void Transputer_LDLP(int v)
 	g(0x20 | prefix(v));
 	g(0x10 | 0x0F & v);
 	//out_op(TP_OP_LDLP);
+}
+
+void Transputer_EQC(int v)
+{
+	g(0x20 | prefix(v));
+	g(0xC0 | 0x0F & v);
 }
 
 void Transputer_LDNLP(int v)
@@ -918,15 +1084,40 @@ void gen_opi(int op)
 			out_op(TP_OP_REM);
 			goto std_op;
 		case TOK_GT:
-			out_op(TP_OP_GT);
+			opc = 0x09;
+			//out_op(TP_OP_GT);
 			goto std_op;
+		case TOK_LT:
+			opc = 0x09;
+			vswap();
+			goto std_op;
+		case TOK_EQ:
+			gv(RC_INT);
+			Transputer_DIFF();
+			Transputer_EQC(0);
+			break;
+		case TOK_NEQ:
+			gv(RC_INT);
+			Transputer_DIFF();
+			break;
+		case TOK_LE:
+			gv(RC_INT);
+			vswap();
+			Transputer_GT();
+			Transputer_EQC(0);
+			break;
+		case TOK_GE:
+			gv(RC_INT);
+			Transputer_LT();
+			Transputer_EQC(0);
+			break;
 		std_shift:
 			ALWAYS_ASSERT(abs(v) < 32767);
 
 			if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
 			    	/* constant case */
-			    	//c = vtop->c.i & 0x1f;
-			    	//Transputer_LDC(c);
+			    	c = vtop->c.i & 0x1f;
+			    	Transputer_LDC(c);
 				gen_le16((0x02 << 12) | \
 					(prefix(opc) << 8) \
 					(0xF0 | (0x0F & opc)));
@@ -965,8 +1156,10 @@ void gen_opi(int op)
 					Transputer_LDIV();
 				else if (op == '*')
 					Transputer_LMUL();
+					// store lower and higher 32 bit in registers
+					// (X_hi 2^32 + X_lo)*(Y_hi 2^32 + Y_lo) 
 			} else {
-				if (op == '+' || op == '-') {
+				if (op == '+' || op == '-' || op == TOK_GT) {
 					g(0xF0 | opc);
 				} else {
 					gen_le16((0x02 << 12) | \
@@ -981,15 +1174,18 @@ void gen_opi(int op)
 	    }
 }
 
+
+
 static int is_zero(int i)
 {
-    if((vtop[i].r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
-      return 0;
-    if (vtop[i].type.t == VT_FLOAT)
-      return (vtop[i].c.f == 0.f);
-    else if (vtop[i].type.t == VT_DOUBLE)
-      return (vtop[i].c.d == 0.0);
-    return (vtop[i].c.ld == 0.l);
+	if((vtop[i].r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
+		return 0;
+	if (vtop[i].type.t == VT_FLOAT)
+		return (vtop[i].c.f == 0.f);
+	else if (vtop[i].type.t == VT_DOUBLE)
+		return (vtop[i].c.d == 0.0);
+	
+	return (vtop[i].c.ld == 0.l);
 }
 
 /* generate a floating point operation 'v = t1 op t2' instruction. The
@@ -1104,7 +1300,7 @@ ST_FUNC void gen_cvt_csti(int t)
 	// Breg and Creg are unaffected
 	if ((t & VT_BTYPE) == VT_SHORT) {
 		//Transputer_CS();
-#if defined Transputer9000
+#if TARGET_CPU_DEFAULT == 9000
 		Transputer_XSWORD();
 #else
 		Transputer_REV();
@@ -1113,7 +1309,7 @@ ST_FUNC void gen_cvt_csti(int t)
 #endif	
 	} else if ((vtop->type.t & VT_BTYPE) == VT_BYTE) {
 		//Transputer_CB();
-#if defined Transputer9000
+#if TARGET_CPU_DEFAULT == 9000
 		Transputer_XBWORD();
 #else
 		Transputer_REV();
