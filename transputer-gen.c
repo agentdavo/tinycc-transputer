@@ -5,9 +5,13 @@
 /* number of available registers */
 #define NB_REGS 9
 
-#define DEFAULT_ALIGN 1
+#define DEFAULT_ALIGN 	1
 /* maximum alignment (for aligned attribute support) */
-#define MAX_ALIGN     4
+#define MAX_ALIGN     	4
+
+#define BITS_BIG_ENDIAN	0
+
+#define PTR_SIZE 		4
 
 /* a register can belong to several classes. The classes must be
    sorted from more general to more precise (see gv2() code which does
@@ -126,6 +130,18 @@ int prefix(int v)
 		return 0x00;
 
 	return v >> 4;
+}
+
+static uint32_t BigtoLittle32(uint32_t value)
+{
+    	uint32_t result = 0;
+
+    	result |= (value & 0x000000FF) << 24;
+    	result |= (value & 0x0000FF00) << 8;
+    	result |= (value & 0x00FF0000) >> 8;
+    	result |= (value & 0xFF000000) >> 24;
+    	
+	return result;
 }
 
 /******************************************************/

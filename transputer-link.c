@@ -25,9 +25,29 @@
    relocations, returns -1. */
 int code_reloc (int reloc_type)
 {
-    switch (reloc_type) {
+     switch (reloc_type) {
+		case R_TRANSPUTER_IPREL32:
+		case R_TRANSPUTER_IPREL16:
+		case R_TRANSPUTER_IPREL8:
+		case R_TRANSPUTER_16:
+        	case R_TRANSPUTER_32:
+		case R_TRANSPUTER_GOTPC32:
+		case R_TRANSPUTER_GOTPC16:
+		case R_TRANSPUTER_GOTOFF32:
+		case R_TRANSPUTER_GOTOFF16:
+		case R_TRANSPUTER_GOT32:
+		case R_TRANSPUTER_GOT16:
+		case R_TRANSPUTER_GLOB_DAT:
+		case R_TRANSPUTER_COPY:
+            return 0;
+
+		case R_TRANSPUTER_PLT16:
+		case R_TRANSPUTER_PLT32:
+		case R_TRANSPUTER_JMP_SLOT:
+            return 1;
     }
-    tcc_error ("Unknown relocation type: %d", reloc_type);
+
+    //tcc_error ("Unknown relocation type: %d", reloc_type);
     return -1;
 }
 
@@ -37,28 +57,73 @@ int code_reloc (int reloc_type)
 int gotplt_entry_type (int reloc_type)
 {
     switch (reloc_type) {
+		case R_TRANSPUTER_GLOB_DAT:
+     	case R_TRANSPUTER_JMP_SLOT:
+        	case R_TRANSPUTER_COPY:
+        	case R_TRANSPUTER_RELATIVE:
+            return NO_GOTPLT_ENTRY;
+
+		/* 	The following relocs wouldn't normally need GOT or PLT
+	   		slots, but we need them for simplicity in the link
+	   		editor part.  See our caller for comments.  */
+        	case R_TRANSPUTER_32:
+        	case R_TRANSPUTER_16:
+        	case R_TRANSPUTER_8:
+            return AUTO_GOTPLT_ENTRY;
+
+		case R_TRANSPUTER_GOTOFF16:
+            return BUILD_GOT_ONLY;
+
+        	case R_TRANSPUTER_GOT32:
+        	case R_TRANSPUTER_GOT16:
+        	case R_TRANSPUTER_GOTPC32:
+        	case R_TRANSPUTER_GOTPC16:
+        	case R_TRANSPUTER_GOTOFF32:
+        	case R_TRANSPUTER_PLT32:
+        	case R_TRANSPUTER_PLT16:
+            return ALWAYS_GOTPLT_ENTRY;
     }
 
-    tcc_error ("Unknown relocation type: %d", reloc_type);
+    //tcc_error ("Unknown relocation type: %d", reloc_type);
     return -1;
 }
 
+/* 	GOT (Global offset table) = Linker Table for data addresses needed for realocation from library
+ *	PLT (Procedure linkage table) = Linker Table for external functions (procedure calls)
+ *	 							addresses from library
+ */
+
 ST_FUNC unsigned create_plt_entry(TCCState *s1, unsigned got_offset, struct sym_attr *attr)
 {
-    Section *plt = s1->plt;
-    uint8_t *p;
-    unsigned plt_offset;
+    	Section *plt = s1->plt;
+    	uint8_t *p;
+    	unsigned plt_offset;
 
-    if (s1->output_type == TCC_OUTPUT_DLL)
+    	if (s1->output_type == TCC_OUTPUT_DLL)
         tcc_error("DLLs unimplemented!");
 
-    if (plt->data_offset == 0)
-        section_ptr_add(plt, 32);
-    plt_offset = plt->data_offset;
+	if (plt->data_offset == 0) {
+		p = section_ptr_add(plt, 16);
+		p[0] = 0x80 | PTR_SIZE;
+		write32le(p+4, 0x25FA);
+     	p[8] = 0x80 | PTR_SIZE*2;
+        	write32le(p+12, 0xF6);
+	}
 
-    p = section_ptr_add(plt, 16);
-    write64le(p, got_offset);
-    return plt_offset;
+	plt_offset = plt->data_offset;
+
+	relofs = s1->got->reloc ? s1->got->reloc->data_offset : 0;
+	rel_size = relofs / sizeof (ElfW_Rel);
+
+    	/* Jump to GOT entry where ld.so initially put the address of ip + 4 */
+    	p = section_ptr_add(plt, 16);
+	write32le(p, 0x2080 | (got_offset >> 4) << 8 | (0x0F & got_offset));
+	p[4] = 0xF6;
+	write32le(p+8, 0x2040 | (rel_size >> 4) << 8 | (0x0F & rel_size));
+	write32le(p+12, 0x25FA);
+	write32le(p+16, 0x6000 | (plt_offset >> 4) << 8 | (0x0F & plt_offset));
+	
+	return plt_offset;
 }
 
 /* relocate the PLT: compute addresses and offsets in the PLT now that final
