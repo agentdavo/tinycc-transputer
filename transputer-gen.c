@@ -126,8 +126,10 @@ char *tp_opcodes_str[] = {
 
 int prefix(int v)
 {
-	if v < 0x10
+	if v < 16
 		return 0x00;
+	else if v < 0
+		return -v >> 4;
 
 	return v >> 4;
 }
@@ -317,6 +319,10 @@ ST_FUNC void load(int r, SValue *sv)
 		{
 			if (size == 1 || size == 2) {
 				Transputer_LDLP(v);		// LDPL n = *v into Areg address offset relative to Wptreg
+				if size == 1				
+					Transputer_LB();
+				else
+					Transputer_LS();
 			} else if (size == 4) {
 				Transputer_LDLP(v);
 				Transputer_FPLDNLSN();	// load 64 bit non-local offset from Areg load previously into FPareg
@@ -333,7 +339,13 @@ ST_FUNC void load(int r, SValue *sv)
 	    		greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_IPREL32);	// rem the inst need to be patched
 
 	    		if (size == 1 || size == 2) {
-		   		Transputer_LDLNP(fc);	
+		   		Transputer_LDLNP(fc);
+
+				if size == 1				
+					Transputer_LB();
+				else
+					Transputer_LS();
+
 	    		} else if (size == 4) {
 				Transputer_LDLNP(fc);
 				Transputer_FPLDNLSN();
@@ -396,28 +408,11 @@ ST_FUNC void store(int r, SValue * v)
 		size = 4;
 
 	if ((v->r & VT_VALMASK) == VT_CONST) {
-	    	/* constant memory reference */
-
 		if (v->r & VT_SYM)
 			greloc(cur_text_section, v->sym, ind, R_TRANSPUTER_IPREL32);
 		
-		Transputer_LDC(fc);	// Load constant into Areg
-
-		if (size == 1 || size == 2)
-			Transputer_STL(r);	// Store content into relative Wptr address in Areg
-		else if (size == 4)
-			Transputer_FPSTNLSN();
-		else
-			Transputer_FPSTNLDB();
-
+		Transputer_LDC(fr);	// Load constant into Areg
 	} else if ((v->r & VT_VALMASK) == VT_LOCAL) {
-
-	    // check case of storing to passed argument that
-	    // tcc thinks is on the stack but for Transputer is
-	    // passed as a reg.  However it may have been
-	    // saved to the stack, if that reg was required
-	    // for a call to a child function
-
 		if (fc > 0)		// argument ??
 	    	{
 			// walk through sizes and figure which param
@@ -440,52 +435,27 @@ ST_FUNC void store(int r, SValue * v)
 	    	else
 			element = size;
 
-		// divide offset in bytes to create word index
-		Transputer_LDC((fc / element) + 8 / element);
-
-		if (size == 1 || size == 2)
-			Transputer_STNL(r);
-		else if (size == 4)
-			Transputer_STNL(r);
-			Transputer_FPSTNLSN();
-		else
-			Transputer_STNL(r);
-			Transputer_FPSTNLDB();
+		Transputer_LDL(fr);
 	} else {
-		if (size == 1 || size == 2)
-			Transputer_STNL(fr);
-		else if (size == 4)
-			Transputer_STNL(fr);
-			Transputer_FPSTNLSN();
-		else
-			Transputer_STNL(fr);
-			Transputer_FPSTNLDB();
+		Transputer_LDNL(fr);
+	}
+
+	if (size == 1) {
+		Transputer_LDL(r);
+		Transputer_SB();	// Store content into relative Wptr address in Areg
+	} else if (size == 2) {
+		Transputer_LDL(r);
+		Transputer_SS();	// Store content into relative Wptr address in Areg
+	} else if (size == 4 && bt == VT_INT) {
+		Transputer_STL(r);		
+	} else if (size == 4 && bt == VT_FLOAT) {
+		Transputer_LDLP(r);
+		Transputer_FPSTNLSN();
+	} else {
+		Transputer_LDLP(r);
+		Transputer_FPSTNLDB();
 	}
 }
-
-/* Need remapping of registers?
-int Transputer_map_regn(int r)
-{
-	if (r == 0)
-		return 0x04		// Wreg
-	else if (r == 1)
-		return 0x00		// Areg
-	else if (r == 2)
-		return 0x01		// Breg
-	else if (r == 3)
-		return 0x02		// Creg
-	else if (r == RC_FST0)
-		return 0x05		// FPregA
-	else if (r == RC_FST1)
-		return 0x06		// FPregB
-	else if (r == RC_FST2)
-		return 0x07		// FPregC
-	else 
-		ALWAYS_ASSERT(FALSE);
-
-	return 0
-}
-*/
 
 /* Return the number of registers needed to return the struct, or 0 if
    returning via struct pointer. Same as i386-gen. */
@@ -519,7 +489,20 @@ ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret,
 /* 'is_jmp' is '1' if it is a jump */
 static void gcall_or_jmp(int is_jmp)
 {
-    printf("gcall_or_jmp(is_jmp=%d)\n", is_jmp);
+    	printf("gcall_or_jmp(is_jmp=%d)\n", is_jmp);
+	
+	int r;
+
+    	if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST && (vtop->r & VT_SYM)) {
+		/* constant and relocation case */
+		greloc(cur_text_section, vtop->sym, ind + 1, R_TRANSPUTER_IPREL32);
+		oad(0x09 - (is_jmp*9), vtop->c.i - 4); /* call/jmp im */
+    	} else {
+		/* otherwise, indirect call */
+		r = gv(RC_INT);
+		o(r);
+		Transputer_GCALL();
+    	}
 }
 
 /* generate function call with address in (vtop->t, vtop->c) and free function
@@ -527,6 +510,74 @@ static void gcall_or_jmp(int is_jmp)
 ST_FUNC void gfunc_call(int nb_args)
 {
     printf("gfunc_call(nb_args=%d)\n", nb_args);
+
+	int size, align, r, args_size, i, func_call;
+    	Sym *func_sym;
+
+	align = DEFAULT_ALIGN;
+
+    	args_size = 0;
+
+    	for(i = 0;i < nb_args; i++) {
+        if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
+            size = type_size(&vtop->type, &align);
+            /* align to stack align size */
+            size = (size + 3) & ~3;
+            /* generate structure store */
+            r = get_reg(RC_INT);
+		  args_size += size;
+
+		  if size == 1 {
+			Transputer_LDLP(RC_ARG);
+			Transputer_ADC(-args_size);
+			Transputer_LDLP(r);
+			Transputer_LB();
+			Transputer_REV();
+			Transputer_SB();
+		  } else {
+			//Transputer_LDLP(RC_ARG);
+			//Transputer_ADC(-size);
+			
+		  	Transputer_LDL(r);
+            	Transputer_STL(RC_ARG-args_size);
+            }
+		  vset(&vtop->type, r | VT_LVAL, 0);
+            vswap();
+            vstore();
+        } else if (is_float(vtop->type.t)) {
+            gv(RC_FST); 		/* only one float register */
+            if ((vtop->type.t & VT_BTYPE) == VT_FLOAT)
+                size = 4;
+            else if ((vtop->type.t & VT_BTYPE) == VT_DOUBLE)
+                size = 8;
+
+		  args_size += size;
+
+            Transputer_LDLP(RC_ARG);
+            Transputer_ADC(-args_size);
+
+            if (size == 8)
+                Transputer_FPSTNLDB();
+            else
+			 Transputer_FPSTNLSN();
+        } else {
+            /* simple type (currently always same size) */
+            r = gv(RC_INT);
+		  args_size += size;
+
+		  Transputer_LDL(r);
+            Transputer_STL(RC_ARG-args_size);
+            
+		  if ((vtop->type.t & VT_BTYPE) == VT_LLONG) {
+			 Transputer_LDL(vtop->r2);
+			 Transputer_STL(RC_ARG-args_size+4);
+ 		  }
+        }
+        vtop--;
+    }
+    save_regs(0); /* save used temporary registers */
+    func_sym = vtop->type.ref;
+    func_call = func_sym->f.func_call;
 }
 
 /* generate function prolog of type 't' */
@@ -780,73 +831,81 @@ void Transputer_LDL_OP(int a, int b)
 	Transputer_STNL(0);
 }
 
-void Transputer_LADD_OP(unsigned int a, unsigned int b, unsigned int z)
+void Transputer_LADD_OP(SValue a, SValue b, SValue z)
 {
 	Transputer_LDC(0);
 
-	Transputer_LDL(a);
-	Transputer_LDL(b);
+	Transputer_LDL(a->r);
+	Transputer_LDL(b->r);
 	Transputer_LSUM();
-	Transputer_STL(z);
+	Transputer_STL(z->r);
 
-	Transputer_LDL(a+4);
-	Transputer_LDL(b+4);
+	Transputer_LDL(a->r2);
+	Transputer_LDL(b->r2);
 	Transputer_LADD();
-	Transputer_STL(z+4);
+	Transputer_STL(z->r2);
 }
 
-void Transputer_LSUB_OP(unsigned int a, unsigned int b, unsigned int z)
+void Transputer_LSUB_OP(SValue a, SValue b, SValue z)
 {
 	Transputer_LDC(0);
 
-	Transputer_LDL(a);
-	Transputer_LDL(b);
+	Transputer_LDL(a->r);
+	Transputer_LDL(b->r);
 	Transputer_LDIFF();
-	Transputer_STL(z);
+	Transputer_STL(z->r);
 
-	Transputer_LDL(a+4);
-	Transputer_LDL(b+4);
+	Transputer_LDL(a->r2);
+	Transputer_LDL(b->r2);
 	Transputer_LSUB();
-	Transputer_STL(z+4);
+	Transputer_STL(z->r2);
 }
 
-void Transputer_LMUL_OP(unsigned int a, unsigned int b, unsigned int z)
+void Transputer_LMUL_OP(SValue a, SValue b, SValue z)
 {
+	ra = a->r;
+	rb = b->r;
+	rz = z->r;
+
+	ra2 = a->r2;
+	rb2 = b->r2;
+	rz2 = z->r2;
+
 	Transputer_LDC(0);
 
-	Transputer_LDL(a);
-	Transputer_LDL(b);
+	Transputer_LDL(ra);
+	Transputer_LDL(rb);
 	Transputer_LMUL();
-	Transputer_STL(z);
+	Transputer_STL(rz);
 	
-	Transputer_LDL(a);
-	Transputer_LDL(b + 4);
+	Transputer_LDL(ra);
+	Transputer_LDL(rb2);
 	Transputer_LMUL();
 	Transputer_REV();
-	Transputer_STL(z+8);
+	Transputer_STL(rz);
 	
-	Transputer_LDL(a+4);
+	Transputer_LDL(ra2);
 	Transputer_LDL(b);
 	Transputer_LMUL();
-	Transputer_STL(z+4);
+	Transputer_STL(rz2);
 	
-	Transputer_LDL(a+4);
-	Transputer_LDL(b+4);
+	Transputer_LDL(ra2);
+	Transputer_LDL(rb2);
 	Transputer_LMUL();
-	Transputer_STL(z+12);
+	Transputer_STL(rz2);
 	
 	Transputer_LDC(0);
 	Transputer_REV();
-	Transputer_LDL(z+8);
+	Transputer_LDL(rz);
 	Transputer_LSUM();
-	Transputer_STL(z+8);
+	Transputer_STL(rz);
 
-	Transputer_LDL(z+12);
+	Transputer_LDL(rz2);
 	Transputer_SUM();
-	Transputer_STL(z+12);
+	Transputer_STL(rz2);
 }
 
-void Transputer_LDIV_OP(int a, int b, int z)
+void Transputer_LDIV_OP(SValue a, SValue b, SValue z)
 {
 	Transputer_LDC(0);
 
@@ -856,62 +915,62 @@ void Transputer_LDIV_OP(int a, int b, int z)
 	// both results into z+4 (hi) and z (lo) 64 bit 2 word (Transputer 1 (d)word = 32 bit)
 	// Transputer overwrites content of Breg, without push we cannot 
 
-	Transputer_LDL(b);
-	Transputer_LDL(b+4);
+	Transputer_LDL(b->r);
+	Transputer_LDL(b->r2);
 	Transputer_LSUM();
 	
 	Transputer_REV();
 
-	Transputer_LDL(a);
+	Transputer_LDL(a->r);
 	Transputer_LDIV();
-	Transputer_STL(z);
+	Transputer_STL(z->r);
 
-	Transputer_LDL(b);
-	Transputer_LDL(b+4);
+	Transputer_LDL(b->r);
+	Transputer_LDL();
 	Transputer_LSUM();
 	
 	Transputer_REV();
 
-	Transputer_LDL(a+4);
-	Transputer_STL(z+4);
+	Transputer_LDL(a->r2);
+	Transputer_STL(z->r2);
 }
 
-void Transputer_LLSHL(int a, long int s)
+void Transputer_LLSHL(SValue a, long int s)
 {
-	Transputer_LDL(a);
-	Transputer_LDL(a+4);
+	Transputer_LDL(a->r);
+	Transputer_LDL(a->r2);
 	Transputer_LDL(s);
 	Transputer_LSHL();
-	Transputer_STL(a);
-	Transputer_STL(a+4);
+	Transputer_STL(a->r);
+	Transputer_STL(a->r2);
 }
 
-void Transputer_LLSHR(int a, long int s)
+void Transputer_LLSHR(SValue a, long int s)
 {
-	Transputer_LDL(a);
-	Transputer_LDL(a+4);
+	Transputer_LDL(a->r);
+	Transputer_LDL(a->r2);
 	Transputer_LDL(s);
 	Transputer_LSHR();
-	Transputer_STL(a);
-	Transputer_STL(a+4);
+	Transputer_STL(a->r);
+	Transputer_STL(a->r2);
 }
 
-void Transputer_SLSHL(int a, long int s)
+void Transputer_SLSHL(SValue a, long int s)
 {
-	Transputer_LDL(a);
+	Transputer_LDL(a->r);
 	Transputer_XDBLE();
 	Transputer_LDL(s);
 	Transputer_LSHL();
-	Transputer_STL(a);
+	Transputer_STL(a->r);
 }
 
-void Transputer_SLSHR(int a, long int s)
+void Transputer_SLSHR(SValue a, long int s)
 {
-	Transputer_LDL(a);
+	Transputer_LDL(a->r);
 	Transputer_XDBLE();
 	Transputer_LDL(s);
 	Transputer_LSHR();
-	Transputer_STL(a);
+	Transputer_STL(a->r);
 }
 
 void Transputer_ROR(int a, int s)
@@ -986,6 +1045,11 @@ void Transputer_MOVE(int v1, int v2, int l1, int l2)
 	// out_op(TP_OP_MOVE);
 }
 
+void Transputer_GCALL()
+{
+	gen_le8(0xF6);
+}
+
 void Transputer_GAJW() 
 {
 	gen_le16(0x23FC);
@@ -995,6 +1059,17 @@ void Transputer_AJW(int v)
 {
 	g(0x20 | prefix(v));
 	g(0xB | (0x0F & v));
+}
+
+void Transputer()
+{
+	ge_l16(0x23F2);
+}
+
+void Transputer_UMINUS()
+{
+	Transputer_NOT();
+	Transputer_ADC(1);
 }
 
 void Transputer_NOP() 
@@ -1283,6 +1358,26 @@ void Transputer_FPLDNLMULDB()
 #endif
 }
 
+void Transputer_FPGT()
+{
+	gen_le16(0x29F4);
+}
+
+void Transputer_FPEQ()
+{
+	gen_le16(0x29F5);
+}
+
+void Transputer_FPGE()
+{
+	gen_le16(0x29F7);
+}
+
+void Transputer_FPREV()
+{
+	gen_le16(0x2AF4);
+}
+
 void Transputer_FPSUB() 
 {
 	gen_le16(0x28F9);
@@ -1489,13 +1584,13 @@ void gen_opi(int op)
 				// Convert to long and loading must be handled by LXXX_OP
 
 				if (op == '+')
-					Transputer_LADD_OP(r,fr,r);
+					Transputer_LADD_OP(vtop[-1], vtop[0], vtop[-1]);
 				else if (op == '-')
-					Transputer_LSUB_OP(r,fr,r);
+					Transputer_LSUB_OP(vtop[-1], vtop[0], vtop[-1]);
 				else if (op == '/')
-					Transputer_LDIV_OP(r,fr,r);
+					Transputer_LDIV_OP(vtop[-1], vtop[0], vtop[-1]);
 				else if (op == '*')
-					Transputer_LMUL_OP(r,fr,r);
+					Transputer_LMUL_OP(vtop[-1], vtop[0], vtop[-1]);
 				else
 					gen_le16((0x02 << 12) | \
 						(prefix(opc) << 8) \
@@ -1541,8 +1636,6 @@ void gen_opi(int op)
 	    }
 }
 
-
-
 static int is_zero(int i)
 {
 	if((vtop[i].r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
@@ -1561,82 +1654,101 @@ ST_FUNC void gen_opf(int op)
 {
 //    printf("gen_opf(op=%d)\n", op);
 	
-    int ft, fc, fr, r;
+    	int ft, fc, fr, r;
 
-    if (op >= TOK_ULT && op <= TOK_GT)
-	gv2(RC_IST0, RC_IST1);	// make sure src2 is on b side
-    else
-	gv2(RC_FST0, RC_FST1);	// make sure src2 is on b side
+	gv2(RC_FST0, RC_FST1);
+	gv2(RC_IST0, RC_IST1);
 
-    ft = vtop->type.t;
-    fc = vtop->c.i;
-    r = vtop->r;
-    fr = vtop[-1].r;
+    	ft = vtop[-1]->type.t;
+	rt = vtop[0]->type.t;
+    	r = vtop->r;
+    	fr = vtop[-1].r;
 
-    if ((vtop[-1]->type.t & VT_BTYPE) == VT_CONST)
- 	Transputer_LDC(vtop[-1]->c.i);
-    else   	
- 	Transputer_LDNL(r);
+    	if ((ft & VT_BTYPE) == VT_CONST) {
+ 		if ((ft & VT_BTYPE) == VT_DOUBLE) {
+			Transputer_LDC(vtop[-1]->c.d);
+			Transputer_FPLDNLDB();
+		} else {
+			Transputer_LDC(vtop[-1]->c.f);
+			Transputer_FPLDNLSN();
+		}
+	} else {
+		Transputer_LDLP(fr);
+		if ((ft & VT_BTYPE) == VT_DOUBLE)
+			Transputer_FPLDNLDB();
+		else
+			Transputer_FPLDNLSN();
+	}
 
-    if ((vtop[-1]->type.t & VT_BTYPE) == VT_DOUBLE)
-    	Transputer_FPLDNLDB();
-    else
-	Transputer_FPLDNLSN();
+	if ((rt & VT_BTYPE) == VT_CONST)
+ 		if ((rt & VT_BTYPE) == VT_DOUBLE)
+			Transputer_LDC(vtop[0]->c.d);
+		else
+			Transputer_LDC(vtop[0]->c.f);
+	else
+		Transputer_LDLP(r);
 
-    Transputer_REV();
-
-    if ((vtop[0]->type.t & VT_BTYPE) == VT_CONST)
- 	Transputer_LDC(vtop[0]->c.i);
-    else   	
- 	Transputer_LDNL(fr);
-
-    if ((vtop[0]->type.t & VT_BTYPE) == VT_DOUBLE)
-    	Transputer_FPLDNLDB();
-    else
-	Transputer_FPLDNLSN();
-
-	ALWAYS_ASSERT((ft & VT_BTYPE) == (vtop[-1]->type.t & VT_BTYPE));
+	ALWAYS_ASSERT((ft & (VT_BTYPE | VT_DOUBLE)) == (rt & (VT_BTYPE | VT_DOUBLE)) | \
+				(ft & (VT_BTYPE | VT_FLOAT)) == (rt & (VT_BTYPE | VT_FLOAT)));
 
 	if (op == '+') {
-		Transputer_FPADD();
-		Transputer_NOP(6);
+		if ((rt & VT_BTYPE) == VT_DOUBLE)
+			Transputer_FPLDNLADDDB();
+		else
+			Transputer_FPLDNLADDSN();
+		//Transputer_FPADD();
 		vtop--;
 	} else if (op == '-') {
 		Transputer_FPSUB();
-		Transputer_NOP(6);
 		vtop--;
 	} else if (op == '*') {
-		Transputer_FPMUL();
-		Transputer_NOP(9);
+		if ((rt & VT_BTYPE) == VT_DOUBLE)
+			Transputer_FPLDNLMULDB();
+		else 
+			Transputer_FPLDNLMULSN();
+		//Transputer_FPMUL();
 	    	vtop--;
-	} else if (op == '/') {
-	    if ((ft & VT_BTYPE) == VT_DOUBLE) {
-		// must call intrinsic DP floating point divide
-		vswap();
-		/* call generic idiv function */
-		vpush_global_sym(&func_old_type, TOK__divd);
-		vrott(3);
-		gfunc_call(2);
-		vpushi(0);
-		vtop->r = REG_FRET;
-		vtop->r2 = REG_IRE2;
+	} else {
 
-	    } else {
-		// must call intrinsic SP floating point divide
-		vswap();
-		/* call generic idiv function */
-		vpush_global_sym(&func_old_type, TOK__divf);
-		vrott(3);
-		gfunc_call(2);
-		vpushi(0);
-		vtop->r = REG_FRET;
-		vtop->r2 = VT_CONST;
-	    }
-	} else
-	    ALWAYS_ASSERT(FALSE);
+		if ((rt & VT_BTYPE) == VT_DOUBLE)
+			Transputer_FPLDNLDB();
+		else 
+			Transputer_FPLDNLSN();
 
-
-    }
+		if (op == '/') {
+			Transputer_FPREV();		
+			Transputer_FPDIV();
+			vtop--;
+		} else if (op == '%') {
+			// TODO: FPRANGE 2^24 - 1 for float
+			// and 2^51 - 1 for double
+			Transputer_FPREM();
+			vtop--;
+		} else if (op == TOK_GT){
+			Transputer_FPGT();
+			vtop--;
+		} else if (op == TOK_LE){
+			Transputer_FPGT();
+			Transputer_EQC(0);
+			vtop--;
+		} else if (op == TOK_LEQ){
+			Transputer_FPREV();
+			Transputer_FPGT();
+			vtop--;
+		} else if (op == TOK_GEQ){
+			Transputer_FPGE();
+			vtop--;
+  		} else if (op == TOK_EQ){
+			Transputer_FPEQ();
+			vtop--;
+  		} else if (op == TOK_NEQ){
+			Transputer_FPGE();
+			Transputer_EQC(0);
+			vtop--;
+  		} else {
+	    		ALWAYS_ASSERT(FALSE);
+     	}
+	}
 }
 
 /* convert fp to int 't' type */
