@@ -263,8 +263,46 @@ typedef struct
 #define EM_TILEPRO	188		/* Tilera TILEPro */
 #define EM_TILEGX	191		/* Tilera TILE-Gx */
 #define EM_RISCV	243	        /* RISC-V */
-#define EM_TRANSPUTER	805	        /* T805 */
 #define EM_NUM		253
+#define EM_TRANSPUTER	805
+
+#define R_TRANSPUTER_NONE	0	/* No reloc.  */
+#define R_TRANSPUTER_32		1	/* Direct 32 bit.  */
+#define R_TRANSPUTER_16		2	/* Direct 16 bit.  */
+#define R_TRANSPUTER_8		3	/* Direct 8 bit.  */
+#define R_TRANSPUTER_IPREL32	4	/* IP-relative 32-bit.  */
+#define R_TRANSPUTER_IPREL16	5	/* IP-relative 16-bit signed.  */
+#define R_TRANSPUTER_IPREL8	6	/* IP-relative 8-bit signed.  */
+#define R_TRANSPUTER_GOTPC32	10	/* 32-bit PCrel offset to GOT.  */
+#define R_TRANSPUTER_GOTPC16	11	/* 16-bit PCrel offset to GOT.  */
+#define R_TRANSPUTER_GOTOFF32	12	/* 32-bit offset from GOT.  */
+#define R_TRANSPUTER_GOTOFF24	13	/* 24-bit offset from GOT.  */
+#define R_TRANSPUTER_GOTOFF16	14	/* 16-bit offset from GOT.  */
+#define R_TRANSPUTER_PLT32	15	/* 32-bit PCrel to PLT entry.  */
+#define R_TRANSPUTER_PLT16	16	/* 16-bit PCrel to PLT entry.  */
+#define R_TRANSPUTER_GOT32	17	/* 32-bit offset to GOT entry.  */
+#define R_TRANSPUTER_GOT24	18	/* 24-bit offset to GOT entry.  */
+#define R_TRANSPUTER_GOT16	19	/* 16-bit offset to GOT entry.  */
+#define R_TRANSPUTER_COPY	20	/* Copy symbol at runtime.  */
+#define R_TRANSPUTER_GLOB_DAT	21	/* Create GOT entry.  */
+#define R_TRANSPUTER_JMP_SLOT	22	/* Create PLT entry.  */
+#define R_TRANSPUTER_RELATIVE	23	/* Adjust by program base.  */
+#define R_TRANSPUTER_TLS_GD	24	/* 32-bit offset for global dynamic.  */
+#define R_TRANSPUTER_TLS_LD	25	/* 32-bit offset for local dynamic.  */
+#define R_TRANSPUTER_TLS_LDO	26	/* Module-relative offset.  */
+#define R_TRANSPUTER_TLS_GOTIE	27	/* GOT offset for static TLS block
+					   offset.  */
+#define R_TRANSPUTER_TLS_IE	28	/* GOT address for static TLS block
+					   offset.  */
+#define R_TRANSPUTER_TLS_LE	29	/* Offset relative to static TLS
+					   block.  */
+#define R_TRANSPUTER_TLS_DTPOFF	31	/* Offset in module TLS block.  */
+#define R_TRANSPUTER_TLS_TPOFF	32	/* Offset in static TLS block.  */
+#define R_TRANSPUTER_SYM_DIFF	33	/* Adjustment for next reloc as needed
+					   by linker relaxation.  */
+#define R_TRANSPUTER_ALIGN	34	/* Alignment requirement for linker
+					   relaxation.  */
+#define R_TRANSPUTER_NUM	35
 
 /* If it is necessary to assign new unofficial EM_* values, please
    pick large random numbers (0x8523, 0xa7f2, etc.) to minimize the
@@ -2538,47 +2576,6 @@ typedef Elf32_Addr Elf32_Conflict;
 /* Keep this the last entry.  */
 #define R_ARM_NUM		256
 
-/* Transputerxxx specific declarations */
-
-#define R_TRANSPUTER_NONE	0	/* No reloc.  */
-#define R_TRANSPUTER_32		1	/* Direct 32 bit.  */
-#define R_TRANSPUTER_16		2	/* Direct 16 bit.  */
-#define R_TRANSPUTER_8		3	/* Direct 8 bit.  */
-#define R_TRANSPUTER_IPREL32	4	/* IP-relative 32-bit.  */
-#define R_TRANSPUTER_IPREL16	5	/* IP-relative 16-bit signed.  */
-#define R_TRANSPUTER_IPREL8	6	/* IP-relative 8-bit signed.  */
-#define R_TRANSPUTER_GOTPC32	10	/* 32-bit PCrel offset to GOT.  */
-#define R_TRANSPUTER_GOTPC16	11	/* 16-bit PCrel offset to GOT.  */
-#define R_TRANSPUTER_GOTOFF32	12	/* 32-bit offset from GOT.  */
-#define R_TRANSPUTER_GOTOFF24	13	/* 24-bit offset from GOT.  */
-#define R_TRANSPUTER_GOTOFF16	14	/* 16-bit offset from GOT.  */
-#define R_TRANSPUTER_PLT32	15	/* 32-bit PCrel to PLT entry.  */
-#define R_TRANSPUTER_PLT16	16	/* 16-bit PCrel to PLT entry.  */
-#define R_TRANSPUTER_GOT32	17	/* 32-bit offset to GOT entry.  */
-#define R_TRANSPUTER_GOT24	18	/* 24-bit offset to GOT entry.  */
-#define R_TRANSPUTER_GOT16	19	/* 16-bit offset to GOT entry.  */
-#define R_TRANSPUTER_COPY	20	/* Copy symbol at runtime.  */
-#define R_TRANSPUTER_GLOB_DAT	21	/* Create GOT entry.  */
-#define R_TRANSPUTER_JMP_SLOT	22	/* Create PLT entry.  */
-#define R_TRANSPUTER_RELATIVE	23	/* Adjust by program base.  */
-#define R_TRANSPUTER_TLS_GD	24	/* 32-bit offset for global dynamic.  */
-#define R_TRANSPUTER_TLS_LD	25	/* 32-bit offset for local dynamic.  */
-#define R_TRANSPUTER_TLS_LDO	26	/* Module-relative offset.  */
-#define R_TRANSPUTER_TLS_GOTIE	27	/* GOT offset for static TLS block
-					   offset.  */
-#define R_TRANSPUTER_TLS_IE	28	/* GOT address for static TLS block
-					   offset.  */
-#define R_TRANSPUTER_TLS_LE	29	/* Offset relative to static TLS
-					   block.  */
-#define R_TRANSPUTER_TLS_DTPOFF	31	/* Offset in module TLS block.  */
-#define R_TRANSPUTER_TLS_TPOFF	32	/* Offset in static TLS block.  */
-#define R_TRANSPUTER_SYM_DIFF	33	/* Adjustment for next reloc as needed
-					   by linker relaxation.  */
-#define R_TRANSPUTER_ALIGN	34	/* Alignment requirement for linker
-					   relaxation.  */
-#define R_TRANSPUTER_NUM	35
-
-
 /* TMS320C67xx specific declarations */
 
 /* XXX: no ELF standard yet*/
@@ -3342,14 +3339,5 @@ typedef Elf32_Addr Elf32_Conflict;
 
 #define R_RISCV_NUM		58
 
-/* TRANSPUTER ELF Flags */
-
-/* TRANSPUTER relocations.  */
-#define R_TRANSPUTER_NONE	0	/* No reloc */
-#define R_TRANSPUTER_32		1
-#define R_TRANSPUTER_64		2
-#define R_TRANSPUTER_RELATIVE	3
-#define R_TRANSPUTER_COPY	4
-#define R_TRANSPUTER_JUMP_SLOT	5
 
 #endif	/* elf.h */

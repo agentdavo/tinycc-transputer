@@ -42,13 +42,13 @@
 #include "x86_64-gen.c"
 #include "x86_64-link.c"
 #include "i386-asm.c"
+#elif defined(TCC_TARGET_TRANSPUTER)
+#include "transputer-gen.c"
+#include "transputer-asm.c"
+#include "transputer-link.c"
 #elif defined(TCC_TARGET_RISCV64)
 #include "riscv64-gen.c"
 #include "riscv64-link.c"
-#elif defined(TCC_TARGET_TRANSPUTER)
-#include "transputer-gen.c"
-#include "transputer-link.c"
-#include "transputer-asm.c"
 #else
 #error unknown target
 #endif
@@ -685,9 +685,7 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
        Other threads need to wait until we're done.
 
        Alternatively we could use thread local storage for those global
-       variables, which may or may not have advantages 
-	   TODO: Transputer Support
-	   */
+       variables, which may or may not have advantages */
 
     WAIT_SEM();
     tcc_state = s1;
@@ -825,6 +823,9 @@ LIBTCCAPI TCCState *tcc_new(void)
     tcc_define_symbol(s, "arm", NULL);
     tcc_define_symbol(s, "__APCS_32__", NULL);
     tcc_define_symbol(s, "__ARMEL__", NULL);
+#elif defined(TCC_TARGET_X86_64)
+    tcc_define_symbol(s, "__t800__", NULL);
+    tcc_define_symbol(s, "__t9000__", NULL);
 #if defined(TCC_ARM_EABI)
     tcc_define_symbol(s, "__ARM_EABI__", NULL);
 #endif
@@ -847,10 +848,6 @@ LIBTCCAPI TCCState *tcc_new(void)
     tcc_define_symbol(s, "__riscv_fdiv", NULL);
     tcc_define_symbol(s, "__riscv_fsqrt", NULL);
     tcc_define_symbol(s, "__riscv_float_abi_double", NULL);
-// #elif defined TCC_TARGET_TRANSPUTER (include Transputer target defines)
-#endif
-#if defined(TCC_TARGET_TRANSPUTER)
-	tcc_define_symbol(s, "__TRANSPUTER__", NULL)
 #endif
 
 #ifdef TCC_TARGET_PE
