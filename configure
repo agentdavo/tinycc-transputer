@@ -208,6 +208,16 @@ case "$cpu" in
     esac
     cpu="arm"
   ;;
+  t*)
+  case "$cpu" in t400|t800)
+      cpuver=800
+       ;;
+	  t9000)
+      cpuver=9000
+	  ;;    
+	esac
+	cpu="Transputer"
+  ;;
   alpha)
     cpu="alpha"
   ;;
@@ -491,6 +501,18 @@ print_mak CONFIG_TCC_ELFINTERP "$tcc_elfinterp"
 print_mak CONFIG_LDDIR "$tcc_lddir"
 print_mak CONFIG_TRIPLET "$triplet"
 print_mak TCC_CPU_VERSION "$cpuver" num
+
+if test "$cpu" = "Transputer"; then
+    if test "$cpuver" = "800"; then
+      echo "#ifndef __t800__" >> $TMPH
+      echo "# define __t800__" >> $TMPH
+      echo "#endif" >> $TMPH
+    else
+	 echo "#ifndef __t9000__" >> $TMPH
+      echo "# define __t9000__" >> $TMPH
+      echo "#endif" >> $TMPH
+    fi
+fi
 
 if test "$cpu" = "aarch64" ; then
   echo "ARCH=arm64" >> config.mak

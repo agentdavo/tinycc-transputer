@@ -157,11 +157,13 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* #define TCC_TARGET_ARM64  *//* ARMv8 code generator */
 /* #define TCC_TARGET_C67    *//* TMS320C67xx code generator */
 /* #define TCC_TARGET_RISCV64 *//* risc-v code generator */
+/* #define TCC_TARGET_TRANSPUTER *//* Transputer code generator */
 
 /* default target is I386 */
 #if !defined(TCC_TARGET_I386) && !defined(TCC_TARGET_ARM) && \
     !defined(TCC_TARGET_ARM64) && !defined(TCC_TARGET_C67) && \
-    !defined(TCC_TARGET_X86_64) && !defined(TCC_TARGET_RISCV64)
+    !defined(TCC_TARGET_X86_64) && !defined(TCC_TARGET_RISCV64) \
+    !defined(TCC_TARGET_TRANSPUTER)
 # if defined __x86_64__
 #  define TCC_TARGET_X86_64
 # elif defined __arm__
@@ -171,6 +173,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define TCC_ARM_HARDFLOAT
 # elif defined __aarch64__
 #  define TCC_TARGET_ARM64
+# elif defined __t800__ || defined __t9000__
+#  define TCC_TARGET_TRANSPUTER
 # elif defined __riscv
 #  define TCC_TARGET_RISCV64
 # else
@@ -192,6 +196,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # elif defined __aarch64__ && defined TCC_TARGET_ARM64
 #  define TCC_IS_NATIVE
 # elif defined __riscv && defined __LP64__ && defined TCC_TARGET_RISCV64
+#  define TCC_IS_NATIVE
+# elif (((defined __t800__) || (defined __t9000__)) && defined TCC_TARGET_TRANSPUTER)
 #  define TCC_IS_NATIVE
 # endif
 #endif
@@ -405,6 +411,11 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # include "coff.h"
 # include "c67-gen.c"
 # include "c67-link.c"
+#elif defined(TCC_TARGET_TRANSPUTER)
+# include "transputer-gen.c"
+# include "transputer-link.c"
+# include "transputer-opcodes.c"
+# include "transputer-asm.c"
 #elif defined(TCC_TARGET_RISCV64)
 # include "riscv64-gen.c"
 # include "riscv64-link.c"
@@ -1743,6 +1754,10 @@ ST_FUNC void gen_cvt_sxtw(void);
 
 /* ------------ c67-gen.c ------------ */
 #ifdef TCC_TARGET_C67
+#endif
+
+/* ------------ transputer-gen.c ------------ */
+#ifdef TCC_TARGET_TRANSPUTER
 #endif
 
 /* ------------ tcccoff.c ------------ */

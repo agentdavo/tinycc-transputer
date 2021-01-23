@@ -78,6 +78,7 @@ LDFLAGS_P = $(LDFLAGS)
 
 CONFIG_$(ARCH) = yes
 NATIVE_DEFINES_$(CONFIG_i386) += -DTCC_TARGET_I386
+NATIVE_DEFINES_$(CONFIG_Transputer) += -DTCC_TARGET_TRANSPUTER
 NATIVE_DEFINES_$(CONFIG_x86_64) += -DTCC_TARGET_X86_64
 NATIVE_DEFINES_$(CONFIG_WIN32) += -DTCC_TARGET_PE
 NATIVE_DEFINES_$(CONFIG_OSX) += -DTCC_TARGET_MACHO
@@ -110,6 +111,7 @@ DEF-arm-eabihf     = $(DEF-arm-eabi) -DTCC_ARM_HARDFLOAT
 DEF-arm            = $(DEF-arm-eabihf)
 DEF-arm-NetBSD     = $(DEF-arm-eabihf) -DTARGETOS_NetBSD
 DEF-arm-wince      = $(DEF-arm-eabihf) -DTCC_TARGET_PE
+DEF-Transputer	   = -DTCC_TARGET_TRANSPUTER -w
 DEF-arm64          = -DTCC_TARGET_ARM64
 DEF-arm64-FreeBSD  = $(DEF-arm64) -DTARGETOS_FreeBSD
 DEF-arm64-NetBSD   = $(DEF-arm64) -DTARGETOS_NetBSD
@@ -135,11 +137,13 @@ all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 # cross compiler targets to build
 TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm-wince c67
 TCC_X += riscv64
+TCC_X += Transputer
 # TCC_X += arm-fpa arm-fpa-ld arm-vfp arm-eabi
 
 # cross libtcc1.a targets to build
 LIBTCC1_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm-wince
 LIBTCC1_X += riscv64
+LIBTCC1_X += Transputer
 
 PROGS_CROSS = $(foreach X,$(TCC_X),$X-tcc$(EXESUF))
 LIBTCC1_CROSS = $(foreach X,$(LIBTCC1_X),$X-libtcc1.a)
@@ -190,6 +194,7 @@ i386-win32_FILES = $(i386_FILES) tccpe.c
 x86_64_FILES = $(CORE_FILES) x86_64-gen.c x86_64-link.c i386-asm.c x86_64-asm.h
 x86_64-win32_FILES = $(x86_64_FILES) tccpe.c
 x86_64-osx_FILES = $(x86_64_FILES) tccmacho.c
+Transputer_FILES = $(CORE_FILES) transputer_gen.c transputer_link.c transputer_asm.c
 arm_FILES = $(CORE_FILES) arm-gen.c arm-link.c arm-asm.c arm-tok.h
 arm-wince_FILES = $(arm_FILES) tccpe.c
 arm-eabihf_FILES = $(arm_FILES)
