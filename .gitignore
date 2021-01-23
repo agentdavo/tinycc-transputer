@@ -20,6 +20,7 @@ tcc
 libtcc*.def
 
 config*.h
+*_.h
 config*.mak
 config.texi
 conftest*
@@ -31,13 +32,16 @@ tcc-doc.html
 tcc-doc.info
 
 win32/doc
+win32/examples/libtcc_test.c
 win32/libtcc
 win32/lib/32
 win32/lib/64
 win32/include/float.h
+win32/include/stdalign.h
 win32/include/stdarg.h
 win32/include/stdbool.h
 win32/include/stddef.h
+win32/include/stdnoreturn.h
 win32/include/varargs.h
 win32/include/tcclib.h
 
@@ -50,8 +54,10 @@ tests/*.gcc
 tests/*-cc*
 tests/*-tcc*
 tests/libtcc_test
+tests/libtcc_test_mt
 tests/asm-c-connect
 tests/asm-c-connect-sep
 tests/vla_test
 tests/hello
 tests/tests2/fred.txt
+libtcc.dylib

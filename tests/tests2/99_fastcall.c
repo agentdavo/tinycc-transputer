@@ -1,11 +1,11 @@
 #include <stdio.h>
 #include <assert.h>
 
-#ifndef _WIN32
+#if !(defined( _WIN32) || (defined(__FreeBSD__) && defined(__i386__)))
 #define __fastcall __attribute((fastcall))
 #endif
 
-#if 1
+#ifndef __leading_underscore
 #define SYMBOL(x) _##x
 #else
 #define SYMBOL(x) x

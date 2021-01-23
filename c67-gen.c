@@ -56,7 +56,7 @@
 #define RC_C67_B12    0x04000000
 #define RC_C67_B13    0x08000000
 #define RC_IRET    RC_C67_A4	/* function return: integer register */
-#define RC_LRET    RC_C67_A5	/* function return: second integer register */
+#define RC_IRE2    RC_C67_A5	/* function return: second integer register */
 #define RC_FRET    RC_C67_A4	/* function return: float register */
 
 /* pretty names for the registers */
@@ -89,7 +89,7 @@ enum {
 
 /* return registers for function */
 #define REG_IRET TREG_C67_A4	/* single word int return register */
-#define REG_LRET TREG_C67_A5	/* second word return register (for long long) */
+#define REG_IRE2 TREG_C67_A5    /* second word return register (for long long) */
 #define REG_FRET TREG_C67_A4	/* float return register */
 
 /* defined if function parameters must be evaluated in reverse order */
@@ -111,10 +111,15 @@ enum {
 /******************************************************/
 #else /* ! TARGET_DEFS_ONLY */
 /******************************************************/
+#define USING_GLOBALS
 #include "tcc.h"
 
+ST_DATA const char *target_machine_defs =
+    "__C67__\0"
+    ;
+
 ST_DATA const int reg_classes[NB_REGS] = {
-    /* eax */ RC_INT | RC_FLOAT | RC_EAX, 
+    /* eax */ RC_INT | RC_FLOAT | RC_EAX,
     // only allow even regs for floats (allow for doubles)
     /* ecx */ RC_INT | RC_ECX,
     /* edx */ RC_INT | RC_INT_BSIDE | RC_FLOAT | RC_EDX,
@@ -1939,8 +1944,9 @@ void gfunc_call(int nb_args)
 // parameters are loaded and restored upon return (or if/when needed).
 
 /* generate function prolog of type 't' */
-void gfunc_prolog(CType * func_type)
+void gfunc_prolog(Sym *func_sym)
 {
+    CType *func_type = &func_sym->type;
     int addr, align, size, func_call, i;
     Sym *sym;
     CType *type;
@@ -1950,8 +1956,6 @@ void gfunc_prolog(CType * func_type)
     addr = 8;
     /* if the function returns a structure, then add an
        implicit pointer parameter */
-    func_vt = sym->type;
-    func_var = (sym->f.func_type == FUNC_ELLIPSIS);
     if ((func_vt.t & VT_BTYPE) == VT_STRUCT) {
 	func_vc = addr;
 	addr += 4;
@@ -1962,7 +1966,7 @@ void gfunc_prolog(CType * func_type)
     /* define parameters */
     while ((sym = sym->next) != NULL) {
 	type = &sym->type;
-	sym_push(sym->v & ~SYM_FIELD, type, VT_LOCAL | lvalue_type(type->t), addr);
+	sym_push(sym->v & ~SYM_FIELD, type, VT_LOCAL | VT_LVAL, addr);
 	size = type_size(type, &align);
 	size = (size + 3) & ~3;
 
@@ -2254,7 +2258,7 @@ void gen_opi(int op)
       call_func:
 	vswap();
 	/* call generic idiv function */
-	vpush_global_sym(&func_old_type, t);
+	vpush_helper_func(t);
 	vrott(3);
 	gfunc_call(2);
 	vpushi(0);
@@ -2385,18 +2389,18 @@ void gen_opf(int op)
 		// must call intrinsic DP floating point divide
 		vswap();
 		/* call generic idiv function */
-		vpush_global_sym(&func_old_type, TOK__divd);
+		vpush_helper_func(TOK__divd);
 		vrott(3);
 		gfunc_call(2);
 		vpushi(0);
 		vtop->r = REG_FRET;
-		vtop->r2 = REG_LRET;
+		vtop->r2 = REG_IRE2;
 
 	    } else {
 		// must call intrinsic SP floating point divide
 		vswap();
 		/* call generic idiv function */
-		vpush_global_sym(&func_old_type, TOK__divf);
+		vpush_helper_func(TOK__divf);
 		vrott(3);
 		gfunc_call(2);
 		vpushi(0);
