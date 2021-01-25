@@ -829,7 +829,7 @@ ST_FUNC int tccgen_compile(TCCState *s1)
     arm_init(s1);
 #endif
 #ifdef TCC_TARGET_TRANSPUTER
-	transputer_init(s1);
+    transputer_init(s1);
 #endif
 #ifdef INC_DEBUG
     printf("%s: **** new file\n", file->filename);

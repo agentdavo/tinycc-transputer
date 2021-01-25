@@ -3,9 +3,9 @@
 #define EM_TCC_TARGET EM_TRANSPUTER
 
 #define R_DATA_32  R_TRANSPUTER_32
-#define R_DATA_PTR R_TRANSPUTER_64
-#define R_JMP_SLOT R_TRANSPUTER_JUMP_SLOT
-#define R_GLOB_DAT R_TRANSPUTER_64
+#define R_DATA_PTR R_TRANSPUTER_32
+#define R_JMP_SLOT R_TRANSPUTER_JMP_SLOT
+#define R_GLOB_DAT R_TRANSPUTER_GLOB_DAT
 #define R_COPY     R_TRANSPUTER_COPY
 #define R_RELATIVE R_TRANSPUTER_RELATIVE
 
@@ -96,7 +96,7 @@ ST_FUNC unsigned create_plt_entry(TCCState *s1, unsigned got_offset, struct sym_
 {
     	Section *plt = s1->plt;
     	uint8_t *p;
-    	unsigned plt_offset;
+    	unsigned plt_offset, relofs, rel_size;
 
     	if (s1->output_type == TCC_OUTPUT_DLL)
         tcc_error("DLLs unimplemented!");

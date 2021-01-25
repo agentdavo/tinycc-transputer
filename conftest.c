@@ -185,7 +185,6 @@ int main(int argc, char **argv)
 # define TRIPLET_ARCH "aarch64"
 #elif defined(__riscv) && defined(__LP64__)
 # define TRIPLET_ARCH "riscv64"
-#else
 #elif defined(__t800__) || defined(__t9000__) 
 # define TRIPLET_ARCH "Transputer"
 #else

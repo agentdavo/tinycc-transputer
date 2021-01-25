@@ -1,6 +1,6 @@
 /*
  *  Tansputer code generator for TCC
- * 
+ */ 
 
 /* number of available registers */
 
@@ -35,7 +35,7 @@
 #define RC_ALLREGS		0x0777		/*	All registers in region	*/
 
 #define REG_IRET     	RC_IST0  		/* 	single word int return register */
-#define REG_LRET     	RC_IST1  		/* 	second word int return register for long long */
+#define REG_IRE2     	RC_IST1  		/* 	second word int return register for long long */
 #define REG_FRET     	RC_FST0  		/* 	64 bit float return register */
 
 #define ALWAYS_ASSERT(x) \
@@ -45,14 +45,7 @@ do {\
 } while (0)
 
 #define BETWEEN(v1,l1,v2,l2) \
-if !((v1 + l1 >= v2 && v1 <= v2) || (v2 + l2 >= v1 && v2 <= v2))  
-
-/******************************************************/
-#else /* ! TARGET_DEFS_ONLY */
-/******************************************************/
-
-#define USING_GLOBALS
-#include "tcc.h"
+  ((v1 + l1 >= v2 && v1 <= v2) || (v2 + l2 >= v1 && v2 <= v2))  
 
 #define DEFAULT_ALIGN 	1
 /* maximum alignment (for aligned attribute support) */
@@ -61,6 +54,9 @@ if !((v1 + l1 >= v2 && v1 <= v2) || (v2 + l2 >= v1 && v2 <= v2))
 #define BITS_BIG_ENDIAN	0
 
 #define PTR_SIZE 		4
+
+#define LDOUBLE_SIZE 8
+#define LDOUBLE_ALIGN 8
 
 #define DBL_EPSILON 	2.2204460492503131e-16
 #define FLT_EPSILON 	1.19209290e-07F
@@ -74,6 +70,43 @@ if !((v1 + l1 >= v2 && v1 <= v2) || (v2 + l2 >= v1 && v2 <= v2))
 #endif
 
 #define ALIGNEMENT 		DEFAULT_ALIGN
+
+/******************************************************/
+#else /* ! TARGET_DEFS_ONLY */
+/******************************************************/
+
+#define USING_GLOBALS
+#include "tcc.h"
+
+ST_DATA const char *target_machine_defs =
+    "__t9000__\0"
+    ;
+
+#if 0
+#define DEFAULT_ALIGN 	1
+/* maximum alignment (for aligned attribute support) */
+#define MAX_ALIGN     	4
+
+#define BITS_BIG_ENDIAN	0
+
+#define PTR_SIZE 		4
+
+#define LDOUBLE_SIZE 8
+#define LDOUBLE_ALIGN 8
+
+#define DBL_EPSILON 	2.2204460492503131e-16
+#define FLT_EPSILON 	1.19209290e-07F
+
+#undef BOOL
+#define BOOL int
+
+#ifndef FALSE
+# define FALSE 0
+# define TRUE 1
+#endif
+
+#define ALIGNEMENT 		DEFAULT_ALIGN
+#endif
 /* pretty names for the registers */
 enum {
 	REG_IST0 = 0,
@@ -128,6 +161,32 @@ static char *reg_names[] =  {
 	"Sregs",
 	"Allregs"
 };
+
+#define REG_STK REG_STACKREGS
+#define REG_WPTR REG_WORKREGS
+
+/* FIXME: to be defined */
+#define Transputer_SS()
+#define Transputer_SB()
+#define Transputer_LT()
+#define Transputer_GT()
+#define Transputer_FPREM()
+#define Transputer_FPR64TOR32()
+#define Transputer_FPR32TOR64()
+#define Transputer_FPCHKERR()
+#define Transputer_FPLDZEROSN()
+#define Transputer_LS()
+#define Transputer_LDLNP(A)
+#define Transputer_WSUB()
+#define Transputer_BSUB()
+#define Transputer_WSUBDB()
+#define Transputer_SSUB()
+#define Transputer_NOT()
+#define Transputer_LSHL()
+#define Transputer_LSHR()
+#define Transputer_LSUM()
+#define Transputer_LDIFF()
+#define Transputer_XDBLE()
 
 static unsigned long func_sub_sp_offset;
 static int func_ret_sub;
@@ -1041,6 +1100,21 @@ ST_FUNC void gjmp_addr(int a)
 	g((0x20 << 12) | (get_prefix(r) << 8) | (0x0F) << 4 | (0x0F & r));
 }
 
+// FIXME:
+ST_FUNC int gjmp_append(int n, int t)
+{
+    void *p;
+    /* insert jump list n into t */
+    if (n) {
+        uint32_t n1 = n, n2;
+        while ((n2 = read32le(p = cur_text_section->data + n1)))
+            n1 = n2;
+        write32le(p, t);
+        t = n;
+    }
+    return t;
+}
+
 // op = gt, gtu, eqc, diff
 // t = absoulte address
 ST_FUNC int gjmp_cond(int op, int t)
@@ -1089,7 +1163,7 @@ void Transputer_AJW(int v)
 
 void Transputer()
 {
-	ge_l16(0x23F2);
+	gen_le16(0x23F2); //ge_l16
 }
 
 void Transputer_UMINUS()
@@ -1454,32 +1528,32 @@ void Transputer_FPI32TOR32()
 
 void Transputer_FPUEXPDEC32()
 {
-	ge_le16(0x2DF9);
+	gen_le16(0x2DF9);
 }
 
 void Transputer_FPUCHKI32()
 {
-	ge_le16(0x2DFE);
+	gen_le16(0x2DFE);
 }
 
 void Transputer_FPUCLRERR()
 {
-	ge_le16(0x29FC);
+	gen_le16(0x29FC);
 }
 
 void Transputer_FPSTNLI32()
 {
-	ge_le16(0x29FE);
+	gen_le16(0x29FE);
 }
 
 void Transputer_FPINT()
 {
-	ge_le16(0x2AF1);
+	gen_le16(0x2AF1);
 }
 
 void Transputer_FPDUP()
 {
-	ge_le16(0x2AF3);
+	gen_le16(0x2AF3);
 }
 
 /* generate an integer binary operation */
@@ -1543,7 +1617,8 @@ void gen_opi(int op)
 			//out_op(TP_OP_SHR);
 			goto std_shift;
 		case TOK_SAR:
-			out_op(TP_OP_SHR);
+			opc = TP_OP_SHR;
+			//out_op(TP_OP_SHR); //
 			goto std_shift;
 		case '/':
 			opc = 0x2C;
@@ -1554,7 +1629,8 @@ void gen_opi(int op)
 			//out_op(TP_OP_REM);
 			goto std_op;
 		case TOK_UMOD:
-			out_op(TP_OP_REM);
+			opc = TP_OP_REM;
+			//out_op(TP_OP_REM); //
 			goto std_op;
 		case TOK_GT:
 			opc = 0x09;
@@ -1800,8 +1876,9 @@ ST_FUNC void gen_cvt_ftoi(int t)
 	int r, r2;
     	//printf("gen_cvt_itof(t=%d)\n", t);
 
-	r = fpr(gv(RC_INT));
-	r2 = intr(vtop->r=get_reg(RC_INT));
+	// FIXME fpr, intr
+	r = /*fpr*/(gv(RC_INT));
+	r2 = /*intr*/(vtop->r=get_reg(RC_INT));
 
 	if ((vtop->type.t & VT_BTYPE) == VT_INT) {
 		Transputer_FPINT();

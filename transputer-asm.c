@@ -25,6 +25,7 @@ static void asm_error(void)
 }
 
 /* XXX: make it faster ? */
+#if 0
 ST_FUNC void g(int c)
 {
     int ind1;
@@ -48,6 +49,7 @@ ST_FUNC void gen_le32 (int i)
     gen_le16(i);
     gen_le16(i>>16);
 }
+#endif
 
 ST_FUNC void gen_expr32(ExprValue *pe)
 {
