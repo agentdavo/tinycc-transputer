@@ -20,6 +20,13 @@
 
 #define USING_GLOBALS
 #include "tcc.h"
+#ifdef TCC_TARGET_TRANSPUTER
+/* TVX low-precision formats, a verbatim copy of the T4 emulator's
+   transputer/t4/tvx.h so the compiler builds without transputer/ (synced by
+   transputer/scripts/sync-tvx-headers.sh).  Used here to fold __bf16
+   conversions of constants. */
+#include "lib/transputer-tvx/tvx.h"
+#endif
 
 /********************************************************/
 /* global variables */
@@ -43,6 +50,17 @@ static int nb_sym_pools;
 
 static Sym *all_cleanups, *pending_gotos;
 static int local_scope;
+
+#ifdef TCC_TARGET_TRANSPUTER
+/* Deferred alias support: when __attribute__((alias("target"))) is used
+   before the target is defined, we save the alias and resolve at end of TU */
+typedef struct PendingAlias {
+    int alias_v;        /* token of the alias symbol */
+    int target_v;       /* token of the target symbol */
+    struct PendingAlias *next;
+} PendingAlias;
+static PendingAlias *pending_aliases;
+#endif
 ST_DATA char debug_modes;
 
 ST_DATA SValue *vtop;
@@ -74,6 +92,40 @@ ST_DATA int func_vc; /* stack address for implicit struct return storage */
 ST_DATA int func_ind; /* function start address */
 static int func_old;
 ST_DATA const char *funcname;
+#ifdef TCC_TARGET_TRANSPUTER
+static int tcc_trace_func_enabled = -1;
+static char tcc_trace_func_name[64];
+
+static int tcc_trace_func_active(void) {
+    const char *env;
+    if (tcc_trace_func_enabled == -1) {
+        env = getenv("TCC_TRACE_FUNC");
+        if (env && *env) {
+            pstrcpy(tcc_trace_func_name, sizeof(tcc_trace_func_name), env);
+            tcc_trace_func_enabled = 1;
+        } else {
+            tcc_trace_func_enabled = 0;
+        }
+    }
+    if (!tcc_trace_func_enabled || !funcname || !*funcname)
+        return 0;
+    return strcmp(funcname, tcc_trace_func_name) == 0;
+}
+
+/* TCC_TRANSPUTER_WSUB_OPT=0 (bsub=0) or TCC_TRANSPUTER_BSUB_OPT=0 (bsub=1)
+   turns an indexed pointer-add lowering off, for A/B measurement.  Read
+   once: this is asked on every pointer addition. */
+static int tp_ptradd_opt_off(int bsub)
+{
+    static int off[2] = { -1, -1 };
+    if (off[bsub] < 0) {
+        const char *e = getenv(bsub ? "TCC_TRANSPUTER_BSUB_OPT"
+                                    : "TCC_TRANSPUTER_WSUB_OPT");
+        off[bsub] = e && !strcmp(e, "0");
+    }
+    return off[bsub];
+}
+#endif
 ST_DATA CType int_type, func_old_type, char_type, char_pointer_type;
 static CString initstr;
 
@@ -88,6 +140,9 @@ static CString initstr;
 #define VT_PTRDIFF_T (VT_LONG | VT_LLONG)
 #endif
 
+#ifdef TCC_TARGET_TRANSPUTER
+static struct switch_t *cur_switch; /* current switch */
+#else
 static struct switch_t {
     struct case_t {
         int64_t v1, v2;
@@ -100,6 +155,7 @@ static struct switch_t {
     struct switch_t *prev;
     SValue sv;
 } *cur_switch; /* current switch */
+#endif
 
 #define MAX_TEMP_LOCAL_VARIABLE_NUMBER 8
 /*list of temporary local variables on the stack in current function. */
@@ -135,6 +191,9 @@ static void block(int flags);
 
 static void gen_cast(CType *type);
 static void gen_cast_s(int t);
+#ifdef TCC_TARGET_TRANSPUTER
+static void gen_cast_bf16(CType *type, int sbt, int dbt);
+#endif
 static inline CType *pointed_type(CType *type);
 static void check_restrict_type(CType *type);
 static int type_qualifiers(CType *type);
@@ -156,6 +215,10 @@ static void vpush(CType *type);
 static int gvtst(int inv, int t);
 static void gen_inline_functions(TCCState *s);
 static void free_inline_functions(TCCState *s);
+#ifdef TCC_TARGET_TRANSPUTER
+static void note_inline_call_section(SValue *call_target);
+static void resolve_inline_sections(TCCState *s);
+#endif
 static void skip_or_save_block(TokenString **str);
 static void gv_dup(void);
 static int get_temp_local_var(int size,int align,int *r2);
@@ -180,6 +243,9 @@ static int gind()
 {
   int t = ind;
   CODE_ON();
+#ifdef TCC_TARGET_TRANSPUTER
+  tp_label_here();
+#endif
   if (debug_modes)
     tcc_tcov_block_begin(tcc_state);
   return t;
@@ -227,6 +293,9 @@ static int btype_size(int bt)
 {
     return bt == VT_BYTE || bt == VT_BOOL ? 1 :
         bt == VT_SHORT ? 2 :
+#ifdef TCC_TARGET_TRANSPUTER
+        bt == VT_BF16 || bt == VT_F16 || bt == VT_FLOAT16 ? 2 :
+#endif
         bt == VT_INT ? 4 :
         bt == VT_LLONG ? 8 :
         bt == VT_PTR ? PTR_SIZE : 0;
@@ -254,6 +323,10 @@ static int R2_RET(int t)
 #if PTR_SIZE == 4
     if (t == VT_LLONG)
         return REG_IRE2;
+# ifdef TCC_TARGET_TRANSPUTER
+    if (t == VT_DOUBLE || t == VT_LDOUBLE)
+        return REG_FRET + 1;
+# endif
 #elif defined TCC_TARGET_X86_64
     if (t == VT_QLONG)
         return REG_IRE2;
@@ -400,6 +473,27 @@ ST_FUNC void tccgen_init(TCCState *s1)
     cstr_new(&initstr);
 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+static void resolve_pending_aliases(void)
+{
+    PendingAlias *pa, *next;
+    Sym *alias_sym;
+    ElfSym *esym;
+    for (pa = pending_aliases; pa; pa = next) {
+        next = pa->next;
+        alias_sym = sym_find(pa->alias_v);
+        esym = elfsym(sym_find(pa->target_v));
+        if (!esym)
+            tcc_error("alias target '%s' not defined in this translation unit",
+                      get_tok_str(pa->target_v, NULL));
+        put_extern_sym2(alias_sym, esym->st_shndx,
+                        esym->st_value, esym->st_size, 1);
+        tcc_free(pa);
+    }
+    pending_aliases = NULL;
+}
+#endif
+
 ST_FUNC int tccgen_compile(TCCState *s1)
 {
     funcname = "";
@@ -414,12 +508,18 @@ ST_FUNC int tccgen_compile(TCCState *s1)
 #ifdef TCC_TARGET_ARM
     arm_init(s1);
 #endif
+#ifdef TCC_TARGET_TRANSPUTER
+    transputer_init(s1);
+#endif
 #ifdef INC_DEBUG
     printf("%s: **** new file\n", file->filename);
 #endif
     parse_flags = PARSE_FLAG_PREPROCESS | PARSE_FLAG_TOK_NUM | PARSE_FLAG_TOK_STR;
     next();
     decl(VT_CONST);
+#ifdef TCC_TARGET_TRANSPUTER
+    resolve_pending_aliases();
+#endif
     gen_inline_functions(s1);
     check_vstack();
     /* end of translation unit info */
@@ -449,6 +549,14 @@ ST_FUNC void tccgen_finish(TCCState *s1)
     loop_scope = NULL;
     all_cleanups = NULL;
     pending_gotos = NULL;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* Free any unresolved pending aliases (shouldn't happen normally) */
+    while (pending_aliases) {
+        PendingAlias *pa = pending_aliases;
+        pending_aliases = pa->next;
+        tcc_free(pa);
+    }
+#endif
     nb_temp_local_vars = 0;
     global_label_stack = NULL;
     local_label_stack = NULL;
@@ -459,8 +567,20 @@ ST_FUNC void tccgen_finish(TCCState *s1)
 /* ------------------------------------------------------------------------- */
 ST_FUNC ElfSym *elfsym(Sym *s)
 {
+#ifdef TCC_TARGET_TRANSPUTER
+  int max_syms;
+#endif
   if (!s || !s->c)
     return NULL;
+#ifdef TCC_TARGET_TRANSPUTER
+  /* Bounds check to prevent crash on corrupt symbol table */
+  max_syms = symtab_section->data_offset / sizeof(ElfSym);
+  if (s->c < 0 || s->c >= max_syms) {
+    const char *name = s->v ? get_tok_str(s->v, NULL) : "<unknown>";
+    tcc_warning("elfsym: symbol %s has invalid index %d (max=%d)", name, s->c, max_syms);
+    return NULL;
+  }
+#endif
   return &((ElfSym *)symtab_section->data)[s->c];
 }
 
@@ -574,9 +694,36 @@ ST_FUNC void put_extern_sym2(Sym *sym, int sh_num,
 
     } else {
         esym = elfsym(sym);
+#ifdef TCC_TARGET_TRANSPUTER
+        if (!esym) {
+            /* Symbol has invalid index - re-create it */
+            name = get_tok_str(sym->v, NULL);
+            t = sym->type.t;
+            if ((t & VT_BTYPE) == VT_FUNC) {
+                sym_type = STT_FUNC;
+            } else if ((t & VT_BTYPE) == VT_VOID) {
+                sym_type = STT_NOTYPE;
+                if (IS_ASM_FUNC(t))
+                    sym_type = STT_FUNC;
+            } else {
+                sym_type = STT_OBJECT;
+            }
+            if (t & (VT_STATIC | VT_INLINE))
+                sym_bind = STB_LOCAL;
+            else
+                sym_bind = STB_GLOBAL;
+            info = ELFW(ST_INFO)(sym_bind, sym_type);
+            sym->c = put_elf_sym(symtab_section, value, size, info, 0, sh_num, name);
+        } else {
+            esym->st_value = value;
+            esym->st_size = size;
+            esym->st_shndx = sh_num;
+        }
+#else
         esym->st_value = value;
         esym->st_size = size;
         esym->st_shndx = sh_num;
+#endif
     }
     update_storage(sym);
 }
@@ -592,13 +739,144 @@ ST_FUNC void put_extern_sym(Sym *sym, Section *s, addr_t value, unsigned long si
 ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
                      addr_t addend)
 {
+#ifdef TCC_TARGET_TRANSPUTER
+    static int reloc_log = -1;
+    static const char *reloc_sym_filter;
+    static int reloc_type_filter;
+    static int sym_trace = -1;
+    static const char *sym_trace_filter;
+    static int iprel_nonfunc_warn = -1;
+    static int greloc_warn = -1;
+    static int iprel_diag = -1;
+#endif
     int c = 0;
+#ifdef TCC_TARGET_TRANSPUTER
+    if (reloc_log < 0) {
+        const char *env = getenv("T4_RELOC_LOG");
+        reloc_log = env && *env;
+        reloc_sym_filter = getenv("T4_RELOC_SYM");
+        reloc_type_filter = -1;
+        env = getenv("T4_RELOC_TYPE");
+        if (env && *env)
+            reloc_type_filter = (int)strtol(env, NULL, 0);
+    }
+    if (sym_trace < 0) {
+        const char *env = getenv("T4_SYM_TRACE");
+        sym_trace = env && *env;
+        sym_trace_filter = env;
+    }
+    if (iprel_nonfunc_warn < 0) {
+        const char *env = getenv("T4_IPREL_NONFUNC_WARN");
+        iprel_nonfunc_warn = env && *env;
+    }
+    if (greloc_warn < 0) {
+        const char *env = getenv("T4_GRELOC_WARN");
+        greloc_warn = env && *env;
+    }
+    if (iprel_diag < 0) {
+        const char *env = getenv("T4_IPREL_DIAG");
+        iprel_diag = env && *env;
+    }
+
+    /* Bug detection: IPREL32 should only be used for function calls */
+    if (type == R_TRANSPUTER_IPREL32 && sym) {
+        int bt = sym->type.t & VT_BTYPE;
+        /* IPREL32 is only valid for function calls (bt == VT_FUNC).
+         * If we're emitting IPREL32 for a non-function symbol, that's a bug! */
+        if (bt != VT_FUNC && iprel_nonfunc_warn) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            fprintf(stderr,
+                    "BUG_IPREL32_NONFUNCTION: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx\n",
+                    get_tok_str(sym->v, NULL), bt, func, fname,
+                    file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset);
+        }
+        if (iprel_diag) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "IPREL_DIAG: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    get_tok_str(sym->v, NULL), bt, func, fname,
+                    file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+    if ((type == R_TRANSPUTER_IPREL32 || type == R_TRANSPUTER_LDC_ABS) && sym && reloc_log) {
+        const char *name = get_tok_str(sym->v, NULL);
+        if ((!reloc_sym_filter || strstr(name, reloc_sym_filter)) &&
+            (reloc_type_filter < 0 || reloc_type_filter == type)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "RELOC_EMIT: sym=%s type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    name, type, func, fname, file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+    if (sym && sym_trace && sym_trace_filter) {
+        const char *name = get_tok_str(sym->v, NULL);
+        if (name && strstr(name, sym_trace_filter)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            int bt = sym->type.t & VT_BTYPE;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "SYM_RELOC: sym=%s bt=0x%x type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    name, bt, type, func, fname, file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+#endif
 
     if (nocode_wanted && s == cur_text_section)
         return;
 
     if (sym) {
+#ifdef TCC_TARGET_TRANSPUTER
+        /* Validate the symbol pointer and ELF symbol table entry */
+        int max_syms = symtab_section->data_offset / sizeof(ElfSym);
+        /* sym->c < 0 means a local variable (workspace offset on transputer).
+         * Local variables should never need relocations — skip silently. */
+        if (sym->c < 0) {
+            return;
+        }
+        if (sym->c > 1000000) {
+            /* This indicates memory corruption - skip creating relocation */
+            const char *name = (sym->v > 0 && sym->v < 100000) ?
+                get_tok_str(sym->v, NULL) : "<corrupt>";
+            if (greloc_warn) {
+                tcc_warning("greloca: symbol %s has corrupt index %d, skipping relocation",
+                            name, sym->c);
+            }
+            return;
+        }
+        if (0 == sym->c || sym->c >= max_syms) {
+            /* Symbol not in ELF table or has invalid index - (re)create it */
+            if (sym->c >= max_syms) {
+                /* Skip relocation for enum constants - they don't need relocations
+                 * because their values are compile-time integers, not addresses */
+                if (IS_ENUM_VAL(sym->type.t)) {
+                    return;
+                }
+                if (greloc_warn) {
+                    tcc_warning("greloca: symbol %s has invalid index %d (max=%d), recreating",
+                                sym->v ? get_tok_str(sym->v, NULL) : "<unknown>",
+                                sym->c, max_syms);
+                }
+            }
+            sym->c = 0; /* Force recreation */
+#else
         if (0 == sym->c) {
+#endif
             put_extern_sym(sym, NULL, 0, 0);
             if (sym->sym_scope
                 && (sym->type.t & (VT_STATIC|VT_EXTERN)) == (VT_STATIC|VT_EXTERN)) {
@@ -1061,10 +1339,44 @@ static void gvtst_set(int inv, int t)
     int *p;
 
     if (vtop->r != VT_CMP) {
+#ifdef TCC_TARGET_TRANSPUTER
+        /*
+         * Pure integer constants: fold to VT_CMP(0|1) without gen_op.
+         *
+         * Why this matters on Transputer: AReg is the value register and
+         * survives across C statement boundaries.  A preceding
+         *   flags = arch_local_irq_save();   // leaves AReg = flags (often 1)
+         * followed by do { ... } while (0) must NOT emit EQC+CJ against the
+         * residue in AReg.  Going through gen_op(TOK_NE) usually constant-
+         * folds, but any path that materialises a runtime compare would
+         * re-test AReg.  Folding here makes while(0)/while(1) independent
+         * of AReg state (WRITE_ONCE / raw_local_irq_save class of macros).
+         *
+         * Integers only: a float constant's truth is not c.i != 0 (-0.0
+         * has bits set and is false), so it takes gen_op(TOK_NE).  And the
+         * truth value is an int whatever the constant's type - left as
+         * long long, gv() splits the VT_CMP into two words and loads its
+         * jump chains as a constant (`x && 2LL` crashed the compiler).
+         */
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+            && !(vtop->r & VT_NONCONST) && !is_float(vtop->type.t)) {
+            vset_VT_CMP(vtop->c.i != 0);
+            vtop->type.t = VT_INT;
+        } else
+#endif
+#ifdef TCC_TARGET_TRANSPUTER
+        {
+            vpushi(0);
+            gen_op(TOK_NE);
+            if (vtop->r != VT_CMP) /* must be VT_CONST then */
+                vset_VT_CMP(vtop->c.i != 0);
+        }
+#else
         vpushi(0);
         gen_op(TOK_NE);
         if (vtop->r != VT_CMP) /* must be VT_CONST then */
             vset_VT_CMP(vtop->c.i != 0);
+#endif
     }
 
     p = inv ? &vtop->jfalse : &vtop->jtrue;
@@ -1083,12 +1395,50 @@ static int gvtst(int inv, int t)
     if (inv)
         x = u, u = t, t = x;
     op = vtop->cmp_op;
+#ifdef TCC_TARGET_TRANSPUTER
+    if (tcc_trace_func_active()) {
+        fprintf(stderr,
+            "[tcc] gvtst func=%s op=%d inv=%d vtop->r=0x%x jtrue=0x%x jfalse=0x%x ind=0x%x\n",
+            funcname, op, inv, vtop->r, vtop->jtrue, vtop->jfalse, ind);
+    }
+#endif
 
     /* jump to the wanted target */
+#ifdef TCC_TARGET_TRANSPUTER
+    if (vtop->r != VT_CMP) {
+        if (tcc_trace_func_active()) {
+            fprintf(stderr, "[tcc] gvtst func=%s path=bool->CJ\n", funcname);
+        }
+        /*
+         * Boolean still in a register: jump when true (non-zero).
+         * gjmp_cond uses LSB as invert: odd → EQC 0 + CJ (jump if was non-zero),
+         * even → CJ (jump if zero).  Old code passed 0, which inverted the sense
+         * of if(x)/while(x) whenever this path was reached.
+         */
+        t = gjmp_cond(TOK_NE ^ inv, t);
+    } else if (op > 1) {
+        if (tcc_trace_func_active()) {
+            fprintf(stderr, "[tcc] gvtst func=%s path=cmp->CJ op=%d\n", funcname, op ^ inv);
+        }
+        t = gjmp_cond(op ^ inv, t);
+    } else {
+        /* Constant condition: op=0 always false, op=1 always true.
+         * do{}while(0): inv=0, op=0 → no jump (exit).
+         * do{}while(1): inv=0, op=1 → unconditional jump (loop).
+         * if(0)/if(1) use inv=1 (jump-over-body when condition false).
+         */
+        if (tcc_trace_func_active()) {
+            fprintf(stderr, "[tcc] gvtst func=%s path=const->J op=%d inv=%d\n", funcname, op, inv);
+        }
+        if (op != inv)
+            t = gjmp(t);
+    }
+#else
     if (op > 1)
         t = gjmp_cond(op ^ inv, t);
     else if (op != inv)
         t = gjmp(t);
+#endif
     /* resolve complementary jumps to here */
     gsym(u);
 
@@ -1182,6 +1532,9 @@ static void merge_symattr(struct SymAttr *sa, struct SymAttr *sa1)
     sa->packed |= sa1->packed;
     sa->weak |= sa1->weak;
     sa->nodebug |= sa1->nodebug;
+#ifdef TCC_TARGET_TRANSPUTER
+    sa->transparent_union |= sa1->transparent_union;
+#endif
     if (sa1->visibility != STV_DEFAULT) {
 	int vis = sa->visibility;
 	if (vis == STV_DEFAULT
@@ -1209,6 +1562,12 @@ static void merge_funcattr(struct FuncAttr *fa, struct FuncAttr *fa1)
       fa->func_ctor = 1;
     if (fa1->func_dtor)
       fa->func_dtor = 1;
+#ifdef TCC_TARGET_TRANSPUTER
+    if (fa1->func_alwinl)
+      fa->func_alwinl = 1;
+    if (fa1->func_noinline)
+      fa->func_noinline = 1;
+#endif
 }
 
 /* Merge attributes.  */
@@ -1225,6 +1584,204 @@ static void merge_attr(AttributeDef *ad, AttributeDef *ad1)
       ad->asm_label = ad1->asm_label;
     if (ad1->attr_mode)
       ad->attr_mode = ad1->attr_mode;
+#ifdef TCC_TARGET_TRANSPUTER
+}
+
+/* TinyCC does not perform general source-level inlining.  It records an
+   inline definition and emits one out-of-line copy if the definition is
+   referenced.  Record the sections of calls from normal functions here;
+   resolve_inline_sections later combines these roots with the complete graph
+   of deferred inline bodies before any outline is emitted. */
+static void note_inline_call_section(SValue *call_target)
+{
+    Sym *call_sym;
+    int i;
+
+    if (!cur_text_section || nocode_wanted
+        || !(call_target->r & VT_SYM) || !call_target->sym)
+        return;
+
+    call_sym = call_target->sym;
+    for (i = 0; i < tcc_state->nb_inline_fns; ++i) {
+        InlineFunc *fn = tcc_state->inline_fns[i];
+        Sym *inline_sym = fn->sym;
+
+        if (!inline_sym)
+            continue;
+        if (inline_sym != call_sym
+            && (!inline_sym->v || inline_sym->v != call_sym->v))
+            continue;
+        if (fn->section || fn->call_section_conflict)
+            return;
+        if (!fn->call_section)
+            fn->call_section = cur_text_section;
+        else if (fn->call_section != cur_text_section)
+            fn->call_section_conflict = 1;
+        return;
+    }
+}
+
+typedef struct InlineSectionEdge {
+    int callee;
+    unsigned char indirect;
+} InlineSectionEdge;
+
+typedef struct InlineSectionNode {
+    InlineSectionEdge *edges;
+    int nb_edges;
+    Section *placement;
+    unsigned char reachable;
+} InlineSectionNode;
+
+static void add_inline_section_edge(InlineSectionNode *node, int callee,
+                                    int indirect)
+{
+    InlineSectionEdge *edge;
+    int i;
+
+    for (i = 0; i < node->nb_edges; ++i) {
+        edge = &node->edges[i];
+        if (edge->callee == callee) {
+            if (indirect)
+                edge->indirect = 1;
+            return;
+        }
+    }
+    node->edges = tcc_realloc(node->edges,
+                              (node->nb_edges + 1) * sizeof *node->edges);
+    edge = &node->edges[node->nb_edges++];
+    edge->callee = callee;
+    edge->indirect = indirect;
+}
+
+/* Build a conservative call graph from the already-preprocessed token
+   strings.  A function-name token immediately followed by '(' is a direct
+   edge.  Any other reference may escape through a pointer, so it forces the
+   referenced outline to ordinary .text once its containing function is
+   reachable. */
+static void scan_inline_section_edges(TCCState *s, InlineSectionNode *nodes,
+                                      int *by_token, int caller)
+{
+    TokenString stream;
+    int pending = -1;
+
+    stream = *s->inline_fns[caller]->func_str;
+    begin_macro(&stream, 0);
+    next();
+    while (tok != TOK_EOF) {
+        if (pending >= 0) {
+            add_inline_section_edge(&nodes[caller], pending, tok != '(');
+            pending = -1;
+        }
+        if (tok >= TOK_IDENT && tok < tok_ident && by_token[tok])
+            pending = by_token[tok] - 1;
+        next();
+    }
+    if (pending >= 0)
+        add_inline_section_edge(&nodes[caller], pending, 1);
+    end_macro();
+}
+
+static Section *join_inline_section(Section *old, Section *incoming)
+{
+    if (!old)
+        return incoming;
+    if (old == incoming)
+        return old;
+    /* Ordinary .text is the conservative top of the placement lattice. */
+    return text_section;
+}
+
+/* Resolve all deferred-inline placements before emitting any of them.
+
+   Parsing an outline can make another outline live.  Deciding placement at
+   that point is order-dependent: an .init.text path may be seen before a
+   later permanent path to the same callee.  Instead, seed this graph with
+   calls from normal functions, then propagate reachability and section joins
+   to a fixed point.  Explicit section attributes are barriers and remain
+   authoritative.  Address escapes, conflicting callers, and unknown roots
+   use ordinary .text. */
+static void resolve_inline_sections(TCCState *s)
+{
+    InlineSectionNode *nodes;
+    int *by_token;
+    int changed, i, j;
+
+    nodes = tcc_mallocz(s->nb_inline_fns * sizeof *nodes);
+    by_token = tcc_mallocz(tok_ident * sizeof *by_token);
+    for (i = 0; i < s->nb_inline_fns; ++i) {
+        InlineFunc *fn = s->inline_fns[i];
+        if (fn->sym && fn->sym->v >= TOK_IDENT && fn->sym->v < tok_ident)
+            by_token[fn->sym->v] = i + 1;
+    }
+    for (i = 0; i < s->nb_inline_fns; ++i)
+        scan_inline_section_edges(s, nodes, by_token, i);
+    tcc_free(by_token);
+
+    for (i = 0; i < s->nb_inline_fns; ++i) {
+        InlineFunc *fn = s->inline_fns[i];
+        Sym *sym = fn->sym;
+
+        if (!sym)
+            continue;
+        if (sym->c || !(sym->type.t & VT_INLINE)) {
+            nodes[i].reachable = 1;
+            if (fn->section)
+                nodes[i].placement = fn->section;
+            else if (sym->a.addrtaken || fn->call_section_conflict
+                     || !fn->call_section)
+                nodes[i].placement = text_section;
+            else
+                nodes[i].placement = fn->call_section;
+        }
+    }
+
+    do {
+        changed = 0;
+        for (i = 0; i < s->nb_inline_fns; ++i) {
+            InlineSectionNode *caller = &nodes[i];
+
+            if (!caller->reachable || !caller->placement)
+                continue;
+            for (j = 0; j < caller->nb_edges; ++j) {
+                InlineSectionEdge *edge = &caller->edges[j];
+                InlineSectionNode *callee = &nodes[edge->callee];
+                InlineFunc *callee_fn = s->inline_fns[edge->callee];
+                Sym *callee_sym = callee_fn->sym;
+                Section *incoming, *joined;
+
+                if (!callee_sym)
+                    continue;
+                if (!callee->reachable) {
+                    callee->reachable = 1;
+                    changed = 1;
+                }
+                if (callee_fn->section) {
+                    joined = callee_fn->section;
+                } else {
+                    incoming = edge->indirect ? text_section
+                                              : caller->placement;
+                    if (callee_sym->a.addrtaken)
+                        incoming = text_section;
+                    joined = join_inline_section(callee->placement, incoming);
+                }
+                if (joined != callee->placement) {
+                    callee->placement = joined;
+                    changed = 1;
+                }
+            }
+        }
+    } while (changed);
+
+    for (i = 0; i < s->nb_inline_fns; ++i) {
+        InlineFunc *fn = s->inline_fns[i];
+        if (!fn->section && nodes[i].reachable)
+            fn->call_section = nodes[i].placement ? nodes[i].placement
+                                                  : text_section;
+        tcc_free(nodes[i].edges);
+    }
+    tcc_free(nodes);
+#endif
 }
 
 /* Merge some type attributes.  */
@@ -1438,7 +1995,12 @@ ST_FUNC void save_reg_upstack(int r, int n)
                     o(0xd8dd); /* fstp %st(0) */
                 }
 #endif
+#ifdef TCC_TARGET_TRANSPUTER
+                /* Store the second word of a two-register value separately.
+                   Each backend's store() handles one word at a time. */
+#else
                 /* special long long case */
+#endif
                 if (p->r2 < VT_CONST && USING_TWO_WORDS(bt)) {
                     sv.c.i += PTR_SIZE;
                     store(p->r2, &sv);
@@ -1849,6 +2411,24 @@ ST_FUNC int gv(int rc)
     int r, r2, r_ok, r2_ok, rc2, bt;
     int bit_pos, bit_size, size, align;
 
+#ifdef TCC_TARGET_TRANSPUTER
+    if ((vtop->r & VT_VALMASK) == VT_CONST
+        && vtop->sym
+        && !(vtop->r & VT_SYM)
+        && !IS_ENUM_VAL(vtop->sym->type.t)) {
+        const char *diag = getenv("T4_LDC_SYM_DIAG");
+        if (diag && *diag) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            fprintf(stderr,
+                    "LDC_SYM_DIAG: func=%s file=%s line=%d sym=%s forcing VT_SYM\n",
+                    func, fname, file ? file->line_num : -1,
+                    get_tok_str(vtop->sym->v, NULL));
+        }
+        vtop->r |= VT_SYM;
+    }
+#endif
+
     /* NOTE: get_reg can modify vstack[] */
     if (vtop->type.t & VT_BITFIELD) {
         CType type;
@@ -1943,6 +2523,16 @@ ST_FUNC int gv(int rc)
 
                 /* two register type load :
                    expand to two words temporarily */
+#ifdef TCC_TARGET_TRANSPUTER
+                if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST
+                    || (vtop->r & VT_LVAL)) {
+                    save_reg_upstack(r + 1, 1);
+                    load(r, vtop);
+                    vtop->r = r;
+                    vtop->r2 = r + 1;
+                    goto done;
+                }
+#endif
                 if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
                     /* load constant */
                     unsigned long long ll = vtop->c.i;
@@ -1963,6 +2553,12 @@ ST_FUNC int gv(int rc)
                     incr_offset(PTR_SIZE);
                 } else {
                     /* move registers */
+#ifdef TCC_TARGET_TRANSPUTER
+                    /* a word at a time: load() moves a two-word register
+                       value as the pair r/r + 1, and nothing allocated
+                       r + 1 here (r2 comes from get_reg() below) */
+                    vtop->type.t = load_type;
+#endif
                     if (!r_ok)
                         load(r, vtop);
                     if (r2_ok && vtop->r2 < VT_CONST)
@@ -2092,6 +2688,16 @@ static void gv_dup(void)
     /* duplicate value */
     rc = RC_TYPE(t);
     gv(rc);
+#ifdef TCC_TARGET_TRANSPUTER
+    if (USING_TWO_WORDS(t)) {
+        /* a double: load() would copy the pair as r/r + 1, where nothing
+           allocated r + 1, and leave both copies sharing r2.  Keep this
+           copy in its registers and move the one below to a temporary. */
+        vdup();
+        save_reg_upstack(vtop->r, 1);
+        return;
+    }
+#endif
     r = get_reg(rc);
     vdup();
     load(r, vtop);
@@ -2158,6 +2764,25 @@ static void gen_opl(int op)
         /* stack: H1 H2 L1 L2 */
         //pv("gen_opl B",0,4);
         if (op == '*') {
+#ifdef TCC_TARGET_TRANSPUTER
+            /*
+             * The multiply below keeps H1/H2/L1/L2 live while a copied
+             * L1/L2 pair is consumed by TOK_UMULL.  Transputer registers
+             * are workspace-backed pseudo-registers.  Under register
+             * pressure get_reg() could reuse L1's slot for UMULL's low
+             * result, so the later L1 * H2 cross product read that result
+             * instead of the original L1.
+             *
+             * Materialize the four source words in independent temporary
+             * locals before making the UMULL copies.  This is the same
+             * liveness barrier used around calls and keeps the generic
+             * long-long expansion valid for the Transputer backend.
+             */
+            save_reg(vtop[-3].r);
+            save_reg(vtop[-2].r);
+            save_reg(vtop[-1].r);
+            save_reg(vtop[0].r);
+#endif
             vpushv(vtop - 1);
             vpushv(vtop - 1);
             gen_op(TOK_UMULL);
@@ -2256,6 +2881,12 @@ static void gen_opl(int op)
                 vswap();
             lbuild(t);
         } else {
+#ifdef TCC_TARGET_TRANSPUTER
+            /* Use native LSHL/LSHR instructions for SHL/SHR.
+             * SAR (arithmetic right shift) falls through to
+             * runtime helper __ashrdi3 inside gen_opl_shift. */
+            gen_opl_shift(op);
+#else
             /* XXX: should provide a faster fallback on x86 ? */
             switch(op) {
             case TOK_SAR:
@@ -2268,6 +2899,7 @@ static void gen_opl(int op)
                 func = TOK___ashldi3;
                 goto gen_func;
             }
+#endif
         }
         break;
     default:
@@ -2283,10 +2915,92 @@ static void gen_opl(int op)
         vtop[-2] = tmp;
         /* stack: L1 L2 H1 H2 */
         if (!cur_switch || cur_switch->bsym) {
+#ifndef TCC_TARGET_TRANSPUTER
             /* avoid differnt registers being saved in branches.
                This is not needed when comparing switch cases */
+#endif
             save_regs(4);
         }
+#ifdef TCC_TARGET_TRANSPUTER
+        /* Transputer-specific 64-bit comparison.
+         *
+         * The generic algorithm (below in #else) relies on CPU flags
+         * persisting across conditional jumps.  On transputer, CJ consumes
+         * AReg, destroying the comparison result.  The "non-equal test"
+         * (vpushi(0) + vset_VT_CMP(TOK_NE)) therefore tests a constant 0
+         * instead of the actual comparison flags.
+         *
+         * Fix: save copies of the H1/H2 SValues (which still live in
+         * workspace after save_regs), and re-push them for an explicit
+         * NE test after the widened comparison's CJ.
+         *
+         * Algorithm (for LT, similar for GT/LE/GE/unsigned variants):
+         *   a = CJ when H1 LE H2 is FALSE → H1 > H2 → overall FALSE
+         *   b = CJ when H1 NE H2 is TRUE  → H1 < H2 → overall TRUE
+         *   fall-through: H1 == H2 → compare L1 ULT L2
+         */
+        {
+            /* compare high */
+            op1 = op;
+            if (op1 == TOK_LT)
+                op1 = TOK_LE;
+            else if (op1 == TOK_GT)
+                op1 = TOK_GE;
+            else if (op1 == TOK_ULT)
+                op1 = TOK_ULE;
+            else if (op1 == TOK_UGT)
+                op1 = TOK_UGE;
+            a = 0;
+            b = 0;
+
+            if (op != TOK_NE && op != TOK_EQ) {
+                /* The widened compare consumes H1/H2, and the explicit NE
+                 * test after its CJ needs them again (on x86 the flags
+                 * persist; on transputer CJ destroys them).
+                 *
+                 * The first version stashed the two SValues in locals and
+                 * re-pushed them for the NE test.  That is invisible to the
+                 * back end: its emit-time STL cancellation decides a spill
+                 * is dead by scanning the *vstack*, so the workspace slot
+                 * the saved copies named had its store deleted, and the NE
+                 * test compared uninitialised memory.  Kernel-visible as
+                 * every `loff_t < 0` guard flipping at random - /init's
+                 * exec failed in generic_file_read_iter with -EINVAL.
+                 *
+                 * Duplicating the operands *on the vstack* keeps them live
+                 * in the only place the back end looks. */
+                vpushv(&vtop[-1]);          /* H1 copy */
+                vpushv(&vtop[-1]);          /* H2 copy */
+                gen_op(op1);                /* consumes the copies */
+                a = gvtst(1, 0);
+                gen_op(TOK_NE);             /* consumes the originals */
+                b = gvtst(0, 0);
+            } else {
+                gen_op(op1);
+                if (op == TOK_NE)
+                    b = gvtst(0, 0);
+                else
+                    a = gvtst(1, 0);
+            }
+            /* compare low. Always unsigned */
+            op1 = op;
+            if (op1 == TOK_LT)
+                op1 = TOK_ULT;
+            else if (op1 == TOK_LE)
+                op1 = TOK_ULE;
+            else if (op1 == TOK_GT)
+                op1 = TOK_UGT;
+            else if (op1 == TOK_GE)
+                op1 = TOK_UGE;
+            gen_op(op1);
+#if 0//def TCC_TARGET_I386
+            if (op == TOK_NE) { gsym(b); break; }
+            if (op == TOK_EQ) { gsym(a); break; }
+#endif
+            gvtst_set(1, a);
+            gvtst_set(0, b);
+        }
+#else
         /* compare high */
         op1 = op;
         /* when values are equal, we need to compare low words. since
@@ -2330,6 +3044,7 @@ static void gen_opl(int op)
 #endif
         gvtst_set(1, a);
         gvtst_set(0, b);
+#endif /* TCC_TARGET_TRANSPUTER */
         break;
     }
 }
@@ -2507,6 +3222,8 @@ static void gen_opic(int op)
 }
 
 #if defined TCC_TARGET_X86_64 || defined TCC_TARGET_I386 || defined TCC_TARGET_ARM64
+# define gen_negf gen_opf
+#elif defined TCC_TARGET_TRANSPUTER
 # define gen_negf gen_opf
 #elif defined TCC_TARGET_ARM
 void gen_negf(int op)
@@ -2708,6 +3425,17 @@ static void type_to_str(char *buf, int buf_size,
     case VT_SHORT:
         tstr = "short";
         goto add_tstr;
+#ifdef TCC_TARGET_TRANSPUTER
+    case VT_BF16:
+        tstr = "__bf16";
+        goto add_tstr;
+    case VT_F16:
+        tstr = "__fp16";
+        goto add_tstr;
+    case VT_FLOAT16:
+        tstr = "_Float16";
+        goto add_tstr;
+#endif
     case VT_INT:
         tstr = "int";
         goto maybe_long;
@@ -3046,8 +3774,57 @@ static int combine_types(CType *dest, SValue *op1, SValue *op2, int op)
     return ret;
 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+/* _Float16 is a real arithmetic type (C23 Annex H): an operation on it is
+   formally performed in the type and yields the type.  The transputer has no
+   native binary16 arithmetic, so we emulate the way every soft-float target
+   does - widen to binary32, operate, round back.  Rounding back after *every*
+   operation is Clang's -ffloat16-excess-precision=none, i.e. strict
+   operation-by-operation emulation.  We choose strict over Clang's default
+   because it is the predictable one and R32TOF16 is a single instruction.
+
+   Returns 1 if the result of `op` on the current vtop pair must be narrowed
+   back to _Float16, applying the usual arithmetic conversions: the result is
+   _Float16 only when no operand is of greater rank (float/double/long double)
+   and the operation is not a relational one, which yields int. */
+static int f16_result_narrows(int op)
+{
+    int bt1, bt2;
+
+    if (TOK_ISCOND(op))
+        return 0;
+    bt1 = vtop[-1].type.t & VT_BTYPE;
+    bt2 = vtop[0].type.t & VT_BTYPE;
+    if (bt1 != VT_FLOAT16 && bt2 != VT_FLOAT16)
+        return 0;
+    /* a wider real type wins the usual arithmetic conversions */
+    if (bt1 == VT_FLOAT || bt1 == VT_DOUBLE || bt1 == VT_LDOUBLE
+        || bt2 == VT_FLOAT || bt2 == VT_DOUBLE || bt2 == VT_LDOUBLE)
+        return 0;
+    return 1;
+}
+
+static void gen_op1(int op);
+
+ST_FUNC void gen_op(int op)
+{
+    int narrow = f16_result_narrows(op);
+    /* The arithmetic conversion gives both operands the unqualified common
+       type before the back end sees them: tell it whether either was a
+       volatile read, which must not be merged with another. */
+    int saved_volatile = tp_opf_volatile;
+    tp_opf_volatile = ((vtop[-1].type.t | vtop[0].type.t) & VT_VOLATILE) != 0;
+    gen_op1(op);
+    tp_opf_volatile = saved_volatile;
+    if (narrow)
+        gen_cast_s(VT_FLOAT16);
+}
+
+static void gen_op1(int op)
+#else
 /* generic gen_op: handles types problems */
 ST_FUNC void gen_op(int op)
+#endif
 {
     int t1, t2, bt1, bt2, t;
     CType type1, combtype;
@@ -3063,7 +3840,36 @@ redo:
     t2 = vtop[0].type.t;
     bt1 = t1 & VT_BTYPE;
     bt2 = t2 & VT_BTYPE;
+
+#ifdef TCC_TARGET_TRANSPUTER
+    /* __fp16 and __bf16 are storage types: they promote to binary32 in every
+       arithmetic context, so the result of an operation is float, never the
+       narrow type.  Promote here so nothing downstream sees VT_F16/VT_BF16
+       as an operand.
+
+       This is exactly what the ARM ACLE mandates for __fp16, and what the
+       x86-64 psABI originally specified for __bf16.
+
+       VT_FLOAT16 (_Float16) is widened here too, because the transputer has
+       no native binary16 arithmetic - but unlike the storage types its
+       result is narrowed straight back by the gen_op() wrapper above, so it
+       is a true arithmetic type as C23 Annex H requires. */
+    if (bt1 == VT_BF16 || bt2 == VT_BF16 ||
+        bt1 == VT_F16  || bt2 == VT_F16 ||
+        bt1 == VT_FLOAT16 || bt2 == VT_FLOAT16) {
+        if (bt2 == VT_BF16 || bt2 == VT_F16 || bt2 == VT_FLOAT16)
+            gen_cast_s(VT_FLOAT);
+        if (bt1 == VT_BF16 || bt1 == VT_F16 || bt1 == VT_FLOAT16) {
+            vswap();
+            gen_cast_s(VT_FLOAT);
+            vswap();
+        }
+        goto redo;
+    }
+
+#else
         
+#endif
     if (bt1 == VT_FUNC || bt2 == VT_FUNC) {
 	if (bt2 == VT_FUNC) {
 	    mk_pointer(&vtop->type);
@@ -3112,9 +3918,93 @@ op_err:
                 gen_cast_s(VT_INT);
 #endif
             type1 = vtop[-1].type;
+#ifdef TCC_TARGET_TRANSPUTER
+            {
+                int tp_ptradd_fast = 0;
+                /* A VLA element (a row of int m[r][c]) has a size known
+                   only at run time; its static size is that of a pointer,
+                   which would pass for a word and take wsub below. */
+                int tp_elem_size = pointed_type(&vtop[-1].type)->t & VT_VLA
+                                   ? 0 : pointed_size(&vtop[-1].type);
+#ifdef CONFIG_TCC_BCHECK
+                int tp_bounds_active = tcc_state->do_bounds_check && !CONST_WANTED;
+#else
+                int tp_bounds_active = 0;
+#endif
+                /* WSUB/WSUBDB compute base + index*4 (or *8) in one
+                 * instruction — the whole point of the transputer's indexed
+                 * addressing. Enabled by default; set
+                 * TCC_TRANSPUTER_WSUB_OPT=0 to fall back to the generic
+                 * multiply-then-add lowering. */
+                {
+                    int tp_wsub_enabled = !tp_ptradd_opt_off(0);
+
+                    /* None of these may fire while a constant expression is
+                     * being built. `&arr[1]` in a static initialiser is an
+                     * address constant that the generic lowering folds; the
+                     * indexed paths emit instructions instead, and the result
+                     * is rejected with "initializer element is not constant".
+                     *
+                     * nocode_wanted alone does NOT cover this: CONST_WANTED is
+                     * a distinct field of it (CONST_WANTED_MASK), and it is
+                     * what initialiser parsing sets. Guarding only on
+                     * nocode_wanted closed the offsetof case — a literal base —
+                     * but left this one open, and it reappeared the moment
+                     * symbol bases were allowed through. */
+                    if (CONST_WANTED)
+                        tp_wsub_enabled = 0;
+                    if (tp_wsub_enabled && op == '+' && tp_elem_size == 4 && !tp_bounds_active)
+                        tp_ptradd_fast = gen_ptradd_wsub();
+                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 8 && !tp_bounds_active)
+                        tp_ptradd_fast = gen_ptradd_wsubdb();
+                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 1
+                             && !tp_bounds_active) {
+                        /* separately gateable so the A/B can be measured */
+                        if (!tp_ptradd_opt_off(1))
+                            tp_ptradd_fast = gen_ptradd_bsub();
+                    }
+                    /* T9000 ssub (base + index*2); returns 0 unless -mt9000.
+                     * Distinct element size from the bsub path above, so the
+                     * two coexist. */
+                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 2 && !tp_bounds_active)
+                        tp_ptradd_fast = gen_ptradd_ssub();
+                }
+                if (!tp_ptradd_fast) {
+                    vpush_type_size(pointed_type(&vtop[-1].type), &align);
+                    vtop->type.t &= ~VT_UNSIGNED;
+                    gen_op('*');
+#else
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             vtop->type.t &= ~VT_UNSIGNED;
             gen_op('*');
+#endif
+#ifdef TCC_TARGET_TRANSPUTER
+#ifdef CONFIG_TCC_BCHECK
+            if (tcc_state->do_bounds_check && !CONST_WANTED) {
+                /* if bounded pointers, we generate a special code to
+                   test bounds */
+                        if (op == '-') {
+                            vpushi(0);
+                            vswap();
+                            gen_op('-');
+                        }
+                        gen_bounded_ptr_add();
+                    } else
+#endif
+                    {
+                        /* The result of this add is an address, so it can go
+                         * on the T9000's spare stage-2 address slot instead
+                         * of the contended stage-4 ALU.  Only for `+`:
+                         * `bsub` computes A+B, so `-` must stay a `diff`. */
+                        int tp_saved = tp_ptr_add_is_addr;
+                        if (op == '+' && !tp_bounds_active
+                            && !tp_ptradd_opt_off(1))
+                            tp_ptr_add_is_addr = 1;
+                        gen_opic(op);
+                        tp_ptr_add_is_addr = tp_saved;
+                    }
+                }
+#else
 #ifdef CONFIG_TCC_BCHECK
             if (tcc_state->do_bounds_check && !CONST_WANTED) {
                 /* if bounded pointers, we generate a special code to
@@ -3129,6 +4019,7 @@ op_err:
 #endif
             {
                 gen_opic(op);
+#endif
             }
             type1.t &= ~(VT_ARRAY|VT_VLA);
             /* put again type if gen_opic() swaped operands */
@@ -3260,6 +4151,63 @@ static void gen_cast_s(int t)
 }
 
 /* cast 'vtop' to 'type'. Casting to bitfields is forbidden. */
+#ifdef TCC_TARGET_TRANSPUTER
+/* All __bf16 conversions are defined as passing through binary32:
+ *      __bf16 -> float -> T        and        T -> float -> __bf16
+ * The float <-> __bf16 legs are the TVX BF16TOR32 / R32TOBF16 instructions;
+ * everything else is an ordinary conversion that gen_cast already knows.
+ *
+ * Constants are folded here using the same routines the emulator implements,
+ * so a compile-time conversion and a run-time one cannot disagree. */
+static void gen_cast_bf16(CType *type, int sbt, int dbt)
+{
+    CType ftype;
+    union { float f; uint32_t u; } u;
+    int sn = sbt & VT_BTYPE;
+    int dn = dbt & VT_BTYPE;
+
+    ftype.t = VT_FLOAT;
+    ftype.ref = NULL;
+
+    if (sn == VT_BF16 || sn == VT_F16 || sn == VT_FLOAT16) {
+        /* widen: reinterpret the 16-bit pattern as a binary32 value */
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+            u.u = (sn == VT_BF16) ? tvx_bf16_to_f32((uint32_t)vtop->c.i)
+                                  : tvx_f16_to_f32((uint32_t)vtop->c.i);
+            vtop->type.t = VT_FLOAT;
+            vtop->c.f = u.f;
+        } else {
+            gv(RC_INT);
+            if (sn == VT_BF16)
+                gen_cvt_bf16_to_float();
+            else
+                gen_cvt_f16_to_float();
+            vtop->type.t = VT_FLOAT;
+        }
+        if (dn != VT_FLOAT)
+            gen_cast(type);
+        return;
+    }
+
+    /* narrow: make the source a binary32 value first */
+    if (sn != VT_FLOAT)
+        gen_cast(&ftype);
+    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+        u.f = vtop->c.f;
+        vtop->c.i = (dn == VT_BF16) ? tvx_f32_to_bf16(u.u)
+                                    : tvx_f32_to_f16(u.u);
+    } else {
+        if (dn == VT_BF16)
+            gen_cvt_float_to_bf16();
+        else
+            gen_cvt_float_to_f16();
+    }
+    vtop->type.t = dn;
+}
+#endif
+
+#ifdef TCC_TARGET_TRANSPUTER
+#endif
 static void gen_cast(CType *type)
 {
     int sbt, dbt, sf, df, c;
@@ -3283,6 +4231,14 @@ static void gen_cast(CType *type)
 
 again:
     if (sbt != dbt) {
+#ifdef TCC_TARGET_TRANSPUTER
+        if ((sbt & VT_BTYPE) == VT_BF16 || (dbt & VT_BTYPE) == VT_BF16 ||
+            (sbt & VT_BTYPE) == VT_F16  || (dbt & VT_BTYPE) == VT_F16 ||
+            (sbt & VT_BTYPE) == VT_FLOAT16 || (dbt & VT_BTYPE) == VT_FLOAT16) {
+            gen_cast_bf16(type, sbt, dbt);
+            return;
+        }
+#endif
         sf = is_float(sbt);
         df = is_float(dbt);
         dbt_bt = dbt & VT_BTYPE;
@@ -3477,7 +4433,7 @@ error:
 
         if (ds >= ss)
             goto done;
-#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
+#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 || defined TCC_TARGET_TRANSPUTER
     if (ss == 4) {
         gen_cvt_csti(dbt);
         goto done;
@@ -3542,6 +4498,13 @@ ST_FUNC int type_size(CType *type, int *a)
     } else if (bt == VT_SHORT) {
         *a = 2;
         return 2;
+#ifdef TCC_TARGET_TRANSPUTER
+    } else if (bt == VT_BF16 || bt == VT_F16 || bt == VT_FLOAT16) {
+        /* 2-byte storage and alignment, and the same parameter-passing
+           class, per the x86-64 psABI __bf16 definition */
+        *a = 2;
+        return 2;
+#endif
     } else if (bt == VT_QLONG || bt == VT_QFLOAT) {
         *a = 8;
         return 16;
@@ -3825,6 +4788,27 @@ ST_FUNC void vstore(void)
     } else {
             /* optimize char/short casts */
             delayed_cast = 0;
+#ifdef TCC_TARGET_TRANSPUTER
+            if ((dbt == VT_BOOL || dbt == VT_BYTE || dbt == VT_SHORT)
+                && is_integer_btype(sbt)
+                && (vtop->r & VT_VALMASK) == VT_CONST
+                && !(vtop->r & VT_SYM)) {
+                if (dbt == VT_BOOL) {
+                    vtop->c.i = !!vtop->c.i;
+                } else if (dbt == VT_BYTE) {
+                    if (ft & VT_UNSIGNED)
+                        vtop->c.i = (unsigned char)vtop->c.i;
+                    else
+                        vtop->c.i = (signed char)vtop->c.i;
+                } else {
+                    if (ft & VT_UNSIGNED)
+                        vtop->c.i = (unsigned short)vtop->c.i;
+                    else
+                        vtop->c.i = (short)vtop->c.i;
+                }
+                vtop->type.t = (vtop->type.t & ~VT_BTYPE) | dbt | (ft & VT_UNSIGNED);
+            } else
+#endif
             if ((dbt == VT_BYTE || dbt == VT_SHORT)
                 && is_integer_btype(sbt)
                 ) {
@@ -3989,6 +4973,12 @@ redo:
         case TOK_ALWAYS_INLINE2:
             ad->f.func_alwinl = 1;
             break;
+#ifdef TCC_TARGET_TRANSPUTER
+        case TOK_NOINLINE1:
+        case TOK_NOINLINE2:
+            ad->f.func_noinline = 1;
+            break;
+#endif
         case TOK_SECTION1:
         case TOK_SECTION2:
             skip('(');
@@ -4041,6 +5031,12 @@ redo:
         case TOK_PACKED2:
             ad->a.packed = 1;
             break;
+#ifdef TCC_TARGET_TRANSPUTER
+        case TOK_TRANSPARENT_UNION1:
+        case TOK_TRANSPARENT_UNION2:
+            ad->a.transparent_union = 1;
+            break;
+#endif
         case TOK_WEAK1:
         case TOK_WEAK2:
             ad->a.weak = 1;
@@ -4063,9 +5059,11 @@ redo:
         case TOK_PURE2:
 	    /* ignored */
             break;
+#ifndef TCC_TARGET_TRANSPUTER
         case TOK_NOINLINE:
 	    /* ignored */
 	    break;
+#endif
         case TOK_FORMAT1:
         case TOK_FORMAT2:
 	    /* ignored */
@@ -4572,6 +5570,9 @@ do_decl:
                     break;
             }
             skip('}');
+#ifdef TCC_TARGET_TRANSPUTER
+            parse_attribute(&ad);
+#endif
 
             if (bt) {
                 t.t = bt;
@@ -4579,6 +5580,30 @@ do_decl:
                 goto enum_done;
             }
 
+#ifdef TCC_TARGET_TRANSPUTER
+            /* A packed enum uses the smallest integer type that can hold
+               every enumerator, matching GCC's ABI for
+               __attribute__((packed)). */
+            if (ad.a.packed && nl >= -128 && pl <= 127) {
+                t.t = VT_BYTE;
+            } else if (ad.a.packed && nl >= 0 && pl <= 255) {
+                t.t = VT_BYTE | VT_UNSIGNED;
+            } else if (ad.a.packed && nl >= -32768 && pl <= 32767) {
+                t.t = VT_SHORT;
+            } else if (ad.a.packed && nl >= 0 && pl <= 65535) {
+                t.t = VT_SHORT | VT_UNSIGNED;
+            } else {
+                t.t = VT_INT;
+            }
+            if (nl >= 0 && (t.t & VT_BTYPE) == VT_INT) {
+                if (pl != (unsigned)pl)
+                    t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+                t.t |= VT_UNSIGNED;
+            } else if ((t.t & VT_BTYPE) == VT_INT &&
+                       (pl != (int)pl || nl != (int)nl)) {
+                t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+            }
+#else
             /* set integral type of the enum */
             t.t = VT_INT;
             if (nl >= 0) {
@@ -4587,6 +5612,7 @@ do_decl:
                 t.t |= VT_UNSIGNED;
             } else if (pl != (int)pl || nl != (int)nl)
                 t.t = (LONG_SIZE==8 ? VT_LLONG|VT_LONG : VT_LLONG);
+#endif
 
             /* set type for enum members */
             for (ss = s->next; ss; ss = ss->next) {
@@ -4604,6 +5630,9 @@ do_decl:
             s->c = 1;
         enum_done:
             s->type.t = type->t = t.t | VT_ENUM;
+#ifdef TCC_TARGET_TRANSPUTER
+            s->a = ad.a;
+#endif
 
         } else {
             c = 0;
@@ -4839,6 +5868,17 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         case TOK_FLOAT:
             u = VT_FLOAT;
             goto basic_type;
+#ifdef TCC_TARGET_TRANSPUTER
+        case TOK___bf16:
+            u = VT_BF16;
+            goto basic_type;
+        case TOK___fp16:
+            u = VT_F16;
+            goto basic_type;
+        case TOK__Float16:
+            u = VT_FLOAT16;
+            goto basic_type;
+#endif
         case TOK_DOUBLE:
             if ((t & (VT_BTYPE|VT_LONG)) == VT_LONG) {
                 t = (t & ~(VT_BTYPE|VT_LONG)) | VT_LDOUBLE;
@@ -4908,7 +5948,21 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             next();
             break;
         case TOK_REGISTER:
+#ifdef TCC_TARGET_TRANSPUTER
+            next();
+            break;
+#endif
         case TOK_AUTO:
+#ifdef TCC_TARGET_TRANSPUTER
+            /* C23 gives an otherwise untyped auto declaration the type of
+               its initializer.  Keep accepting the traditional `auto int`
+               spelling as a no-op storage class. */
+            ad->inferred_type = 1;
+            next();
+            break;
+        case TOK_AUTO_TYPE:
+            ad->inferred_type = 2;
+#endif
             next();
             break;
         case TOK_UNSIGNED:
@@ -4970,6 +6024,12 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
             goto basic_type2;
         case TOK_THREAD_LOCAL:
         case TOK___thread:
+#ifdef TCC_TARGET_TRANSPUTER
+            /* TLS access is lowered per backend (see i386-gen.c load());
+               without that, VT_TLS objects would silently be addressed as
+               plain globals at their TLS offset. */
+            tcc_error("_Thread_local is not implemented");
+#endif
             if (t & VT_TLS)
                 tcc_error("multiple thread-local storage specifiers");
             t |= VT_TLS;
@@ -5007,6 +6067,15 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         type_found = 1;
     }
 the_end:
+#ifdef TCC_TARGET_TRANSPUTER
+    if (typespec_found) {
+        if (ad->inferred_type == 2)
+            tcc_error("__auto_type cannot be combined with another type specifier");
+        ad->inferred_type = 0;
+    } else if (ad->inferred_type) {
+        type_found = 1;
+    }
+#endif
     if (tcc_state->char_is_unsigned) {
         if ((t & (VT_DEFSIGN|VT_BTYPE)) == VT_BYTE)
             t |= VT_UNSIGNED;
@@ -5124,6 +6193,9 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
                 /* these symbols may be evaluated for VLArrays (see below, under
                    nocode_wanted) Example: int func(int a, int b[++a]); */
                 s = sym_push(n, &pt, VT_LOCAL|VT_LVAL, 0);
+#ifdef TCC_TARGET_TRANSPUTER
+                s->a = ad1.a;
+#endif
                 *plast = s;
                 plast = &s->next;
                 if (tok == ')')
@@ -5416,8 +6488,35 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
     } else {
         type = arg->type;
         type.t &= ~VT_CONSTANT; /* need to do that to avoid false warning */
+#ifdef TCC_TARGET_TRANSPUTER
+        if (arg->a.transparent_union && IS_UNION(type.t)) {
+            Sym *field;
+
+            /* A transparent union uses its first member's calling
+               convention and accepts an argument compatible with any
+               member.  Leave vtop in the matching member type so the
+               target ABI sees the same scalar value the caller supplied. */
+            for (field = type.ref->next; field; field = field->next) {
+                if (is_compatible_unqualified_types(&field->type,
+                                                     &vtop->type)) {
+                    type = field->type;
+                    type.t &= ~VT_CONSTANT;
+                    break;
+                }
+            }
+        }
+#endif
         gen_assign_cast(&type);
     }
+#ifdef TCC_TARGET_TRANSPUTER
+    if (!(vtop->r & VT_LVAL) &&
+        ((vtop->type.t & VT_BTYPE) == VT_LLONG ||
+         (vtop->type.t & VT_BTYPE) == VT_DOUBLE ||
+         (vtop->type.t & VT_BTYPE) == VT_LDOUBLE) &&
+        (vtop->r & VT_VALMASK) < VT_CONST) {
+        save_reg(vtop->r);
+    }
+#endif
 }
 
 /* parse an expression and return its type without any side effect. */
@@ -5457,7 +6556,11 @@ static void parse_type(CType *type)
     type_decl(type, &ad, &n, TYPE_ABSTRACT);
 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+ST_FUNC void parse_builtin_params(int nc, const char *args)
+#else
 static void parse_builtin_params(int nc, const char *args)
+#endif
 {
     char c, sep = '(';
     CType type;
@@ -5640,6 +6743,43 @@ static void parse_atomic(int atok)
         vswap();
         vstore();
     }
+#ifdef TCC_TARGET_TRANSPUTER
+}
+
+/* Recover a C string from a vstack value if it is a compile-time
+ * address of a NUL-terminated object already in a data section.
+ * Used to fold __builtin_strcmp / __builtin_strncmp of literals. */
+static const char *cstr_from_sv(SValue *sv)
+{
+    ElfSym *es;
+    Section *sec;
+    unsigned long off, max, i;
+
+    if (!sv || !sv->sym)
+        return NULL;
+    if ((sv->r & (VT_VALMASK | VT_SYM)) != (VT_CONST | VT_SYM))
+        return NULL;
+    if (sv->r & VT_LVAL)
+        return NULL;
+    es = elfsym(sv->sym);
+    if (!es || es->st_shndx == SHN_UNDEF
+        || es->st_shndx >= tcc_state->nb_sections)
+        return NULL;
+    sec = tcc_state->sections[es->st_shndx];
+    if (!sec || !sec->data)
+        return NULL;
+    off = (unsigned long)es->st_value + (unsigned long)sv->c.i;
+    if (off >= sec->data_offset)
+        return NULL;
+    max = es->st_size;
+    if (!max || off + max > sec->data_offset)
+        max = sec->data_offset - off;
+    for (i = 0; i < max; i++) {
+        if (sec->data[off + i] == 0)
+            return (const char *)sec->data + off;
+    }
+    return NULL;
+#endif
 }
 
 ST_FUNC void unary(void)
@@ -5863,6 +7003,179 @@ ST_FUNC void unary(void)
 	parse_builtin_params(0, "ee");
 	vpop();
         break;
+#ifdef TCC_TARGET_TRANSPUTER
+    case TOK_builtin_clz:
+    case TOK_builtin_clzl:
+    case TOK_builtin_clzll:
+        {
+            int bits = tok == TOK_builtin_clzll ? 64 :
+                       tok == TOK_builtin_clzl ? LONG_SIZE * 8 : 32;
+            unsigned long long value;
+
+            next();
+            skip('(');
+            expr_eq();
+            skip(')');
+            /* Convert to the parameter type before widening: __builtin_clz
+               takes an unsigned int, so the high half of a wider argument
+               must not reach the 64-bit helper. */
+            if (bits < 64)
+                gen_cast_s(VT_INT | VT_UNSIGNED);
+            gen_cast_s(VT_LLONG | VT_UNSIGNED);
+
+            if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+                value = vtop->c.i;
+                if (bits < 64)
+                    value &= (1ULL << bits) - 1;
+                n = 0;
+                if (!value) {
+                    n = bits;
+                } else {
+                    unsigned long long mask = 1ULL << (bits - 1);
+                    while (!(value & mask))
+                        ++n, mask >>= 1;
+                }
+                vpop();
+                vpushi(n);
+            } else {
+                /* libtcc1 and the Transputer kernel both provide the 64-bit
+                   helper.  Narrow variants are zero-extended and adjusted. */
+                vpush_helper_func(tok_alloc_const("__builtin_clzll"));
+                vrott(2);
+                gfunc_call(1);
+                vpushi(0);
+                PUT_R_RET(vtop, VT_INT);
+                if (bits < 64) {
+                    vpushi(bits - 64);
+                    gen_op('+');
+                }
+            }
+        }
+        break;
+    case TOK_builtin_strlen:
+        next();
+        skip('(');
+        if (tok == TOK_STR) {
+            CString *literal = parse_mult_str("string constant");
+            n = strlen(literal->data);
+            skip(')');
+            vpushs(n);
+        } else {
+            expr_eq();
+            skip(')');
+            vpush_helper_func(tok_alloc_const("strlen"));
+            vrott(2);
+            gfunc_call(1);
+            type.t = VT_SIZE_T;
+            type.ref = NULL;
+            vpush(&type);
+            PUT_R_RET(vtop, type.t);
+        }
+        break;
+    case TOK_builtin_strcmp:
+    case TOK_builtin_strncmp:
+        {
+            /* GCC folds strcmp/strncmp of constant C strings.  Linux
+             * vruntime_cmp/vruntime_op are written as
+             *   if (!__builtin_strcmp(OP, "-")) ...
+             *   else __BUILD_BUG_vruntime_op();
+             * so the undefined BUILD_BUG symbol is only a link-time
+             * assertion.  Without the fold TCC emits a runtime strcmp
+             * plus a CALL whose reloc target is 0 (Iptr := 0). */
+            int is_ncmp = tok == TOK_builtin_strncmp;
+            const char *sa, *sb;
+            int narg = is_ncmp ? 3 : 2;
+
+            next();
+            skip('(');
+            expr_eq();
+            skip(',');
+            expr_eq();
+            if (is_ncmp) {
+                skip(',');
+                expr_eq();
+            }
+            skip(')');
+
+            sa = cstr_from_sv(&vtop[is_ncmp ? -2 : -1]);
+            sb = cstr_from_sv(&vtop[is_ncmp ? -1 : 0]);
+            if (sa && sb && (!is_ncmp
+                             || ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM))
+                                 == VT_CONST))) {
+                int r = is_ncmp
+                    ? strncmp(sa, sb, (size_t)vtop->c.i)
+                    : strcmp(sa, sb);
+                while (narg--)
+                    vpop();
+                vpushi(r);
+            } else {
+                vpush_helper_func(tok_alloc_const(is_ncmp ? "strncmp"
+                                                          : "strcmp"));
+                vrott(narg + 1);
+                gfunc_call(narg);
+                vpushi(0);
+                PUT_R_RET(vtop, VT_INT);
+            }
+        }
+        break;
+    case TOK_builtin_add_overflow:
+    case TOK_builtin_sub_overflow:
+    case TOK_builtin_mul_overflow:
+        {
+            int overflow_tok = tok;
+            int bt, bits, is_unsigned;
+            CType result_type;
+            char helper[48];
+
+            /* GCC's overflow builtins are type-generic, with the result
+               pointer selecting the arithmetic width and signedness.  Lower
+               the operation to a small typed runtime helper.  This also
+               avoids depending on target condition-code conventions. */
+            next();
+            skip('(');
+            expr_eq();
+            skip(',');
+            expr_eq();
+            skip(',');
+            expr_eq();
+            skip(')');
+
+            if ((vtop->type.t & VT_BTYPE) != VT_PTR)
+                tcc_error("third argument to %s must be a pointer",
+                          get_tok_str(overflow_tok, 0));
+            result_type = *pointed_type(&vtop->type);
+            bt = result_type.t & VT_BTYPE;
+            if (bt != VT_BYTE && bt != VT_SHORT && bt != VT_INT
+                && bt != VT_LLONG)
+                tcc_error("result of %s must point to an integer type",
+                          get_tok_str(overflow_tok, 0));
+
+            bits = bt == VT_BYTE ? 8 : bt == VT_SHORT ? 16
+                   : bt == VT_INT ? 32 : 64;
+            is_unsigned = !!(result_type.t & VT_UNSIGNED);
+
+            /* Cast both operands to the result type.  Linux's checked
+               arithmetic interfaces use matching operand/result types; the
+               casts also give old-style helper calls the correct 64-bit ABI. */
+            vrotb(3);              /* b, result pointer, a */
+            gen_cast(&result_type);
+            vrott(3);              /* a, b, result pointer */
+            vswap();               /* a, result pointer, b */
+            gen_cast(&result_type);
+            vswap();               /* a, b, result pointer */
+
+            snprintf(helper, sizeof(helper), "__tcc_%s_overflow_%c%d",
+                     overflow_tok == TOK_builtin_add_overflow ? "add" :
+                     overflow_tok == TOK_builtin_sub_overflow ? "sub" : "mul",
+                     is_unsigned ? 'u' : 's', bits);
+            vpush_helper_func(tok_alloc_const(helper));
+            vrott(4);
+            gfunc_call(3);
+            vpushi(0);
+            PUT_R_RET(vtop, VT_INT);
+        }
+        break;
+#endif
     case TOK_builtin_types_compatible_p:
 	parse_builtin_params(0, "tt");
 	n = compare_types(&vtop[-1].type, &vtop[0].type, 1);
@@ -5905,6 +7218,25 @@ ST_FUNC void unary(void)
 	    n = 0;
 	vtop--;
 	vpushi(n);
+#ifdef TCC_TARGET_TRANSPUTER
+        break;
+    case TOK_builtin_object_size:
+        /*
+         * Conservatively implement GCC's object-size query.  An unknown
+         * size is SIZE_MAX for modes 0/1 and zero for modes 2/3.  The
+         * pointer expression is parsed for type checking but, as required
+         * by GCC semantics, is not evaluated.
+         */
+        parse_builtin_params(1, "ei");
+        if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM | VT_NONCONST))
+            != VT_CONST)
+            tcc_error("last argument to __builtin_object_size must be constant");
+        n = vtop->c.i;
+        if (n < 0 || n > 3)
+            tcc_error("last argument to __builtin_object_size must be between 0 and 3");
+        vtop -= 2;
+        vpushs((n & 2) ? 0 : (addr_t)-1);
+#endif
         break;
     case TOK_builtin_unreachable:
 	parse_builtin_params(0, ""); /* just skip '()' */
@@ -6025,6 +7357,174 @@ ST_FUNC void unary(void)
         vtop->type.t = VT_VOID;
         break;
     }
+#endif
+
+#ifdef TCC_TARGET_TRANSPUTER
+#endif
+#ifdef TCC_TARGET_TRANSPUTER
+    case TOK___out:
+    case TOK___in:
+    case TOK___outbyte:
+    case TOK___outword:
+    case TOK___tin:
+    case TOK___resetch:
+    case TOK___move:
+    case TOK___move2dinit:
+    case TOK___move2dall:
+    case TOK___move2dnonzero:
+    case TOK___move2dzero:
+    case TOK___crcbyte:
+    case TOK___crcword:
+    case TOK___ldtimer:
+    case TOK___sttimer:
+    case TOK___mint:
+    case TOK___ldpri:
+    case TOK___startp:
+    case TOK___endp:
+    case TOK___runp:
+    case TOK___stopp:
+    case TOK___alt:
+    case TOK___altwt:
+    case TOK___altend:
+    case TOK___talt:
+    case TOK___taltwt:
+    case TOK___enbc:
+    case TOK___enbs:
+    case TOK___enbt:
+    case TOK___disc:
+    case TOK___diss:
+    case TOK___dist:
+    case TOK___saveh:
+    case TOK___savel:
+    case TOK___sthf:
+    case TOK___sthb:
+    case TOK___stlf:
+    case TOK___stlb:
+    case TOK___gajw:
+    case TOK___wcnt:
+    case TOK___seterr:
+    case TOK___testerr:
+    case TOK___sethalterr:
+    case TOK___clrhalterr:
+    case TOK_builtin_popcount:
+    case TOK_builtin_popcountl:
+    case TOK___norm:
+    case TOK___bitcnt:
+    case TOK___bitrevword:
+    case TOK___bitrevnbits:
+    case TOK___csub0:
+    case TOK___fmul:
+    case TOK___lddevid:
+    case TOK___fpsqrt:
+    case TOK___fpabs:
+    case TOK___testhalterr:
+    case TOK___stoperr:
+    case TOK___testpranal:
+    case TOK___fpchkerr:
+    case TOK___fptesterr:
+    case TOK___fpseterr:
+    case TOK___fpclrerr:
+    case TOK___fpint:
+    case TOK___fpintrp:
+    case TOK___fpintrm:
+    case TOK___fpintrz:
+    case TOK___fprem:
+    case TOK___bf16tof32:
+    case TOK___f32tobf16:
+    case TOK___bf16pack:
+    case TOK___bf16unpkh:
+    case TOK___mxfp4tof32:
+    case TOK___f32tomxfp4:
+    case TOK___mxe8m0tof32:
+    case TOK___mxe8m0of:
+    case TOK___mxfp4dot:
+    case TOK___bf16dot:
+    case TOK___mxfp4gemv:
+    case TOK___mxfp4unpk8:
+    case TOK___f32tomxfp4x8:
+    case TOK___bf16mul2:
+    case TOK___bf16add2:
+    case TOK___vsetlen:
+    case TOK___mxfp4gemvbf:
+    case TOK___vadd:
+    case TOK___vmul:
+    case TOK___vsilu:
+    case TOK___vrmsnorm:
+    case TOK___vsoftmax:
+    case TOK___f16tof32:
+    case TOK___f32tof16:
+    case TOK___q8dot:
+    case TOK___q8dotbf:
+    case TOK___iq1mdot:
+    case TOK___iq2xxsdot:
+    case TOK___iq3xxsdot:
+    case TOK___qsetfmt:
+    case TOK___qdot:
+    case TOK___vhad32:
+    case TOK___mxqrot:
+    case TOK___mxqrotbf:
+    case TOK___ftsetvp:
+    case TOK___ftransp:
+    case TOK___ftranspb:
+    case TOK___fsincos:
+    case TOK___frsqrtb:
+    case TOK___frecipb:
+    case TOK___fsincosb:
+    case TOK___vsetstride:
+    case TOK___ftcull:
+    case TOK___tskin:
+    case TOK___vsetfmt:
+    case TOK___ftsetlit:
+    case TOK___flitb:
+    case TOK___qgemm:
+    case TOK___vblend8:
+    case TOK___vfill:
+    case TOK___vfill2d:
+    case TOK___csumb:
+    case TOK___vblend2d:
+    case TOK___stvxstate:
+    case TOK___csumcpy:
+    case TOK___vq8k:
+    case TOK___vq80:
+    case TOK___vcvt:
+    case TOK___vxfer:
+    case TOK___ldconf:
+    case TOK___stconf:
+    case TOK___initvlcb:
+    case TOK___sethdr:
+    case TOK___writehdr:
+    case TOK___readhdr:
+    case TOK___setchmode:
+    case TOK___stopch:
+    case TOK___swapbfr:
+    case TOK___vin:
+    case TOK___vout:
+    case TOK___ldchstatus:
+    case TOK___chantype:
+    case TOK___semwait:
+    case TOK___semsignal:
+    case TOK___mkrc:
+    case TOK___unmkrc:
+    case TOK___grant:
+    case TOK___enbg:
+    case TOK___disg:
+    case TOK___irdsq:
+    case TOK___erdsq:
+    case TOK___ldresptr:
+    case TOK___stresptr:
+    case TOK___tld:
+    case TOK___tst:
+    case TOK___tclr:
+    case TOK___f2ldm:
+    case TOK___f4ldm:
+    case TOK___f2ldma:
+    case TOK___f2stm:
+    case TOK___fmvmul4:
+    case TOK___fmvmul4st:
+    case TOK___fpoly3:
+        if (!gen_transputer_builtin_call(tok))
+            expect("transputer intrinsic");
+        break;
 #endif
 
     /* atomic operations */
@@ -6221,14 +7721,40 @@ special_math_val:
             next();
         } else if (tok == '.' || tok == TOK_ARROW) {
             int qualifiers, cumofs;
+#ifdef TCC_TARGET_TRANSPUTER
+            int unaligned;
+            /* field */
+            if (tok == TOK_ARROW)
+#else
             /* field */ 
             if (tok == TOK_ARROW) 
+#endif
                 indir();
             qualifiers = vtop->type.t & VT_QUAL;
             test_lvalue();
             /* expect pointer on structure */
             next();
 	    s = find_field(&vtop->type, tok, &cumofs);
+#ifdef TCC_TARGET_TRANSPUTER
+            /* Decide, before gaddrof()/gen_op() destroy vtop->r, whether the
+               resulting lvalue is provably aligned to its own type.
+               It is not when:
+                 - the containing object is itself not provably aligned
+                   (a packed struct nested in another struct, an array of
+                   packed structs, ...): VT_UNALIGNED propagates down; or
+                 - the containing struct has alignment 1, which is exactly what
+                   __attribute__((packed)) / #pragma pack(1) produce
+                   (struct_layout stores the struct alignment in ref->r), so
+                   nothing can be said about the parity of the base address; or
+                 - the member sits at an odd offset (an individually packed
+                   member inside an otherwise aligned struct).
+               Backends only consult this for accesses that have an alignment
+               precondition, so over-approximating costs code size, never
+               correctness. */
+            unaligned = (vtop->r & VT_UNALIGNED)
+                        || (vtop->type.ref->r < 2)
+                        || (cumofs & 1);
+#endif
             /* add field offset to pointer */
             gaddrof();
             vtop->type = char_pointer_type; /* change type to 'char *' */
@@ -6238,6 +7764,12 @@ special_math_val:
             vtop->type = s->type;
             if (qualifiers)
                 parse_btype_qualify(&vtop->type, qualifiers);
+#ifdef TCC_TARGET_TRANSPUTER
+            /* Also mark member arrays, so that s.arr[i] on a packed s keeps
+               the property across the '[' case below. */
+            if (unaligned)
+                vtop->r |= VT_UNALIGNED;
+#endif
             /* an array is never an lvalue */
             if (!(vtop->type.t & VT_ARRAY)) {
                 vtop->r |= VT_LVAL;
@@ -6249,10 +7781,18 @@ special_math_val:
             }
             next();
         } else if (tok == '[') {
+#ifdef TCC_TARGET_TRANSPUTER
+            /* gen_op()/indir() rebuild the SValue, so carry the property of
+               the base object across by hand. */
+            int unaligned = vtop->r & VT_UNALIGNED;
+#endif
             next();
             gexpr();
             gen_op('+');
             indir();
+#ifdef TCC_TARGET_TRANSPUTER
+            vtop->r |= unaligned;
+#endif
             skip(']');
         } else if (tok == '(') {
             SValue ret;
@@ -6363,6 +7903,9 @@ special_math_val:
 
             next();
             vcheck_cmp(); /* the generators don't like VT_CMP on vtop */
+#ifdef TCC_TARGET_TRANSPUTER
+            note_inline_call_section(vtop - nb_args);
+#endif
             gfunc_call(nb_args);
 
             if (ret_nregs < 0) {
@@ -6857,6 +8400,7 @@ ST_FUNC int expr_const(void)
 /* ------------------------------------------------------------------------- */
 /* return from function */
 
+#ifndef TCC_TARGET_TRANSPUTER
 #ifndef TCC_TARGET_ARM64
 static void gfunc_return(CType *func_type)
 {
@@ -6922,6 +8466,7 @@ static void gfunc_return(CType *func_type)
     }
     vtop--; /* NOT vpop() because on x86 it would flush the fp stack */
 }
+#endif
 #endif
 
 static void check_func_return(void)
@@ -7139,6 +8684,18 @@ static void new_scope(struct scope *o)
 
 static void prev_scope(struct scope *o, int is_expr)
 {
+#ifdef TCC_TARGET_TRANSPUTER
+    /* The value of a statement expression may still be an lvalue in a VLA
+       that vla_leave() is about to release, and the next VLA allocated (by
+       the rest of the expression, or a function it calls) reuses the same
+       arena bytes.  Load the value first. */
+    if (is_expr && o->vla.num && (vtop->r & VT_LVAL)
+        && !(vtop->type.t & (VT_ARRAY | VT_VLA))) {
+        int bt = vtop->type.t & VT_BTYPE;
+        if (bt != VT_VOID && bt != VT_STRUCT && bt != VT_FUNC)
+            gv(RC_TYPE(vtop->type.t));
+    }
+#endif
     vla_leave(o->prev);
 
     if (o->cl.s != o->prev->cl.s)
@@ -7189,6 +8746,51 @@ static void prev_scope_s(struct scope *o)
 
 /* ------------------------------------------------------------------------- */
 /* call block from 'for do while' loops */
+
+#ifdef TCC_TARGET_TRANSPUTER
+/* Record the tokens of one loop clause - a for(;;) init/test/increment, or a
+   while() test - *without* parsing them, so the clause can be generated later,
+   at a different point in the instruction stream (see TOK_FOR and TOK_WHILE).
+   Stops on `term' at bracket level 0.  Unlike skip_or_save_block(), a
+   top-level ',' is not a terminator: these clauses may legally be comma
+   expressions.  Returns NULL for an empty clause.
+
+   Sets *tag_decl if the clause defines an enum (`enum {' or `enum tag {') or
+   a tagged struct/union (`struct tag {'): the enumerators or tag are in scope
+   in the loop body, so such a clause cannot be moved after the body.  An
+   anonymous `struct {' declares no name - the kernel's ARRAY_SIZE() puts one
+   in many loop tests - and anything nested in it is scanned anyway. */
+static TokenString *for_clause_save(int term, int *tag_decl)
+{
+    TokenString *str;
+    int level = 0, prev = 0, prev2 = 0;
+
+#define IS_TAG_KW(t) ((t) == TOK_STRUCT || (t) == TOK_UNION || (t) == TOK_ENUM)
+    if (tok == term)
+        return NULL;
+    str = tok_str_alloc();
+    for (;;) {
+        int t = tok;
+        if (level == 0 && t == term)
+            break;
+        if (t == TOK_EOF)
+            tcc_error("unexpected end of file");
+        if (t == '(' || t == '[' || t == '{')
+            level++;
+        else if (t == ')' || t == ']' || t == '}')
+            level--;
+        if (t == '{' && (prev == TOK_ENUM
+                         || (prev >= TOK_UIDENT && IS_TAG_KW(prev2))))
+            *tag_decl = 1;
+        prev2 = prev, prev = t;
+        tok_str_add_tok(str);
+        next();
+    }
+#undef IS_TAG_KW
+    tok_str_add(str, TOK_EOF);
+    return str;
+}
+#endif
 
 static void lblock(int *bsym, int *csym)
 {
@@ -7258,6 +8860,67 @@ again:
         prev_scope_s(&o);
 
     } else if (t == TOK_WHILE) {
+#ifdef TCC_TARGET_TRANSPUTER
+        /* Same rotation as TOK_FOR: record the controlling expression and
+           generate it after the body, so a running iteration executes only the
+           backward conditional branch and no unconditional jump.
+
+                     j    test              ; once, on entry
+              body:  BODY
+              test:  CONDITION              ; `continue' lands here
+                     cj   body
+        */
+        int body_addr, tag_decl = 0;
+        TokenString *cond_str;
+
+        new_scope_s(&o);
+        skip('(');
+        cond_str = for_clause_save(')', &tag_decl);
+        if (!cond_str)
+            expect("expression");
+        skip(')');
+        a = b = 0;
+        TP_LOOP_POOL_OPEN();    /* preheader: dominates the loop */
+        if (tag_decl) {
+            /* The condition declares something the body can see: parse it
+               first and keep the test at the top. */
+            d = gind();
+            unget_tok(0);
+            begin_macro(cond_str, 1);
+            next();
+            gexpr();
+            a = gvtst(1, 0);
+            if (tok != TOK_EOF)
+                expect(")");
+            end_macro();
+            next();
+            lblock(&a, &b);
+            gjmp_addr(d);
+        } else {
+            e = gjmp(0);            /* entry -> test */
+            body_addr = gind();
+            lblock(&a, &b);
+            gsym(e);                /* test label; also re-enables codegen */
+            d = gind();             /* `continue' target is the test */
+            unget_tok(0);
+            begin_macro(cond_str, 1);
+            next();
+            TP_CMP_BRANCH_TRUE_BEGIN();  /* the back-edge branches when true */
+            gexpr();
+            TP_CMP_BRANCH_TRUE_END();
+            c = gvtst(0, 0);
+            if (tok != TOK_EOF)
+                expect(")");
+            end_macro();
+            next();                 /* restore the token after the loop */
+            gsym_addr(c, body_addr);
+        }
+        gsym_addr(b, d);
+        gsym(a);
+        TP_LOOP_POOL_CLOSE();
+        prev_scope_s(&o);
+#else
+
         new_scope_s(&o);
         d = gind();
         skip('(');
@@ -7270,6 +8933,7 @@ again:
         gsym_addr(b, d);
         gsym(a);
         prev_scope_s(&o);
+#endif
 
     } else if (t == '{') {
         if (debug_modes)
@@ -7320,10 +8984,62 @@ again:
             tcc_warning("'return' with no value");
             b = 0;
         }
+#ifdef TCC_TARGET_TRANSPUTER
+        /*
+         * Cleanups run before the real function epilog and may emit calls
+         * that clobber eval-stack / REG_IRET.  On targets where the ABI
+         * return value lives in a volatile register (Transputer AReg), the
+         * value must not sit in a register across leave_scope.
+         *
+         * GCC saves the return value in a callee-saved reg, runs cleanups,
+         * then moves it to the return reg.  We spill to a temp local before
+         * cleanups (vstack empty so save_lvalues/cleanup calls cannot
+         * disturb it), then reload for gfunc_return.
+         *
+         * Reproduces as: int f(void) { guard(...); return 0; } returning a
+         * stack pointer instead of 0 — which made Linux's
+         * register_filesystem() look failed and hang in kernfs_destroy.
+         *
+         * Note: vstore() leaves the destination lvalue on the stack (like
+         * an assignment expression); pop it so the vstack is empty before
+         * leave_scope.
+         */
+        if (b && cur_scope->cl.s) {
+            int align, size, r2 = 0, l;
+            size = type_size(&func_vt, &align);
+            if (size < 0)
+                size = 4;
+            l = get_temp_local_var(size, align, &r2);
+            /* stack: [retval] -> [retval, dest] -> [dest, retval] -> [dest] */
+            vset(&func_vt, VT_LOCAL | VT_LVAL, l);
+            vtop->r2 = r2;
+            vswap();
+            vstore();
+            vtop--; /* drop dest left by vstore — vstack empty */
+            leave_scope(root_scope);
+            vset(&func_vt, VT_LOCAL | VT_LVAL, l);
+            vtop->r2 = r2;
+#else
         leave_scope(root_scope);
         if (b)
+#endif
             gfunc_return(&func_vt);
+#ifdef TCC_TARGET_TRANSPUTER
+        } else {
+            leave_scope(root_scope);
+            if (b)
+                gfunc_return(&func_vt);
+        }
+#endif
         skip(';');
+#ifdef TCC_TARGET_TRANSPUTER
+        /* The jump would be a timeslice point with the return value in
+           AReg: a return with a value leaves through an epilogue of its
+           own instead (gfunc_leave). */
+        if ((tok != '}' || local_scope != 1) && b)
+            gfunc_leave();
+        else
+#endif
         /* jump unless last stmt in top-level block */
         if (tok != '}' || local_scope != 1)
             rsym = gjmp(rsym);
@@ -7351,6 +9067,27 @@ again:
         skip(';');
 
     } else if (t == TOK_FOR) {
+#ifdef TCC_TARGET_TRANSPUTER
+        /* Rotated layout.  The straightforward one-pass emission order
+           (test, jump-over-increment, increment, jump-back-to-test, body,
+           jump-to-increment) costs two taken unconditional jumps on every
+           iteration on top of the conditional one.  Instead record the
+           controlling expression and the increment as token strings and
+           generate them *after* the body:
+
+                     j    test              ; once, on entry
+              body:  BODY
+              incr:  INCREMENT              ; `continue' lands here
+              test:  CONDITION
+                     cj   body              ; taken while the loop runs
+
+           so a running iteration executes no unconditional jump at all.  The
+           clauses are lexed once and parsed once — only the point at which
+           they are parsed moves — so this is not a second pass and nothing is
+           evaluated twice at compile time or at run time. */
+        int body_addr, tag_decl = 0;
+        TokenString *cond_str, *incr_str;
+
         new_scope(&o);
 
         skip('(');
@@ -7360,6 +9097,117 @@ again:
                 /* no, regular for-loop init expr */
                 gexpr();
                 vpop();
+#ifdef TCC_TARGET_TRANSPUTER
+                tp_stmt_end();
+#endif
+            }
+        }
+        skip(';');
+        a = b = 0;
+        cond_str = for_clause_save(';', &tag_decl);
+        skip(';');
+        incr_str = for_clause_save(')', &tag_decl);
+        skip(')');
+
+        TP_LOOP_POOL_OPEN();            /* preheader: dominates the loop */
+        if (tag_decl) {
+            /* A clause declares something the body can see: parse the
+               clauses first, in source order, and keep the plain layout. */
+            unget_tok(0);
+            c = d = gind();
+            if (cond_str) {
+                begin_macro(cond_str, 1);
+                next();
+                gexpr();
+                a = gvtst(1, 0);
+                if (tok != TOK_EOF)
+                    expect(";");
+                end_macro();
+            }
+            if (incr_str) {
+                e = gjmp(0);
+                d = gind();
+                begin_macro(incr_str, 1);
+                next();
+                gexpr();
+                vpop();
+#ifdef TCC_TARGET_TRANSPUTER
+                tp_stmt_end();
+#endif
+                if (tok != TOK_EOF)
+                    expect(")");
+                end_macro();
+                gjmp_addr(c);
+                gsym(e);
+            }
+            next();
+            lblock(&a, &b);
+            gjmp_addr(d);
+        } else {
+            e = cond_str ? gjmp(0) : 0;     /* entry -> test */
+            body_addr = gind();
+            lblock(&a, &b);
+            /* gind() is also what re-enables code generation when the body
+               ended with a return/goto: the increment and the test are still
+               reachable, from the `continue' edge and from the entry jump,
+               so they must be emitted even then. */
+            d = gind();                     /* `continue' target */
+
+            if (cond_str || incr_str) {
+                /* Replaying a token string clobbers the current token; stash
+                   it and restore it with the final next(). */
+                unget_tok(0);
+                if (incr_str) {
+                    begin_macro(incr_str, 1);
+                    next();
+                    gexpr();
+                    vpop();
+#ifdef TCC_TARGET_TRANSPUTER
+                    tp_stmt_end();
+#endif
+                    if (tok != TOK_EOF)
+                        expect(")");
+                    end_macro();
+                }
+                if (cond_str) {
+                    gsym(e);                /* test label */
+                    begin_macro(cond_str, 1);
+                    next();
+                    TP_CMP_BRANCH_TRUE_BEGIN();  /* branches when true */
+                    gexpr();
+                    TP_CMP_BRANCH_TRUE_END();
+                    c = gvtst(0, 0);        /* jump back into the body if true */
+                    if (tok != TOK_EOF)
+                        expect(";");
+                    end_macro();
+                    gsym_addr(c, body_addr);
+                } else {
+                    gjmp_addr(body_addr);   /* for (init; ; incr) */
+                }
+                next();                     /* restore the token after the loop */
+            } else {
+                gjmp_addr(body_addr);       /* for (;;) */
+            }
+        }
+
+        gsym_addr(b, d);
+        gsym(a);
+        TP_LOOP_POOL_CLOSE();
+        prev_scope(&o, 0);
+#else
+
+        new_scope(&o);
+
+        skip('(');
+        if (tok != ';') {
+            /* c99 for-loop init decl? */
+            if (!decl(VT_JMP)) {
+                /* no, regular for-loop init expr */
+                gexpr();
+                vpop();
+#ifdef TCC_TARGET_TRANSPUTER
+                tp_stmt_end();
+#endif
             }
         }
         skip(';');
@@ -7369,12 +9217,16 @@ again:
             gexpr();
             a = gvtst(1, 0);
         }
+
         skip(';');
         if (tok != ')') {
             e = gjmp(0);
             d = gind();
             gexpr();
             vpop();
+#ifdef TCC_TARGET_TRANSPUTER
+            tp_stmt_end();
+#endif
             gjmp_addr(c);
             gsym(e);
         }
@@ -7384,21 +9236,34 @@ again:
         gsym_addr(b, d);
         gsym(a);
         prev_scope(&o, 0);
+#endif
 
     } else if (t == TOK_DO) {
         new_scope_s(&o);
         a = b = 0;
+#ifdef TCC_TARGET_TRANSPUTER
+        TP_LOOP_POOL_OPEN();    /* preheader: dominates the loop */
+#endif
         d = gind();
         lblock(&a, &b);
         gsym(b);
         skip(TOK_WHILE);
         skip('(');
+#ifdef TCC_TARGET_TRANSPUTER
+        TP_CMP_BRANCH_TRUE_BEGIN();  /* branches when true */
+#endif
 	gexpr();
+#ifdef TCC_TARGET_TRANSPUTER
+        TP_CMP_BRANCH_TRUE_END();
+#endif
         c = gvtst(0, 0);
         skip(')');
         skip(';');
 	gsym_addr(c, d);
         gsym(a);
+#ifdef TCC_TARGET_TRANSPUTER
+        TP_LOOP_POOL_CLOSE();
+#endif
         prev_scope_s(&o);
 
     } else if (t == TOK_SWITCH) {
@@ -7431,7 +9296,25 @@ again:
         sw->bsym = NULL; /* marker for 32bit:gen_opl() */
         vpushv(&sw->sv);
         gv(RC_INT);
+#ifdef TCC_TARGET_TRANSPUTER
+        {
+            /*
+             * Jump-table switches default OFF.  Fixed-slot J/GCALL dispatch
+             * has been implicated in intermittent maple_tree wr_invalid BUGs
+             * (enum store_type) during early kernel boot.  Comparison-chain
+             * gcase() is slower but correct.  Set T4_SWITCH_JT=1 to re-enable.
+             */
+            const char *jt = getenv("T4_SWITCH_JT");
+            int use_jt = 0;
+            if (jt && *jt)
+                use_jt = (int)strtoul(jt, NULL, 0) != 0;
+            d = 0;
+            if (!(use_jt && gen_switch_jump_table(sw, &d)))
+                d = gcase(sw->p, sw->n, 0);
+        }
+#else
         d = gcase(sw->p, sw->n, 0);
+#endif
         vpop();
         if (sw->def_sym)
             gsym_addr(d, sw->def_sym);
@@ -7473,7 +9356,17 @@ again:
         goto block_after_label;
 
     } else if (t == TOK_GOTO) {
+#ifdef TCC_TARGET_TRANSPUTER
+        /* Leaving only the innermost VLA scope relies on the epilogue to
+           discard the rest, and VLAs here live in an arena that outlives
+           the frame: a jump out of two VLA scopes would keep the outer
+           one's arrays for good.  Release every VLA live here; the label
+           re-establishes those live at the target (vla_restore() at
+           block_after_label). */
+        vla_leave(root_scope);
+#else
         vla_restore(cur_scope->vla.locorig);
+#endif
         if (tok == '*' && gnu_ext) {
             /* computed goto */
             next();
@@ -7536,6 +9429,12 @@ again:
             s->cleanupstate = cur_scope->cl.s;
 
     block_after_label:
+#ifdef TCC_TARGET_TRANSPUTER
+            /* A label inside a loop can be entered from outside it, so the
+               loop's preheader no longer dominates the body and any constant
+               hoisted there may be read uninitialised. */
+            TP_LOOP_POOL_UNSAFE();
+#endif
             /* Accept attributes after labels (e.g. 'unused') */
             parse_attribute(NULL);
 
@@ -7562,6 +9461,9 @@ again:
                 } else {
                     gexpr();
                     vpop();
+#ifdef TCC_TARGET_TRANSPUTER
+                    tp_stmt_end();
+#endif
                 }
                 skip(';');
             }
@@ -7661,6 +9563,12 @@ static void init_putz(init_params *p, unsigned long c, int size)
     init_assert(p, c + size);
     if (p->sec) {
         /* nothing to do because globals are already set to zero */
+#ifdef TCC_TARGET_TRANSPUTER
+    } else if (nocode_wanted) {
+        /* In a compound literal or other context where code can't be
+           emitted (cur_text_section may be NULL).  Skip the memset —
+           the storage will be initialized by the caller. */
+#endif
     } else {
         vpush_helper_func(TOK_memset);
         vseti(VT_LOCAL, c);
@@ -7915,6 +9823,8 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
     Section *sec = p->sec;
     uint64_t val;
 
+#ifndef TCC_TARGET_TRANSPUTER
+#endif
     dtype = *type;
     dtype.t &= ~VT_CONSTANT; /* need to do that to avoid false warning */
 
@@ -8010,6 +9920,13 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
 	    case VT_SHORT:
                 write16le(ptr, val);
 		break;
+#ifdef TCC_TARGET_TRANSPUTER
+            case VT_BF16:
+            case VT_F16:
+            case VT_FLOAT16:
+                write16le(ptr, val);
+                break;
+#endif
 	    case VT_FLOAT:
                 write32le(ptr, val);
 		break;
@@ -8070,6 +9987,8 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
     Sym indexsym;
     CType *t1;
 
+#ifndef TCC_TARGET_TRANSPUTER
+#endif
     /* generate line number info */
     if (debug_modes && !(flags & DIF_SIZE_ONLY) && !p->sec)
         tcc_debug_line(tcc_state), tcc_tcov_check_line (tcc_state, 1);
@@ -8409,6 +10328,11 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             loc -= align;
         }
 #endif
+#ifdef TCC_TARGET_TRANSPUTER
+        /* Transputer workspace is word-addressed. All locals must be
+         * word-aligned so LDL/STL access the correct word slot. */
+        if (align < 4) align = 4;
+#endif
         loc = (loc - size) & -align;
         addr = loc;
         p.local_offset = addr + size;
@@ -8465,6 +10389,12 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
                     tcc_warning("rw data: %s", get_tok_str(v, 0));*/
             } else if (tcc_state->nocommon)
                 sec = bss_section;
+#ifdef TCC_TARGET_TRANSPUTER
+            /* Custom sections keep the PROGBITS/SHF_ALLOC they were created
+               with.  The kernel puts uninitialised and initialised objects
+               in the same section (mm/memblock.c), and a section made NOBITS
+               by its first object has no data to initialise later ones. */
+#else
         } else if (ad->new_section) {
             /* XXX: DWIM logic: set section flags according to first usage */
             if (!is_const) {
@@ -8472,6 +10402,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
                 if (!has_init)
                     sec->sh_type = SHT_NOBITS;
             }
+#endif
         }
 
 #ifdef CONFIG_TCC_BCHECK
@@ -8535,9 +10466,11 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
 
         vpush_type_size(type, &a);
         gen_vla_alloc(type, a);
-#if defined TCC_TARGET_PE && defined TCC_TARGET_X86_64
+#if defined TCC_TARGET_PE && defined TCC_TARGET_X86_64 || defined TCC_TARGET_TRANSPUTER
         /* on _WIN64, because of the function args scratch area, the
            result of alloca differs from RSP and is returned in RAX.  */
+        /* (on the transputer, VLAs live in an arena that grows upward,
+           so the array starts below the top that is saved) */
         gen_vla_result(addr), addr = (loc -= PTR_SIZE);
 #endif
         gen_vla_sp_save(addr);
@@ -8610,7 +10543,13 @@ ST_FUNC Sym *gfunc_set_param(Sym *s, int c, int byref)
         return NULL;
     s->c = c;
     if (byref)
+#ifdef TCC_TARGET_TRANSPUTER
+        s->r = VT_LLOCAL | VT_LVAL; /* by-reference parameter */
+    else
+        s->r = VT_LOCAL | VT_LVAL; /* BUGFIX (2026-01-16): Parameters are lvalues */
+#else
         s->r = VT_LLOCAL | VT_LVAL; /* otherwise VT_LOCAL */
+#endif
     return s;
 }
 
@@ -8713,6 +10652,9 @@ static void gen_inline_functions(TCCState *s)
     struct InlineFunc *fn;
 
     tcc_open_bf(s, ":inline:", 0);
+#ifdef TCC_TARGET_TRANSPUTER
+    resolve_inline_sections(s);
+#endif
     /* iterate while inline function are referenced */
     do {
         inline_generated = 0;
@@ -8726,7 +10668,18 @@ static void gen_inline_functions(TCCState *s)
                 tccpp_putfile(fn->filename);
                 begin_macro(fn->func_str, 1);
                 next();
+#ifdef TCC_TARGET_TRANSPUTER
+                cur_text_section = fn->section;
+                if (!cur_text_section && !sym->a.addrtaken
+                    && !fn->call_section_conflict)
+                    cur_text_section = fn->call_section;
+                if (!cur_text_section)
+                    cur_text_section = text_section;
+                else if (cur_text_section->sh_num > bss_section->sh_num)
+                    cur_text_section->sh_flags = text_section->sh_flags;
+#else
                 cur_text_section = text_section;
+#endif
                 gen_function(sym);
                 end_macro();
 
@@ -8798,6 +10751,9 @@ static int decl(int l)
     CType type, btype;
     Sym *sym, *sa;
     AttributeDef ad, adbase;
+#ifdef TCC_TARGET_TRANSPUTER
+    TokenString *inferred_init;
+#endif
     ElfSym *esym;
 
     while (1) {
@@ -8851,8 +10807,39 @@ static int decl(int l)
         while (1) { /* iterate thru each declaration */
             type = btype;
 	    ad = adbase;
+#ifdef TCC_TARGET_TRANSPUTER
+            inferred_init = NULL;
+#endif
             type_decl(&type, &ad, &v, l == VT_CMP ? TYPE_DIRECT | TYPE_PARAM : TYPE_DIRECT);
             /*ptype("decl", &type, v);*/
+
+#ifdef TCC_TARGET_TRANSPUTER
+            if (ad.inferred_type) {
+                int declaration_bits = btype.t &
+                    (VT_STORAGE | VT_CONSTANT | VT_VOLATILE);
+
+                if (!v || tok != '=')
+                    tcc_error("inferred declaration requires an initializer");
+                if ((type.t & (VT_BTYPE | VT_ARRAY)) != VT_INT || type.ref)
+                    tcc_error("inferred declaration cannot use a derived declarator");
+
+                next();
+                skip_or_save_block(&inferred_init);
+                unget_tok(0);
+                begin_macro(inferred_init, 1);
+                next();
+                expr_type(&type, expr_eq);
+                type.t &= ~VT_STORAGE;
+                convert_parameter_type(&type);
+                type.t |= declaration_bits;
+
+                /* Rewind the saved initializer for normal declaration and
+                   code generation below. */
+                macro_ptr = inferred_init->str;
+                next();
+            }
+#endif
+
             if ((type.t & VT_BTYPE) == VT_FUNC) {
                 if ((type.t & VT_STATIC) && (l != VT_CONST))
                     tcc_error("function without file scope cannot be static");
@@ -8918,25 +10905,49 @@ static int decl(int l)
                     }
                 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+                /* static inline functions are just recorded as a kind
+                   of macro. Their code will be emitted at the end of
+                   the compilation unit only if they are used.
+                   Skip functions marked with noinline attribute. */
+                if ((sym->type.t & VT_INLINE) && !sym->f.func_noinline) {
+#else
                 /* static inline functions are just recorded as a kind
                    of macro. Their code will be emitted at the end of
                    the compilation unit only if they are used */
                 if (sym->type.t & VT_INLINE) {
+#endif
                     struct InlineFunc *fn;
                     fn = tcc_malloc(sizeof *fn + strlen(file->filename));
                     strcpy(fn->filename, file->filename);
                     fn->sym = sym;
+#ifdef TCC_TARGET_TRANSPUTER
+                    fn->section = ad.section;
+                    fn->call_section = NULL;
+                    fn->call_section_conflict = 0;
+#endif
                     dynarray_add(&tcc_state->inline_fns,
 				 &tcc_state->nb_inline_fns, fn);
                     skip_or_save_block(&fn->func_str);
                 } else {
                     /* compute text section */
+#ifdef TCC_TARGET_TRANSPUTER
+                    /* Any custom section a function is defined in becomes
+                       code, even if a prototype or variable created it
+                       first (the kernel's .init.text, .ref.text). */
+                    cur_text_section = ad.section;
+                    if (!cur_text_section)
+                        cur_text_section = text_section;
+                    else if (cur_text_section->sh_num > bss_section->sh_num)
+                        cur_text_section->sh_flags = text_section->sh_flags;
+#else
                     cur_text_section = text_section;
                     if (ad.section) {
                         cur_text_section = ad.section;
                         if (ad.new_section)
                             ad.section->sh_flags = text_section->sh_flags;
                     }
+#endif
                     gen_function(sym);
                 }
                 break;
@@ -8990,7 +11001,11 @@ static int decl(int l)
                         r |= VT_LVAL;
                     }
 
+#ifdef TCC_TARGET_TRANSPUTER
+                    if (inferred_init || tok == '=')
+#else
                     if (tok == '=')
+#endif
                         has_init = 1;
 
                     if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
@@ -9009,7 +11024,11 @@ static int decl(int l)
                         else
                             r |= VT_LOCAL;
                         type.t &= ~VT_EXTERN;
+#ifdef TCC_TARGET_TRANSPUTER
+                        if (has_init && !inferred_init)
+#else
                         if (has_init)
+#endif
                             next();
                         else if (l == VT_CONST)
                             /* uninitialized global variables may be overridden */
@@ -9017,7 +11036,31 @@ static int decl(int l)
                         decl_initializer_alloc(&type, &ad, r, has_init, v, l);
                     }
 
+#ifdef TCC_TARGET_TRANSPUTER
+                    if (inferred_init) {
+                        end_macro();
+                        next();
+                        inferred_init = NULL;
+                    }
+#endif
+
                     if (ad.alias_target && l == VT_CONST) {
+#ifdef TCC_TARGET_TRANSPUTER
+                        /* Aliases need to be emitted when their target symbol
+                           is emitted, even if perhaps unreferenced. */
+                        esym = elfsym(sym_find(ad.alias_target));
+                        if (!esym) {
+                            /* Target not yet defined — defer to end of TU */
+                            PendingAlias *pa = tcc_malloc(sizeof(PendingAlias));
+                            pa->alias_v = v;
+                            pa->target_v = ad.alias_target;
+                            pa->next = pending_aliases;
+                            pending_aliases = pa;
+                        } else {
+                            put_extern_sym2(sym_find(v), esym->st_shndx,
+                                            esym->st_value, esym->st_size, 1);
+                        }
+#else
                         /* Aliases need to be emitted when their target symbol
                            is emitted, even if perhaps unreferenced.
                            We only support the case where the base is already
@@ -9028,6 +11071,7 @@ static int decl(int l)
                             tcc_error("unsupported forward __alias__ attribute");
                         put_extern_sym2(sym_find(v), esym->st_shndx,
                                         esym->st_value, esym->st_size, 1);
+#endif
                     }
                 }
                 if (tok != ',') {

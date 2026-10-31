@@ -1,0 +1,8 @@
+ftranspb andcode 0 OK
+ftransp single OK
+reject andcode 2 OK
+vsetfmt OK
+fsincos OK
+frsqrt OK
+frecip OK
+fsincosb OK

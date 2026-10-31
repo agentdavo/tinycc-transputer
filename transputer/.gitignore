@@ -1,0 +1,59 @@
+# transputer/ is tracked by the outer tinycc-transputer repository,
+# apart from the following.
+
+# Separate git repositories
+/t4/
+/linux-7/
+/uClibc-ng/
+/busybox-1.37.0/
+
+# The dead legacy kernel tree (see CLAUDE.md), and the UAPI headers
+# exported from linux-7
+/linux-2.6.39/
+/linux-7-headers/
+
+# INMOS/SGS-Thomson manuals as text: copyrighted, kept local only
+/t9000hrm.txt
+/t9000ism.txt
+/searchable-tis-tcwg.txt
+
+# Build outputs
+*.o
+*.a
+*.elf
+*.flt
+*.btl
+*.exe
+*.cpio
+*.cpio.gz
+*.tpz
+output/
+build-tp/
+logs/
+dump
+/coremark/transputer/coremark*.tccsym
+/coremark/transputer/coremark*.txt
+/initramfs/busybox
+/ttools/ast/ast
+/ttools/dast/dast
+/ttools/dast/mktabs
+/ttools/lit/lit
+/ttools/litdump/litdump
+/ttools/oserver/oserver
+
+# Run artefacts
+*.uart
+*.bmp
+test_results.md
+
+# Freedoom game data (27 MB WADs, distributed by the Freedoom project)
+/doom/freedoom/
+
+# Empty placeholders left by an old build
+/tcc-ar
+/tcc-gcc
+/tcc-ld
+/tcc-nm
+/tcc-objcopy
+/tcc-objdump
+/tcc-strip

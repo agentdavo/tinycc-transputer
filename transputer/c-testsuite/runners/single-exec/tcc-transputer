@@ -1,0 +1,117 @@
+#!/bin/sh
+# Runner for c-testsuite: compile with transputer-tcc, run on T4 emulator
+set -eu
+
+t="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+
+# Resolve paths relative to project root
+BASEDIR="$(cd "$(dirname "$0")/../../../.." && pwd)"
+TCC="${TCC_BIN:-$BASEDIR/transputer-tcc}"
+NETLOAD="${NETLOAD_BIN:-$BASEDIR/transputer-netload}"
+T4="${T4_BIN:-$BASEDIR/transputer/t4/t4}"
+# The processor t4 models: -s425 or -s414 stop on any instruction that part
+# lacks, which is how a -mt425 or -mt414 run proves itself.
+T4_CPU="${T4_CPU:--s8}"
+TESTDIR="$BASEDIR/transputer/c-testsuite"
+INCDIR="$TESTDIR/include"
+# Optional extra compile flags (e.g. TP_EXTRA_CFLAGS=-mt9000).  Empty by
+# default, so the standard run is unchanged.
+TP_EXTRA_CFLAGS="${TP_EXTRA_CFLAGS:-}"
+# Optional layout shift (TP_LAYOUT_PAD=bytes): that many bytes of padding
+# linked between the boot stub and the test move every code and data address,
+# to expose bugs that depend on where things land (the core/external RAM edge
+# at 0x80001000, prefix lengths, alignment).  0 = the standard layout.
+TP_LAYOUT_PAD="${TP_LAYOUT_PAD:-0}"
+
+RUNTIME="$TESTDIR/test_runtime.o"
+BOOT="$TESTDIR/test_boot_main.o"
+# The part the flags select (the last -mt option wins, as in tcc).  A link
+# for a part refuses objects compiled for a bigger one, so everything
+# linked must be built for it, the helper library included.
+TP_TARGET=$(printf '%s\n' $TP_EXTRA_CFLAGS | grep '^-mt' | tail -n 1 || true)
+# The compiler's helper library (64-bit divide, shifts and float conversions:
+# __divdi3, __udivdi3, ...).  -nostdlib leaves it out, so without it a test
+# doing 64-bit `/` or `%` calls an undefined symbol and jumps to address 0.
+case "$TP_TARGET" in
+-mt800|-mt805) lib=transputer-libtcc1-t800.a ;;
+-mt425|-mt414) lib=transputer-libtcc1-${TP_TARGET#-m}.a ;;
+*)             lib=transputer-libtcc1.a ;;
+esac
+LIBTCC1="${LIBTCC1:-$(dirname "$TCC")/$lib}"
+[ -f "$LIBTCC1" ] || LIBTCC1=""
+# A test tagged tvx needs -mt9000tvx; with another part selected the skip
+# list leaves it out.
+TEST_CFLAGS=$TP_EXTRA_CFLAGS
+if [ -z "$TP_TARGET" ] && grep -qx tvx "$t.tags" 2>/dev/null; then
+    TEST_CFLAGS="$TEST_CFLAGS -mt9000tvx"
+fi
+
+# Create temp directory
+scratchdir=$(mktemp -d)
+cleanup() { rm -rf "$scratchdir"; }
+trap cleanup EXIT
+
+# The cached runtime and boot stub are built without extra flags; with them
+# (say -mt425, whose runtime must not touch the FPU), build both per test.
+if [ -n "$TP_EXTRA_CFLAGS" ]; then
+    RUNTIME="$scratchdir/test_runtime.o"
+    BOOT="$scratchdir/test_boot_main.o"
+fi
+
+# Pre-build runtime and boot stub if not present
+if [ ! -f "$RUNTIME" ]; then
+    "$TCC" $TP_EXTRA_CFLAGS -nostdlib -nostdinc -I"$INCDIR" -c -o "$RUNTIME" "$TESTDIR/test_runtime.c"
+fi
+if [ ! -f "$BOOT" ]; then
+    "$TCC" $TP_EXTRA_CFLAGS -nostdlib -nostdinc -c -o "$BOOT" "$TESTDIR/test_boot_main.S"
+fi
+
+# Compile test
+if ! "$TCC" $TEST_CFLAGS -nostdlib -nostdinc -I"$INCDIR" -c -o "$scratchdir/test.o" "$t" 2>"$scratchdir/compile.err"; then
+    echo "COMPILE FAILED:"
+    cat "$scratchdir/compile.err"
+    exit 1
+fi
+
+PAD=""
+if [ "$TP_LAYOUT_PAD" != 0 ]; then
+    printf '.text\n.space %s\n' "$TP_LAYOUT_PAD" > "$scratchdir/pad.S"
+    "$TCC" -nostdlib -nostdinc -c -o "$scratchdir/pad.o" "$scratchdir/pad.S"
+    PAD="$scratchdir/pad.o"
+fi
+
+# Link: boot stub first (has _start), then test, then runtime and helpers.
+# The flags go to the link too: -mt414 links at the T414's MemStart.
+if ! "$TCC" $TEST_CFLAGS -nostdlib -nostdinc -o "$scratchdir/test.elf" "$BOOT" $PAD "$scratchdir/test.o" "$RUNTIME" $LIBTCC1 2>"$scratchdir/link.err"; then
+    echo "LINK FAILED:"
+    cat "$scratchdir/link.err"
+    exit 1
+fi
+
+# Create BTL
+if ! "$NETLOAD" "$scratchdir/test.elf" "$scratchdir/test.btl" 2>"$scratchdir/netload.err"; then
+    echo "NETLOAD FAILED:"
+    cat "$scratchdir/netload.err"
+    exit 1
+fi
+
+# Run on T4 emulator with UART output to scratch directory.  -k: t4 exits on
+# SIGTERM only between instructions, so one that never finishes would
+# otherwise outlive the timeout (00207 once kept two running for hours).
+T4_UART_LOG="$scratchdir/boot.uart" DISPLAY= timeout -k 5 10 "$T4" $T4_CPU -ss -se -sb "$scratchdir/test.btl" > /dev/null 2>"$scratchdir/t4.err" || true
+
+# boot.uart may not exist if emulator crashed immediately
+if [ ! -f "$scratchdir/boot.uart" ]; then
+    touch "$scratchdir/boot.uart"
+fi
+
+# Extract cycle count from T4 stderr (heartbeat = instruction count)
+cycles=$(grep -oP 'heartbeat=\K[0-9]+' "$scratchdir/t4.err" | tail -1)
+if [ -n "$cycles" ]; then
+    echo "cycles: $cycles"
+fi
+
+# Compare output
+if ! diff -u "$t.expected" "$scratchdir/boot.uart"; then
+    exit 1
+fi

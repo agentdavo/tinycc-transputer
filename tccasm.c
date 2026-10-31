@@ -620,12 +620,28 @@ static void asm_parse_directive(TCCState *s1, int global)
 		    gen_expr64(&e);
 #endif
                 } else {
+#ifdef TCC_TARGET_TRANSPUTER
+                    if (e.sym) {
+                        int reloc_type = (size == 1) ? R_TRANSPUTER_8 : R_TRANSPUTER_16;
+                        greloc(sec, e.sym, ind, reloc_type);
+                        if (size == 1)
+                            g(0);
+                        else
+                            gen_le16(0);
+                    } else {
+                        if (size == 1)
+                            g(e.v);
+                        else
+                            gen_le16(e.v);
+                    }
+#else
                     if (e.sym)
                         expect("constant");
                     if (size == 1)
                         g(e.v);
                     else
                         gen_le16(e.v);
+#endif
                 }
             } else {
                 ind += size;
@@ -777,6 +793,80 @@ static void asm_parse_directive(TCCState *s1, int global)
             }
 	}
 	break;
+#ifdef TCC_TARGET_TRANSPUTER
+    case TOK_ASMDIR_incbin:
+        {
+            const char *filename;
+            FILE *fp;
+            long file_size, skip_bytes, read_bytes;
+
+            next();
+            if (tok == TOK_STR) {
+                filename = tokc.str.data;
+            } else if (tok == TOK_PPSTR && tokc.str.data[0] == '"') {
+                tokc.str.data[tokc.str.size - 2] = 0;
+                filename = tokc.str.data + 1;
+            } else {
+                expect("string constant");
+            }
+            next();
+
+            skip_bytes = 0;
+            read_bytes = -1;
+            if (tok == ',') {
+                next();
+                skip_bytes = asm_int_expr(s1);
+                if (skip_bytes < 0)
+                    tcc_error(".incbin skip value must be >= 0");
+                if (tok == ',') {
+                    next();
+                    read_bytes = asm_int_expr(s1);
+                    if (read_bytes < 0)
+                        tcc_error(".incbin count value must be >= 0");
+                }
+            }
+
+            fp = fopen(filename, "rb");
+            if (!fp)
+                tcc_error("could not open .incbin file '%s'", filename);
+            if (fseek(fp, 0, SEEK_END) != 0) {
+                fclose(fp);
+                tcc_error("could not seek .incbin file '%s'", filename);
+            }
+            file_size = ftell(fp);
+            if (file_size < 0) {
+                fclose(fp);
+                tcc_error("could not get .incbin file size '%s'", filename);
+            }
+            if (skip_bytes > file_size) {
+                fclose(fp);
+                tcc_error(".incbin skip beyond end of file '%s'", filename);
+            }
+            if (read_bytes < 0)
+                read_bytes = file_size - skip_bytes;
+            if ((skip_bytes + read_bytes) > file_size) {
+                fclose(fp);
+                tcc_error(".incbin count beyond end of file '%s'", filename);
+            }
+            if (fseek(fp, skip_bytes, SEEK_SET) != 0) {
+                fclose(fp);
+                tcc_error("could not seek .incbin file '%s'", filename);
+            }
+
+            if (sec->sh_type != SHT_NOBITS) {
+                sec->data_offset = ind;
+                ptr = section_ptr_add(sec, read_bytes);
+                if (read_bytes > 0 &&
+                    fread(ptr, 1, read_bytes, fp) != (size_t)read_bytes) {
+                    fclose(fp);
+                    tcc_error("short read from .incbin file '%s'", filename);
+                }
+            }
+            ind += read_bytes;
+            fclose(fp);
+        }
+        break;
+#endif
     case TOK_ASMDIR_text:
     case TOK_ASMDIR_data:
     case TOK_ASMDIR_bss:

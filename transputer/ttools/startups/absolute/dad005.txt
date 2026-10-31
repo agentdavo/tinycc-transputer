@@ -1,0 +1,20 @@
+Shared window memory mapping on DAD005 with 32KB RAM:
+
+   **** PC ****  +  **** T425 ****
+                 +|----80000000
+                 +|      (4Kb internal memory -- invisible in the window)
+                 +|----80001000
+                 +|    ...
+                 +|    28Kb
+                 +|    ...
+                 +|    >80007f80..80007fff  PMI configuration (32 words)
+                 +|    >80007ffe..80007fff  Reset Instruction (2 bytes)
+                 +|    >80007f80..80007fbf  Control registers (16 words)
+D8000-----------|+|----80008000
+                |+|    4Kb
+                |+|----80009000
+                |+|    (that 28kb replicated)
+E0000-----------|+|----80010000
+                 +|    (that 4kb replicated)
+                 +|----80011000
+                 +|  .... and so on .... */

@@ -1,0 +1,7 @@
+flitb OK
+flitb dark OK
+qgemm f32 OK
+qgemm bf16 OK
+vblend8 ctl0 OK
+vblend8 ctl1 OK
+vblend8 ctl2 OK

@@ -243,6 +243,19 @@
                                   & -(__alignof__(type)))
     #define __builtin_va_arg(ap,type) (*(sizeof(type) > (2*__va_reg_size) ? *(type **)((ap += __va_reg_size) - __va_reg_size) : (ap = (va_list)(_tcc_align(ap,type) + (sizeof(type)+__va_reg_size - 1)& -__va_reg_size), (type *)(ap - ((sizeof(type)+ __va_reg_size - 1)& -__va_reg_size)))))
 
+#elif defined __transputer__
+    typedef char *__builtin_va_list;
+    /* Transputer varargs are laid out as ascending 32-bit words in the
+       CALL save area / stacked argument area.  The backend points named
+       parameters in variadic functions directly at that contiguous layout,
+       so va_start can seed from the last named argument address and va_arg
+       can advance upward i386-style.  This is intentionally pass-by-value:
+       callees consume their local copy unless the caller uses va_copy. */
+    #define __builtin_va_start(ap,last) \
+        (ap = ((char *)&(last)) + ((sizeof(last)+3)&~3))
+    #define __builtin_va_arg(ap,t) \
+        (*(t *)((ap += (sizeof(t)+3)&~3) - ((sizeof(t)+3)&~3)))
+
 #else /* __i386__ */
     typedef char *__builtin_va_list;
     #define __builtin_va_start(ap,last) (ap = ((char *)&(last)) + ((sizeof(last)+3)&~3))

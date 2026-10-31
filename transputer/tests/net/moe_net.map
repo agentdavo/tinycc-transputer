@@ -1,0 +1,13 @@
+Connect HOST to processor 0 link 0
+Connect HOST to processor 1 link 0
+Connect HOST to processor 2 link 0
+Connect HOST to processor 3 link 0
+Connect HOST to processor 4 link 0
+Connect HOST to processor 5 link 0
+Connect HOST to processor 6 link 0
+Connect processor 0 link 1 to processor 1 link 1
+Connect processor 0 link 2 to processor 2 link 1
+Connect processor 0 link 3 to processor 3 link 1
+Connect processor 1 link 2 to processor 4 link 1
+Connect processor 2 link 2 to processor 5 link 1
+Connect processor 3 link 2 to processor 6 link 1

@@ -1,0 +1,51 @@
+WHAT IS TTOOLS
+
+TTOOLS is free package comprising assembler, linker, loader(s), and
+auxiliary programs intended for software development for transputers.
+
+TTOOLS is designed to work with gcc-t800, a port of GNU C/C++ Compiler
+to transputers.  You need gcc-2.6.3-t800.7 or newer; older versions
+use a slightly different flavor of assembly language.
+
+Both TTOOLS and gcc-t800 are known to work on i486-linux platform.
+As they use mostly basic system interfaces, it should not be
+hard to port them to other Un*xes, but I didn't try this.
+
+
+COPYRIGHT
+
+TTOOLS is Copyright (C) 1995 Yury Shevchuk.  Copying is allowed under
+the terms of GNU General Public License.  No warranty, you understand.
+See the file COPYING for more details.
+
+
+AVAILABILITY
+
+You can always download a fresh version of TTOOLS from ftp.botik.ru:
+/pub/local/ttools.  Warning: this site may be unreachable from time to
+time, don't panic if you cannot connect right away.  If you want to
+provide a mirror, you are welcome.
+
+
+INSTALLATION
+
+Untar the ttools-*.tar.gz archive, change to ttools directory, edit
+the variables in Makefile to suit you taste, "make".
+
+"make test" if you want to verify if the programs you just compiled
+do work.
+
+"make install" to get the programs and man pages installed on your
+system.  This will also create symlinks under /usr[/local]/t800 where
+GCC installation process expects to see cross-tools.
+
+"man ttools" to read an introductory text.
+
+
+FEEDBACK
+
+Please don't hesitate to sent bug reports, comments, etc. to me at
+<sizif@botik.ru>.  Sending a bug report is a Good Deed because thus
+you help to keep other people from running into the same problem that
+you had.  Comments, etc. are useful too, explaining why is left as an
+exercise to the reader.  ;-)

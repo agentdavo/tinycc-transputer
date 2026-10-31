@@ -158,7 +158,11 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* #define TCC_TARGET_ARM64  *//* ARMv8 code generator */
 /* #define TCC_TARGET_C67    *//* TMS320C67xx code generator */
 /* #define TCC_TARGET_RISCV64 *//* risc-v code generator */
+#ifdef TCC_TARGET_TRANSPUTER
+/* #define TCC_TARGET_TRANSPUTER *//* transputer code generator */
+#endif
 
+#ifndef TCC_TARGET_TRANSPUTER
 /* default target is I386 */
 #if !defined(TCC_TARGET_I386) && !defined(TCC_TARGET_ARM) && \
     !defined(TCC_TARGET_ARM64) && !defined(TCC_TARGET_C67) && \
@@ -183,6 +187,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # ifdef __APPLE__
 #  define TCC_TARGET_MACHO 1
 # endif
+#endif
 #endif
 
 /* only native compiler supports -run */
@@ -281,6 +286,12 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # if defined TCC_TARGET_PE || defined _WIN32
 #  define CONFIG_TCC_SYSINCLUDEPATHS \
     "{B}/include" PATHSEP "{B}/include/winapi"
+# elif defined TCC_TARGET_TRANSPUTER
+/* include/transputer/ holds target headers that cannot sit in include/
+   itself (limits.h would clobber mingw's in the PE build). */
+#  define CONFIG_TCC_SYSINCLUDEPATHS \
+    "{B}/include/transputer" PATHSEP "{B}/include" \
+    PATHSEP ALSO_TRIPLET(CONFIG_SYSROOT "/usr/include")
 # else
 #  define CONFIG_TCC_SYSINCLUDEPATHS \
     "{B}/include" PATHSEP ALSO_TRIPLET(CONFIG_SYSROOT "/usr/include")
@@ -387,6 +398,10 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # include "riscv64-gen.c"
 # include "riscv64-link.c"
 # include "riscv64-asm.c"
+#elif defined(TCC_TARGET_TRANSPUTER)
+# include "transputer-gen.c"
+# include "transputer-link.c"
+# include "transputer-asm.c"
 #else
 #error unknown target
 #endif
@@ -495,6 +510,26 @@ typedef struct SValue {
 
 } SValue;
 
+#ifdef TCC_TARGET_TRANSPUTER
+struct scope;
+
+struct case_t {
+    int64_t v1, v2;
+    int ind, line;
+};
+
+struct switch_t {
+    struct case_t **p; /* list of case ranges */
+    int n;
+    int def_sym; /* default symbol */
+    int nocode_wanted;
+    int *bsym;
+    struct scope *scope;
+    struct switch_t *prev;
+    SValue sv;
+};
+#endif
+
 /* symbol attributes */
 struct SymAttr {
     unsigned short
@@ -507,7 +542,12 @@ struct SymAttr {
     dllimport   : 1,
     addrtaken   : 1,
     nodebug     : 1,
+#ifdef TCC_TARGET_TRANSPUTER
+    transparent_union : 1,
+    xxxx        : 1; /* not used */
+#else
     xxxx        : 2; /* not used */
+#endif
 };
 
 /* function attributes or temporary attributes for parsing */
@@ -520,7 +560,12 @@ struct FuncAttr {
     func_dtor   : 1, /* attribute((destructor)) */
     func_args   : 8, /* PE __stdcall args */
     func_alwinl : 1, /* always_inline */
+#ifdef TCC_TARGET_TRANSPUTER
+    func_noinline : 1, /* noinline */
+    xxxx        : 14;
+#else
     xxxx        : 15;
+#endif
 };
 
 /* symbol management */
@@ -676,12 +721,23 @@ typedef struct AttributeDef {
     int asm_label; /* associated asm label */
     char attr_mode; /* __attribute__((__mode__(...))) */
     char new_section; /* section is new */
+#ifdef TCC_TARGET_TRANSPUTER
+    char inferred_type; /* C23 auto or GNU __auto_type */
+#endif
 } AttributeDef;
 
 /* inline functions */
 typedef struct InlineFunc {
     TokenString *func_str;
     Sym *sym;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* Explicit function section, if any, and the section shared by all
+       emitted direct calls otherwise.  TCC outlines inline functions; the
+       latter lets that outline follow a custom-section caller safely. */
+    Section *section;
+    Section *call_section;
+    unsigned char call_section_conflict;
+#endif
     char filename[1];
 } InlineFunc;
 
@@ -757,6 +813,35 @@ struct TCCState {
     unsigned char reverse_funcargs; /* if true, evaluate last function arg first */
     unsigned char gnu89_inline; /* treat 'extern inline' like 'static inline' */
     unsigned char unwind_tables; /* create eh_frame section */
+#ifdef TCC_TARGET_TRANSPUTER
+    /* -mt9000: allow the IMS T9000-only opcodes (ls/ss/lsx/lbx/xsword/
+       xbword/ssub).  Default 0 == plain T805 codegen.  -mt805/-mt800/-mt425/
+       -mt414 clear it again (last option on the command line wins). */
+    unsigned char tp_t9000;
+    /* -mt425: the IMS T425 - the T805's integer instructions and no FPU.
+       Floating point becomes calls to the soft-float helpers in
+       transputer-libtcc1-t425.a.  Also clears tp_t9000.  -mt414 sets it
+       too, and tp_t414 as well. */
+    unsigned char tp_t425;
+    /* -mt414: the IMS T414 - the T425 without dup, wsubdb, pop, the
+       move2d group, crcword/crcbyte, bitcnt and the bit reversals. */
+    unsigned char tp_t414;
+    /* -mt800: the original IMS T800 - the T805 without what the T805
+       shares with the T425 and the T800 lacks: pop, the timer enables,
+       ldmemstartval, the j0 break group, lddevid and start.  -mt805 is
+       the T805, as -mt800 was before. */
+    unsigned char tp_t800;
+    /* -mt9000tvx: the T9000 with the TVX extension (opr #1C0-#1FA), the
+       only target whose TVX builtins compile; predefines __TVX__. */
+    unsigned char tp_tvx;
+    /* A -mt option was given, so a link refuses objects compiled for a
+       part with more than that one (TP_EF_* in their e_flags). */
+    unsigned char tp_link_check;
+    /* TP_EF_* of what this output holds: the target of every function
+       compiled or assembled here, and the e_flags of every object loaded.
+       Written as the output's e_flags. */
+    unsigned tp_isa_used;
+#endif
 
     /* warning switches */
     unsigned char warn_none;
@@ -1036,11 +1121,76 @@ struct filespec {
                                 char/short stored in integer registers) */
 #define VT_NONCONST  0x1000  /* VT_CONST, but not an (C standard) integer
                                 constant expression */
+#ifdef TCC_TARGET_TRANSPUTER
+#define VT_UNALIGNED 0x2000  /* lvalue whose address is NOT provably aligned to
+                                its own type: a member of a packed struct, a
+                                member at an odd/underaligned offset, or a
+                                member of an object that is itself so marked.
+                                Backends with narrow (16-bit) memory accesses
+                                that have an alignment precondition must fall
+                                back to a byte-wise synthesis when this is set.
+                                Set in unary()'s '.'/'->' handling; preserved by
+                                save_reg_upstack, which only rewrites
+                                VT_VALMASK|VT_BOUNDED. */
+#endif
 #define VT_MUSTBOUND 0x4000  /* bound checking must be done before
                                 dereferencing value */
 #define VT_BOUNDED   0x8000  /* value is bounded. The address of the
                                 bounding function call point is in vc */
 /* types */
+#ifdef TCC_TARGET_TRANSPUTER
+/* Basic type: a 5-bit field, 32 slots.  Widened from 4 bits (16 slots) when
+   the narrow floating types filled the last free slots; all the modifier and
+   storage flags below were shifted up by one bit to make room.  Nothing
+   outside this header depends on the numeric layout - the whole codebase
+   goes through VT_BTYPE and the named flags - so widening again means
+   shifting the flags again and nothing else.  Bit 19 is still free before
+   VT_STRUCT_SHIFT. */
+#define VT_BTYPE       0x001f  /* mask for basic type */
+#define VT_VOID             0  /* void type */
+#define VT_BYTE             1  /* signed byte type */
+#define VT_SHORT            2  /* short type */
+#define VT_INT              3  /* integer type */
+#define VT_LLONG            4  /* 64 bit integer */
+#define VT_PTR              5  /* pointer */
+#define VT_FUNC             6  /* function type */
+#define VT_STRUCT           7  /* struct/union definition */
+#define VT_FLOAT            8  /* IEEE float */
+#define VT_DOUBLE           9  /* IEEE double */
+#define VT_LDOUBLE         10  /* IEEE long double */
+#define VT_BOOL            11  /* ISOC99 boolean type */
+#define VT_BF16            12  /* __bf16 brain floating point (transputer) */
+#define VT_QLONG           13  /* 128-bit integer. Only used for x86-64 ABI */
+#define VT_QFLOAT          14  /* 128-bit float. Only used for x86-64 ABI */
+#define VT_F16             15  /* __fp16 / IEEE binary16, storage-only (transputer) */
+/* --- slots 16..31, opened up by widening VT_BTYPE to 5 bits --- */
+#define VT_FLOAT16         16  /* _Float16 / IEEE binary16, C23 Annex H
+                                  arithmetic type (transputer).  Same format
+                                  and storage as VT_F16; separate slot because
+                                  the two differ in arithmetic semantics -
+                                  __fp16 promotes to float and yields float,
+                                  _Float16 yields _Float16.  Clang draws the
+                                  same distinction (HalfTy vs Float16Ty). */
+
+#define VT_UNSIGNED    0x0020  /* unsigned type */
+#define VT_DEFSIGN     0x0040  /* explicitly signed or unsigned */
+#define VT_ARRAY       0x0080  /* array type (also has VT_PTR) */
+#define VT_BITFIELD    0x0100  /* bitfield modifier */
+#define VT_CONSTANT    0x0200  /* const modifier */
+#define VT_VOLATILE    0x0400  /* volatile modifier */
+#define VT_RESTRICT    0x0800  /* restrict modifier */
+#define VT_QUAL        (VT_CONSTANT | VT_VOLATILE | VT_RESTRICT)
+#define VT_VLA         0x1000  /* VLA type (also has VT_PTR and VT_ARRAY) */
+#define VT_LONG        0x2000  /* long type (also has VT_INT rsp. VT_LLONG) */
+
+/* storage */
+#define VT_EXTERN  0x00004000  /* extern definition */
+#define VT_STATIC  0x00008000  /* static variable */
+#define VT_TYPEDEF 0x00010000  /* typedef definition */
+#define VT_INLINE  0x00020000  /* inline definition */
+#define VT_TLS     0x00040000  /* thread-local storage */
+/* currently unused: 0x00080000  */
+#else
 #define VT_BTYPE       0x000f  /* mask for basic type */
 #define VT_VOID             0  /* void type */
 #define VT_BYTE             1  /* signed byte type */
@@ -1075,6 +1225,7 @@ struct filespec {
 #define VT_INLINE  0x00010000  /* inline definition */
 #define VT_TLS     0x00020000  /* thread-local storage */
 /* currently unused: 0x000[48]0000  */
+#endif
 
 #define VT_STRUCT_SHIFT 20     /* shift for bitfield shift values (32 - 2*6) */
 #define VT_STRUCT_MASK (((1U << (6+6)) - 1) << VT_STRUCT_SHIFT | VT_BITFIELD)
@@ -1485,6 +1636,9 @@ ST_FUNC void vpush_helper_func(int v);
 ST_FUNC void vset(CType *type, int r, int v);
 ST_FUNC void vset_VT_CMP(int op);
 ST_FUNC void vpushi(int v);
+#ifdef TCC_TARGET_TRANSPUTER
+ST_FUNC void parse_builtin_params(int nc, const char *args);
+#endif
 ST_FUNC void vpushv(SValue *v);
 ST_FUNC void vpushsym(CType *type, Sym *sym);
 ST_FUNC void vswap(void);
@@ -1573,6 +1727,9 @@ ST_FUNC ssize_t full_read(int fd, void *buf, size_t count);
 ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size);
 ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h);
 ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset);
+#ifdef TCC_TARGET_TRANSPUTER
+ST_FUNC void tcc_clear_archive_context(void);
+#endif
 ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte);
 ST_FUNC void add_array(TCCState *s1, const char *sec, int c);
 
@@ -1643,9 +1800,17 @@ ST_FUNC void gen_opi(int op);
 ST_FUNC void gen_opf(int op);
 ST_FUNC void gen_cvt_ftoi(int t);
 ST_FUNC void gen_cvt_itof(int t);
+#ifdef TCC_TARGET_TRANSPUTER
+/* TVX __bf16 <-> binary32 conversion (BF16TOR32 / R32TOBF16) */
+ST_FUNC void gen_cvt_bf16_to_float(void);
+ST_FUNC void gen_cvt_float_to_bf16(void);
+/* TVX __fp16 <-> binary32 conversion (F16TOR32 / R32TOF16) */
+ST_FUNC void gen_cvt_f16_to_float(void);
+ST_FUNC void gen_cvt_float_to_f16(void);
+#endif
 ST_FUNC void gen_cvt_ftof(int t);
 ST_FUNC void ggoto(void);
-#ifndef TCC_TARGET_C67
+#if !defined TCC_TARGET_C67 && !defined TCC_TARGET_TRANSPUTER
 ST_FUNC void o(unsigned int c);
 #endif
 ST_FUNC void gen_vla_sp_save(int addr);
@@ -1667,6 +1832,17 @@ static inline void write32le(unsigned char *p, uint32_t x) {
 static inline void add32le(unsigned char *p, int32_t x) {
     write32le(p, read32le(p) + x);
 }
+#ifdef TCC_TARGET_TRANSPUTER
+static inline uint32_t read24le(unsigned char *p) {
+    return p[0] | (p[1] << 8) | (p[2] << 16);
+}
+static inline void write24le(unsigned char *p, uint32_t x) {
+    p[0] = x & 255; p[1] = (x >> 8) & 255; p[2] = (x >> 16) & 255;
+}
+static inline void add24le(unsigned char *p, int32_t x) {
+    write24le(p, read24le(p) + x);
+}
+#endif
 static inline uint64_t read64le(unsigned char *p) {
   return read32le(p) | (uint64_t)read32le(p + 4) << 32;
 }
@@ -1731,6 +1907,107 @@ ST_FUNC void gen_increment_tcov (SValue *sv);
 ST_FUNC void gen_clear_cache(void);
 #endif
 
+#ifdef TCC_TARGET_TRANSPUTER
+/* ------------ transputer-gen.c ------------ */
+ST_FUNC void transputer_init(struct TCCState *s);
+ST_FUNC void gfunc_return(CType *func_type);
+ST_FUNC void gfunc_leave(void);
+ST_FUNC void gen_opl_shift(int op);
+ST_FUNC void gen_vla_result(int addr);
+
+/* Loop constant pool: bracket a loop so literals used inside it can be
+   materialised once in the preheader instead of once per iteration. */
+ST_FUNC void tp_loop_pool_open(void);
+ST_FUNC void tp_loop_pool_close(void);
+ST_FUNC void tp_loop_pool_unsafe(void);
+ST_FUNC void tp_cmp_hint_branch_true(int on);
+#define TP_CMP_BRANCH_TRUE_BEGIN() tp_cmp_hint_branch_true(1)
+#define TP_CMP_BRANCH_TRUE_END()   tp_cmp_hint_branch_true(0)
+#define TP_LOOP_POOL_OPEN()   tp_loop_pool_open()
+#define TP_LOOP_POOL_CLOSE()  tp_loop_pool_close()
+#define TP_LOOP_POOL_UNSAFE() tp_loop_pool_unsafe()
+
+/* Transputer intrinsic generator functions (called from tccgen.c) */
+/* Channel I/O */
+void gen_builtin_in(void);
+void gen_builtin_out(void);
+void gen_builtin_outbyte(void);
+void gen_builtin_outword(void);
+void gen_builtin_tin(void);
+void gen_builtin_resetch(void);
+/* Memory operations */
+void gen_builtin_move(void);
+void gen_builtin_move2dinit(void);
+void gen_builtin_move2dall(void);
+void gen_builtin_move2dnonzero(void);
+void gen_builtin_move2dzero(void);
+/* T805 CRC */
+void gen_builtin_crcbyte(void);
+void gen_builtin_crcword(void);
+/* Timer */
+void gen_builtin_ldtimer(void);
+void gen_builtin_sttimer(void);
+/* Utility */
+void gen_builtin_mint(void);
+void gen_builtin_wcnt(void);
+/* Process/scheduler */
+void gen_builtin_ldpri(void);
+void gen_builtin_startp(void);
+void gen_builtin_endp(void);
+void gen_builtin_runp(void);
+void gen_builtin_stopp(void);
+/* ALT operations */
+void gen_builtin_alt(void);
+void gen_builtin_altwt(void);
+void gen_builtin_altend(void);
+void gen_builtin_talt(void);
+void gen_builtin_taltwt(void);
+void gen_builtin_enbc(void);
+void gen_builtin_enbs(void);
+void gen_builtin_enbt(void);
+void gen_builtin_disc(void);
+void gen_builtin_diss(void);
+void gen_builtin_dist(void);
+/* Workspace */
+void gen_builtin_gajw(void);
+/* Error handling */
+void gen_builtin_seterr(void);
+void gen_builtin_testerr(void);
+void gen_builtin_sethalterr(void);
+void gen_builtin_clrhalterr(void);
+ST_FUNC int gen_transputer_builtin_call(int tok);
+/* T800 pointer arithmetic fast paths */
+ST_DATA int tp_ptr_add_is_addr;       /* final `+` of a pointer computation */
+ST_FUNC int gen_ptradd_bsub(void);    /* base + index   via BSUB */
+ST_FUNC int gen_ptradd_wsub(void);    /* base + index*4 via WSUB */
+ST_FUNC int gen_ptradd_wsubdb(void);  /* base + index*8 via WSUBDB */
+ST_FUNC int gen_ptradd_ssub(void);    /* base + index*2 via SSUB (T9000, -mt9000) */
+ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym);
+/* an expression statement, or a for loop's init or step, is complete */
+ST_FUNC void tp_stmt_end(void);
+/* the current pc is a jump target (gind(): loop heads, case labels) */
+ST_FUNC void tp_label_here(void);
+/* an operand of the binary operation gen_op is doing is volatile */
+ST_DATA int tp_opf_volatile;
+/* char/short to int conversion via XWORD sign extension */
+ST_FUNC void gen_cvt_csti(int t);
+
+/* ------------ transputer-link.c ------------ */
+ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
+
+/* ELF e_flags of transputer output: what the code in it needs beyond the
+   T414's instructions.  0 also for objects from before 2026-11-03. */
+#define TP_EF_T800OPS 0x01  /* dup, wsubdb, move2d, crc, bitcnt, bitrev */
+#define TP_EF_T805OPS 0x02  /* pop, lddevid, ... (T805 and T425) */
+#define TP_EF_FPU     0x04  /* the T800 floating-point unit */
+#define TP_EF_T9000   0x08  /* T9000 instructions */
+#define TP_EF_TVX     0x10  /* the TVX extension */
+ST_FUNC unsigned tp_target_flags(TCCState *s1);
+ST_FUNC const char *tp_target_name(TCCState *s1);
+ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
+                                  const char *member);
+#endif
+
 /* ------------ c67-gen.c ------------ */
 #ifdef TCC_TARGET_C67
 #endif
@@ -1781,6 +2058,9 @@ PUB_FUNC int tcc_get_dllexports(const char *filename, char **pp);
 # define ST_PE_STDCALL 0x40
 #endif
 #define ST_ASM_SET 0x04
+#ifdef TCC_TARGET_TRANSPUTER
+#define ST_FROM_ARCHIVE 0x08  /* symbol was loaded from an archive member */
+#endif
 
 /* ------------ tccmacho.c ----------------- */
 #ifdef TCC_TARGET_MACHO

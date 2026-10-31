@@ -1,0 +1,410 @@
+Sun Mar 30 11:35:20 1997  Yury Shevchuk  <sizif@hole>
+
+	* shared/version.c: 2.0beta2 released
+
+Sat Mar 29 21:54:13 1997  Yury Shevchuk  <sizif@hole>
+
+	* lit/lit.c:
+	Bug fixed: some redefined fragments triggered assertion failure
+
+Thu Feb 27 08:33:53 1997  Yury Shevchuk  <sizif@hole>
+
+	* shared/version.c: 2.0beta1 released
+
+	* lit/lit.c: Implemented long-name archive members handling
+	Include archive member names when reporting name references
+
+Thu Feb 27 08:33:53 1997  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0beta1 released
+
+	* lit/lit.c: Implemented long-name archive members handling.
+	Include archive member names when reporting name references.
+
+Tue May 14 10:43:53 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0alpha35 released
+
+	* t2s: sed script for importing alien assembly language source
+
+	* startups/linkboot/store/proba, startups/linkboot/store/litload.s,
+ 	  startups/linkboot/store/litload.o, startups/linkboot/litload.s:
+	Changed due to update to gcc and primitives.h
+
+	* startups/linkboot/primitives.h:
+	New rules for writing asms applied: popping constraints do not
+	complement clobbers.
+
+	* lit/lit.c:
+	Fixed the problem with "not actually defined" symbols -- which was due
+	to a failure to mark some files wanted.
+
+Sun Feb 25 16:10:48 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0alpha34 released.
+
+	* lit/options.h, lit/lit.c, docs/lit.1:
+	New option: -m, map file output.
+
+Tue Jan 16 16:14:16 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0alpha33 released
+
+	* ast/scan.l: Eat \r's at line ends (if any) for DOS compatibility.
+
+	* shared/expr.c:
+	expr_reduce(): used to miss reduction on certain elsums
+
+	* ast/scan.l: Updated to ST20450 instruction set
+
+Tue Jan 16 11:21:24 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0alpha32 released.
+
+Tue Jan 16 11:17:43 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* ast/scan.l: Serious minor bug in string handling fixed.
+
+	* Makefile: Use gzip --force for compressed manpages.
+	Silly embellishments.
+
+Tue Jan 16 11:17:43 1996  Roman Pozlevich  <roma@botik.ru>
+	
+	* startups/linkboot/Makefile:
+	sed segment substitution spell generalized.
+
+Sun Jan 14 22:06:10 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* test/pushpull/Makefile:
+	Another tweak to *really* avoid unnecessary preprocessing of pushpull.S.
+
+	* Makefile: make install: optionally compress manpages
+
+Sat Jan 13 20:27:08 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0alpha31 released.
+
+	* shared/expr.c:
+	expr_reduce_elsum(): lift element size even if it is not a constant.
+	Othervise, we risk to run into unreduced expressions in output pass
+	(see Roma's report).
+
+	* docs/ttools.html: Added a ref to link driver.
+	"Enhancements"
+
+Thu Jan  4 19:02:17 1996  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* test/pushpull/Makefile:
+	Run pushpull.S through preprocessor only if it is newer than
+	pushpull.s.  This way, `make compare' won't fail because of
+	cpp at user's site being different from cpp at development site.
+
+Mon Dec 25 20:24:00 1995  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* shared/version.c: 2.0alpha30 released.
+	
+	* Makefile:
+	Even more changes to get `make log' working.  Will it, finally?
+
+Mon Dec 25 15:32:03 1995  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* Makefile:
+	Oops.. check-committed and check-log didn't work because of leading
+	spaces in output from wc
+
+	* Makefile: More CVS-related tweaks
+
+Sat Dec 23 20:49:51 1995  Yury Shevchuk  <sizif@hole.botik.ru>
+
+	* Makefile: Adapted to cvs (ignore CVS in `make dist', etc.)
+
+Sun Dec  3 12:51:35 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* shared/version.c: 2.0alpha29 released
+
+	* lit/lit.c: Oops? skipping must be 0 while ifile_read_definitions!
+
+Sun Dec  3 11:36:37 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* shared/version.c: 2.0alpha28 released.
+
+	* shared/misc.c:
+	name_alloc: missed initialization used to cause segfauls
+
+Sat Dec  2 17:27:46 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* shared/version.c: 2.0alpha27 released
+
+	* startups/shared/litload.c:
+	Oops, -1 for expression-end-sign is obsolete!
+
+Fri Dec  1 20:11:01 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* shared/version.c: 2.0alpha26 released.
+
+	* shared/expr.h, shared/litin.c, shared/ments.c, shared/misc.c,
+	  shared/expr.c, ast/ast.c, ast/parse.y, lit/lit.c:
+	Oops, the expr_free macro bombed on side-effect arguments in lit.
+
+	* Makefile:
+	Use own version of rcs2log, which handles multiple directories
+	correctly.
+
+	Don't put test files (xx.*) in the distribution
+
+	* shared/misc.h, ast/ast.c, shared/expr.c:
+	New trace facility: TRACE_STAT
+
+Thu Nov 30 20:12:33 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* shared/expr.c, shared/expr.h:
+	expr_free wrapped in a macro, got some performance win.
+	Swapping two if()s in expr_reduce_elsum wins a bit too. (!)
+
+	* shared/expr.c:
+	expr_glue_element: new function to help expr_plus_element collect
+	ELSUMs on the fly.  Great effect: point is now much simpler.
+
+	* ast/Makefile:
+	LFLAGS: -Ce gives 15% faster yylex than default -Cem, and adds but 3K
+	to the executable size.
+
+	* shared/expr.c:
+	expr_estimate_elsum: new function; a bit faster estimation for elsums.
+
+	substract_elsums: bugs fixed.
+
+Wed Nov 29 20:38:58 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* shared/expr.c, shared/ments.h:
+	substract_elsums: new effective function for elsum substraction;
+	greatly accelerated scan2.
+
+	Special-casing expr_const(0) removed; looks like it gives more
+	complication than effect.
+
+	* shared/ments.c:
+	Should unshare el->size->u.constval before modification. It should
+	always be already unshared, but...
+
+	* lit/lit.c:
+	A kludge removed: don't modify el->size->constval in place in an
+	assumptioon that it is unshared.
+
+	* shared/expr.c, shared/expr.h, shared/ments.c, ast/parse.y:
+	Avoid creating EXPR_NEG expressions; (0-e) is almost as good, and
+	we don't have to handle EXPR_NEG as a special case anymore.
+
+	expr_binop_owned, expr_unop_owned -- new functions.  Sometimes more
+	slick than expr_binop/unop.
+
+	* Makefile:
+	Give file modes to `install' explicitly, or else man pages get
+	installed with mode 755.
+
+	* startups/linkboot/primitives.h:
+	Fixed missing clobbers in lit_load_{debug,fatal}
+
+Tue Nov 28 12:27:01 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha25 released.
+
+	* lit.5, litdump.1, ttools.1, ast.1, dast.1, lit.1:
+	One more documentation attack
+
+	* scan.l: Bug in '\N' handling fixed
+
+Mon Nov 27 12:34:50 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* options.h, oserver.c: Initial revision
+
+	* litin.c, litio.h, litout.c:
+	LIT format change: terminate expressions with LIT_EXPR_END instead of
+	-1 to save space.
+
+	* Makefile:
+	Oops, used to require *installed* ttools and gcc to `make all'.
+
+	* Makefile:
+	Don't use `install --directory'; hopefully simple mkdir is enough.
+
+	A bunch of cosmetic changes, more parametrization, etc.
+
+	* Makefile, ttools.1, lit.5: Initial revision
+
+Sat Nov 25 13:10:53 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* litout.c:
+	Oops, previous change introduced a bug in large negative numbers encoding
+
+	* litout.c:
+	Big negative numbers are cheaper encoded using INT32 than via the
+	negative prefix.
+
+Thu Nov 23 14:23:52 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* Makefile: make install: oserver added
+
+Tue Nov 21 14:43:17 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* Makefile: Uniform CFLAGS_* stuff in all makefiles.
+
+	directories renamed: models->startups, dad005->absolute
+
+	* crossload.c: dad005 mentions ironed out
+
+	* crt0.S:
+	Extensive appearance changes, using recent code from linkboot/crt0.S
+
+	dad005 mentions ironed out.
+
+	* lit.c:
+	Use stringification macro for LIBDIR so as to avoid troublesome
+	double quotes in -DLIBDIR.
+
+Tue Nov 21 11:11:34 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha24 released
+
+	* Makefile: Add linkboot to the list of test dirs
+
+	models/shared now included in global TAGS
+
+	* expr.c: Prettier printing of nonames and elsums
+
+	* litload.h, Makefile, crt0.S, litload.c, primitives.h:
+	miscellanious changes to get linkboot stuff working.
+
+	* litdump.c:
+	Names are now printed as their identifiers, not like `name:2'
+
+	Fixed a number of --disassemble mode bugs
+
+Mon Nov 20 12:41:32 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* expr.c: Do not segfault in expr_print if given the null pointer
+
+Sun Nov 19 00:16:42 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* expr.h, litin.c:
+	At last! added separate EXPR_TAG_* macros to perform checks on tags
+	rather than on expression nodes.
+
+Sat Nov 18 14:47:11 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* litdump.c:
+	Why on earth we were printing file offsets in hex??  Print in decimal.
+
+Sat Nov 18 10:22:48 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha23 released.
+
+	* expr.c:
+	expect EXPR_CONST members in ELSUMs, not only EXPR_ELEMENTs: they can
+	appear as a result of expr_reduce()ing an EXPR_ELEMENT as a part of
+	another expression.
+
+	scan1(): don't scan further if scan2 has eliminated the left subtree
+	completely: this leads to a segfault.
+
+Tue Nov 14 16:15:10 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha22 released.
+
+	* misc.c, misc.h, lit.c:
+	np->special now shows what kind of special name this is.  Thus we
+	eliminate the buggy `strcmp (strstr (...), "@@size")', which
+	segfaulted on access to null pointer on newer libcs.
+
+	* Makefile: Propagate all make variables to submakes, to allow for e.g.
+	`make 'CC=gcc -V 2.5.8''
+
+	* Makefile:
+	version.c moved from `..' to `../shared' to avoid mentioning `..' in
+	VPATH, which confuses make into thinking that `ast' always exists and
+	is up to date: it is a directory found in `..'!  The problem shows up
+	only when all re-making after a link error.
+
+Sun Nov 12 21:23:17 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* expr.c:
+	New function: expr_node_move, sometimes more effective and handy than
+	expr_node_copy
+
+Sun Nov 12 11:49:51 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha21 released
+
+	* expr.c:
+	Full support for ELSUMs, encluding reduction of (SUM1 - SUM2).
+
+Sun Nov 12 09:43:09 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha20 released
+
+	* misc.h: New trace flags: EXPR2, ELSUMS.
+
+	expr_fsck prototype moved from ast.h, lit.c since expr.c now needs it.
+
+	* litout.c, litin.c: Support for EXPR_ELSUM
+
+	* expr.h: Added EXPR_ELSUM
+
+	Added reent2
+
+	Prototypes synchronized with expr.c
+
+	* expr.c: Extensive changes to support EXPR_ELSUM -- a remedy for lousy
+	expr_reduce performance on large sum expressions.
+
+	expr_print now uses e->reent2, so we can call it any time while
+	debugging.
+
+	New trace facility: EXPR2; runs expr_fsck on every entry/exit of
+	expr_reduce.  Very slow, but helps a lot.
+
+	* litdump.c: Need to define expr_fsck stub, or else expr.c won't link.
+
+	* lit.c:
+	expr_fsck is now called from expc.c as well, so its prototype migrated
+	to misc.h
+
+	* parse.y:
+	drop_pending_alignment: new function.  Use it instead of setting
+	pending_alignment to 1 directly, so that the filler expression is
+	freed properly.
+
+	* ast.h:
+	expr_fsck is now called freom expr.c, so prototype moved to misc.h
+
+	* Makefile:
+	MAYBETEST: a handle to turn off `make test' when making dist.
+
+Wed Nov  8 22:19:32 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version.c: 2.0alpha19 released
+
+	* expr.c:
+	expr_equal: EXPR_ELEMENTS *are* equal if they point to the same element.
+
+	* Makefile: changelog update on `make dist'
+
+	* crossload.c:
+	litload.h now declared 2nd arg to lit_load_in_block as int, not
+	size_t; synchronize.
+
+	* Makefile:
+	make dist: do distclean before all, so the test compile goes all the
+	way, close to how it will on user's machine.
+
+	* misc.h: New macro: SHARED_TRACE_FLAGS.
+
+	* expr.h: comments tweaked
+
+	* ast.c:
+	shared trace keys are now defined in misc.h, and do not require mods
+	to ast.c and lit.c when a new shared trace key is added
+
+Wed Nov  8 09:27:30 1995  Yury Shevchuk  (sizif@hole.botik.ru)
+
+	* version 2.0alpha18 released.

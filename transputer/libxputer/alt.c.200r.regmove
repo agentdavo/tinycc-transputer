@@ -1,0 +1,179 @@
+
+;; Function __alt (__alt, funcdef_no=18, decl_uid=1434, cgraph_uid=18)
+
+starting the processing of deferred insns
+ending the processing of deferred insns
+df_analyze called
+Starting forward pass...
+Starting backward pass...
+starting the processing of deferred insns
+ending the processing of deferred insns
+
+
+__alt
+
+Dataflow summary:
+;;  invalidated by call 	 0 [Areg] 1 [Breg] 2 [Creg] 3 [FAreg] 4 [FBreg] 5 [FCreg]
+;;  hardware regs used 	 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  regular block artificial uses 	 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  eh block artificial uses 	 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  entry block defs 	 0 [Areg] 1 [Breg] 2 [Creg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  exit block uses 	 0 [Areg] 6 [Wreg] 8 [Fake2]
+;;  regs ever live 	 0[Areg] 1[Breg] 2[Creg] 3[FAreg] 4[FBreg] 5[FCreg] 6[Wreg]
+;;  ref usage 	r0={2d,3u} r1={2d,1u} r2={2d} r3={1d} r4={1d} r5={1d} r6={1d,10u} r7={1d,3u} r8={1d,4u} r15={2d,1u} r22={1d,2u} r23={1d,1u} r24={1d,1u} r26={1d,1u} r27={1d,1u,1e} r28={1d,1u} 
+;;    total ref usage 50{20d,29u,1e} in 13{13 regular + 0 call} insns.
+;; basic block 2, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 0, next block 3, flags: (RTL)
+;;  pred:       ENTRY [100.0%]  (FALLTHRU)
+;; bb 2 artificial_defs: { }
+;; bb 2 artificial_uses: { u0(6){ }u1(7){ }u2(8){ }}
+;; lr  in  	 0 [Areg] 1 [Breg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;; lr  use 	 0 [Areg] 1 [Breg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;; lr  def 	 1 [Breg] 2 [Creg] 3 [FAreg] 4 [FBreg] 5 [FCreg] 15 22
+;; live  in  	 0 [Areg] 1 [Breg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;; live  gen 	 15 22
+;; live  kill	 1 [Breg] 2 [Creg] 3 [FAreg] 4 [FBreg] 5 [FCreg]
+(note 6 0 2 2 [bb 2] NOTE_INSN_BASIC_BLOCK)
+(insn 2 6 3 2 (set (mem/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+        (reg:SI 0 Areg [ skip ])) libxputer/alt.c:50 8 {_stl}
+     (expr_list:REG_DEAD (reg:SI 0 Areg [ skip ])
+        (nil)))
+(insn 3 2 4 2 (set (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+        (reg:SI 1 Breg [ clist ])) libxputer/alt.c:50 8 {_stl}
+     (expr_list:REG_DEAD (reg:SI 1 Breg [ clist ])
+        (nil)))
+(note 4 3 8 2 NOTE_INSN_FUNCTION_BEG)
+(insn 8 4 5 2 (parallel [
+            (set (reg:SI 22 [ res ])
+                (asm_operands/v:SI ("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	") ("=a") 0 [
+                        (mem/f/c:SI (reg/f:SI 6 Wreg) [1 tmp+0 S4 A32])
+                        (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+                        (mem/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+                    ]
+                     [
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                    ]
+                     [] libxputer/alt.c:53))
+            (clobber (reg:QI 5 FCreg))
+            (clobber (reg:QI 4 FBreg))
+            (clobber (reg:QI 3 FAreg))
+            (clobber (reg:QI 2 Creg))
+            (clobber (reg:QI 1 Breg))
+        ]) libxputer/alt.c:53 -1
+     (expr_list:REG_UNUSED (reg:QI 5 FCreg)
+        (expr_list:REG_UNUSED (reg:QI 4 FBreg)
+            (expr_list:REG_UNUSED (reg:QI 3 FAreg)
+                (expr_list:REG_UNUSED (reg:QI 2 Creg)
+                    (expr_list:REG_UNUSED (reg:QI 1 Breg)
+                        (nil)))))))
+(insn 5 8 10 2 (set (reg:SI 15 [ iftmp@@0 ])
+        (const_int -1 [0xffffffffffffffff])) libxputer/alt.c:79 1 {_ldc}
+     (nil))
+(jump_insn 10 5 11 2 (set (pc)
+        (if_then_else (eq:SI (reg:SI 22 [ res ])
+                (const_int 0 [0]))
+            (label_ref:SI 19)
+            (pc))) libxputer/alt.c:79 125 {_cj}
+     (expr_list:REG_BR_PROB (const_int 73 [0x49])
+        (nil))
+ -> 19)
+;;  succ:       3 [99.3%]  (FALLTHRU)
+;;              4 [0.7%] 
+;; lr  out 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15 22
+;; live  out 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15 22
+
+;; basic block 3, loop depth 0, count 0, freq 9927, maybe hot
+;;  prev block 2, next block 4, flags: (RTL)
+;;  pred:       2 [99.3%]  (FALLTHRU)
+;; bb 3 artificial_defs: { }
+;; bb 3 artificial_uses: { u11(6){ }u12(7){ }u13(8){ }}
+;; lr  in  	 6 [Wreg] 7 [Fake1] 8 [Fake2] 22
+;; lr  use 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 22
+;; lr  def 	 15 23 24 26 27 28
+;; live  in  	 6 [Wreg] 7 [Fake1] 8 [Fake2] 22
+;; live  gen 	 15 23 24 26 27 28
+;; live  kill	
+(note 11 10 12 3 [bb 3] NOTE_INSN_BASIC_BLOCK)
+(insn 12 11 13 3 (set (reg/f:SI 24 [ clist ])
+        (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])) libxputer/alt.c:79 7 {_ldl}
+     (nil))
+(insn 13 12 14 3 (set (reg:SI 23 [ D.1538 ])
+        (minus:SI (reg:SI 22 [ res ])
+            (reg/f:SI 24 [ clist ]))) libxputer/alt.c:79 43 {*t800.md:1333}
+     (expr_list:REG_DEAD (reg/f:SI 24 [ clist ])
+        (expr_list:REG_DEAD (reg:SI 22 [ res ])
+            (nil))))
+(insn 14 13 15 3 (set (reg:DI 27 [ D.1538 ])
+        (sign_extend:DI (reg:SI 23 [ D.1538 ]))) libxputer/alt.c:79 111 {extendsidi2}
+     (expr_list:REG_DEAD (reg:SI 23 [ D.1538 ])
+        (nil)))
+(insn 15 14 16 3 (set (reg:SI 28)
+        (const_int 2 [0x2])) libxputer/alt.c:79 1 {_ldc}
+     (nil))
+(insn 16 15 18 3 (set (reg:DI 26)
+        (lshiftrt:DI (reg:DI 27 [ D.1538 ])
+            (reg:SI 28))) libxputer/alt.c:79 76 {*t800.md:2023}
+     (expr_list:REG_DEAD (reg:SI 28)
+        (expr_list:REG_DEAD (reg:DI 27 [ D.1538 ])
+            (expr_list:REG_EQUAL (lshiftrt:DI (reg:DI 27 [ D.1538 ])
+                    (const_int 2 [0x2]))
+                (nil)))))
+(insn 18 16 19 3 (set (reg:SI 15 [ iftmp@@0 ])
+        (subreg:SI (reg:DI 26) 0)) libxputer/alt.c:79 9 {_dup}
+     (expr_list:REG_DEAD (reg:DI 26)
+        (nil)))
+;;  succ:       4 [100.0%]  (FALLTHRU)
+;; lr  out 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+;; live  out 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+
+;; basic block 4, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 3, next block 1, flags: (RTL)
+;;  pred:       2 [0.7%] 
+;;              3 [100.0%]  (FALLTHRU)
+;; bb 4 artificial_defs: { }
+;; bb 4 artificial_uses: { u22(6){ }u23(7){ }u24(8){ }}
+;; lr  in  	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+;; lr  use 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+;; lr  def 	 0 [Areg]
+;; live  in  	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+;; live  gen 	 0 [Areg]
+;; live  kill	
+(code_label 19 18 20 4 2 "" [1 uses])
+(note 20 19 25 4 [bb 4] NOTE_INSN_BASIC_BLOCK)
+(insn 25 20 28 4 (set (reg/i:SI 0 Areg)
+        (reg:SI 15 [ iftmp@@0 ])) libxputer/alt.c:80 9 {_dup}
+     (expr_list:REG_DEAD (reg:SI 15 [ iftmp@@0 ])
+        (nil)))
+(insn 28 25 0 4 (use (reg/i:SI 0 Areg)) libxputer/alt.c:80 -1
+     (nil))
+;;  succ:       EXIT [100.0%]  (FALLTHRU)
+;; lr  out 	 0 [Areg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;; live  out 	 0 [Areg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+

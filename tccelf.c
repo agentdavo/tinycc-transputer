@@ -179,7 +179,11 @@ ST_FUNC void tccelf_begin_file(TCCState *s1)
 #endif
 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int first_sym, int nb_syms);
+#else
 static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int first_sym);
+#endif
 
 /* At the end of compilation, convert any UNDEF syms to global, and merge
    with previously existing symbols */
@@ -217,7 +221,11 @@ ST_FUNC void tccelf_end_file(TCCState *s1)
             sym->st_other, sym->st_shndx, (char*)s->link->data + sym->st_name);
     }
     /* now update relocations */
+#ifdef TCC_TARGET_TRANSPUTER
+    update_relocs(s1, s, tr, first_sym, nb_syms);
+#else
     update_relocs(s1, s, tr, first_sym);
+#endif
     tcc_free(tr);
     /* record text/data/bss output for -bench info */
     for (i = 0; i < 4; ++i) {
@@ -761,6 +769,17 @@ ST_FUNC int set_elf_sym(Section *s, addr_t value, unsigned long size,
 		/* If the existing symbol came from an asm .set
 		   we can override.  */
 		goto do_patch;
+#ifdef TCC_TARGET_TRANSPUTER
+            } else if ((esym->st_other & ST_FROM_ARCHIVE)
+                       && !(other & ST_FROM_ARCHIVE)) {
+                /* Direct .o file overrides archive member — standard
+                   linker behavior: command-line objects always win. */
+                esym->st_other = other;
+                goto do_patch;
+            } else if (!(esym->st_other & ST_FROM_ARCHIVE)
+                       && (other & ST_FROM_ARCHIVE)) {
+                /* Archive member trying to override direct .o — ignore */
+#endif
             } else {
 #if 0
                 printf("new_bind=%x new_shndx=%x new_vis=%x old_bind=%x old_shndx=%x old_vis=%x\n",
@@ -843,7 +862,11 @@ ST_FUNC struct sym_attr *get_sym_attr(TCCState *s1, int index, int alloc)
     return &s1->sym_attrs[index];
 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int first_sym, int nb_syms)
+#else
 static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int first_sym)
+#endif
 {
     int i, type, sym_index;
     Section *sr;
@@ -857,6 +880,14 @@ static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int fi
                 type = ELFW(R_TYPE)(rel->r_info);
                 if ((sym_index -= first_sym) < 0)
                     continue; /* zero sym_index in reloc (can happen with asm) */
+#ifdef TCC_TARGET_TRANSPUTER
+                /* Bounds check to prevent segfault on corrupt relocations */
+                if (sym_index >= nb_syms) {
+                    tcc_warning("update_relocs: sym_index %d out of bounds (nb_syms=%d, first_sym=%d, orig=%d, type=%d)",
+                                sym_index, nb_syms, first_sym, sym_index + first_sym, type);
+                    continue;
+                }
+#endif
                 sym_index = old_to_new_syms[sym_index];
                 rel->r_info = ELFW(R_INFO)(sym_index, type);
             }
@@ -907,7 +938,11 @@ static void sort_syms(TCCState *s1, Section *s)
     memcpy(s->data, new_syms, nb_syms * sizeof(ElfW(Sym)));
     tcc_free(new_syms);
 
+#ifdef TCC_TARGET_TRANSPUTER
+    update_relocs(s1, s, old_to_new_syms, 0, nb_syms);
+#else
     update_relocs(s1, s, old_to_new_syms, 0);
+#endif
     tcc_free(old_to_new_syms);
 }
 
@@ -1055,7 +1090,11 @@ static void update_gnu_hash(TCCState *s1, Section *gnu_hash)
     tcc_free(buck);
     tcc_free(nextbuck);
 
+#ifdef TCC_TARGET_TRANSPUTER
+    update_relocs(s1, dynsym, old_to_new_syms, 0, nb_syms);
+#else
     update_relocs(s1, dynsym, old_to_new_syms, 0);
+#endif
 
     /* modify the versions */
     vs = versym_section;
@@ -2716,6 +2755,8 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr)
 #elif defined TCC_TARGET_RISCV64
     /* XXX should be configurable */
     ehdr.e_flags = EF_RISCV_FLOAT_ABI_DOUBLE;
+#elif defined TCC_TARGET_TRANSPUTER
+    ehdr.e_flags = s1->tp_isa_used;
 #endif
 
     if (file_type == TCC_OUTPUT_OBJ) {
@@ -2821,6 +2862,12 @@ static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
     FILE *f;
 
     file_type = s1->output_type;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* Special case for Transputer: use simple linker for executables */
+    if (file_type == TCC_OUTPUT_EXE) {
+        return transputer_simple_link(s1, filename);
+    }
+#endif
     if (file_type == TCC_OUTPUT_OBJ)
         mode = 0666;
     else
@@ -3016,6 +3063,12 @@ static int elf_output_file(TCCState *s1, const char *filename)
     int textrel, got_sym, dt_flags_1;
 
     file_type = s1->output_type;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* Special case for Transputer: use simple linker for executables */
+    if (file_type == TCC_OUTPUT_EXE) {
+        return transputer_simple_link(s1, filename);
+    }
+#endif
     ret = -1;
     interp = dynstr = dynamic = NULL;
     sec_order = NULL;
@@ -3286,9 +3339,32 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
 
 /* load an object file and merge it with current files */
 /* XXX: handle correctly stab (debug) info */
+#ifdef TCC_TARGET_TRANSPUTER
+static char archive_member_name[32];
+static const char *archive_member_name_ptr;
+
+/* Clear archive context — must be called before loading direct .o files
+   so they don't get incorrectly tagged as archive members. */
+ST_FUNC void tcc_clear_archive_context(void)
+{
+    archive_member_name_ptr = NULL;
+}
+#endif
+
 ST_FUNC int tcc_load_object_file(TCCState *s1,
                                 int fd, unsigned long file_offset)
 {
+#ifdef TCC_TARGET_TRANSPUTER
+    static int reloc_log = -1;
+    static const char *reloc_sym_filter;
+    static int reloc_type_filter;
+    static int reloc_load_dump;
+    static int reloc_summary;
+    static int reloc_syminfo;
+    static const char *reloc_syminfo_filter;
+    static int reloc_ldc_mismatch;
+    static const char *symmerge_debug;
+#endif
     ElfW(Ehdr) ehdr;
     ElfW(Shdr) *shdr, *sh;
     unsigned long size, offset, offseti;
@@ -3301,6 +3377,32 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
     ElfW(Sym) *sym, *symtab;
     ElfW_Rel *rel;
     Section *s;
+#ifdef TCC_TARGET_TRANSPUTER
+    const char **iprel_syms = NULL;
+    int *iprel_counts = NULL;
+    int iprel_count = 0;
+    int iprel_cap = 0;
+
+    if (reloc_log < 0) {
+        const char *env = getenv("T4_RELOC_LOG");
+        reloc_log = env && *env;
+        reloc_sym_filter = getenv("T4_RELOC_SYM");
+        reloc_type_filter = -1;
+        env = getenv("T4_RELOC_TYPE");
+        if (env && *env)
+            reloc_type_filter = (int)strtol(env, NULL, 0);
+        env = getenv("T4_RELOC_LOAD_DUMP");
+        reloc_load_dump = env && *env;
+        env = getenv("T4_RELOC_SUMMARY");
+        reloc_summary = env && *env;
+        env = getenv("T4_RELOC_SYMINFO");
+        reloc_syminfo = env && *env;
+        reloc_syminfo_filter = getenv("T4_RELOC_SYMINFO");
+        env = getenv("T4_RELOC_LDC_MISMATCH");
+        reloc_ldc_mismatch = env && *env;
+        symmerge_debug = getenv("T4_SYMMERGE_DEBUG");
+    }
+#endif
 
     lseek(fd, file_offset, SEEK_SET);
     if (tcc_object_type(fd, &ehdr) != AFF_BINTYPE_REL)
@@ -3311,6 +3413,11 @@ ST_FUNC int tcc_load_object_file(TCCState *s1,
 invalid:
         return tcc_error_noabort("invalid object file");
     }
+#ifdef TCC_TARGET_TRANSPUTER
+    /* compiled for a part this link's -m target is not? */
+    if (tp_check_object_flags(s1, ehdr.e_flags, archive_member_name_ptr) < 0)
+        return -1;
+#endif
     /* read sections */
     shdr = load_data(fd, file_offset + ehdr.e_shoff,
                      sizeof(ElfW(Shdr)) * ehdr.e_shnum);
@@ -3430,6 +3537,17 @@ invalid:
         s->sh_entsize = sh->sh_entsize;
         sm_table[i].new_section = 1;
     found:
+#ifdef TCC_TARGET_TRANSPUTER
+        /*
+         * Output-section attributes are the union of all input members.
+         * In particular, Linux objects can contain an empty alloc-only
+         * .init.text before the first executable .init.text member. Keeping
+         * only the first member's flags makes the combined section non-X and
+         * causes target-specific code-relocation passes to skip every call in
+         * it. GNU linkers retain SHF_EXECINSTR in this case; do the same.
+         */
+        s->sh_flags |= sh->sh_flags & ~SHF_GROUP;
+#endif
         size = sh->sh_size;
         /* align start of section */
         offset = section_add(s, size, sh->sh_addralign);
@@ -3517,10 +3635,32 @@ invalid:
         }
         /* add symbol */
         name = strtab + sym->st_name;
+#ifdef TCC_TARGET_TRANSPUTER
+        {
+            int other = sym->st_other;
+            /* Tag symbols from archive members so direct .o files can override */
+            if (archive_member_name_ptr)
+                other |= ST_FROM_ARCHIVE;
+            sym_index = set_elf_sym(symtab_section, sym->st_value, sym->st_size,
+                                    sym->st_info, other,
+                                    sym->st_shndx, name);
+        }
+#else
         sym_index = set_elf_sym(symtab_section, sym->st_value, sym->st_size,
                                 sym->st_info, sym->st_other,
                                 sym->st_shndx, name);
+#endif
         old_to_new_syms[i] = sym_index;
+#ifdef TCC_TARGET_TRANSPUTER
+        if (symmerge_debug && name && strstr(name, symmerge_debug)) {
+            fprintf(stderr, "SYMMERGE: file=%s sym='%s' old_idx=%d new_idx=%d "
+                    "bind=%d type=%d shndx=%d value=0x%lx\n",
+                    s1->current_filename ? s1->current_filename : "<unknown>",
+                    name, i, sym_index,
+                    ELFW(ST_BIND)(sym->st_info), ELFW(ST_TYPE)(sym->st_info),
+                    sym->st_shndx, (unsigned long)sym->st_value);
+        }
+#endif
     }
 
     /* third pass to patch relocation entries */
@@ -3540,13 +3680,154 @@ invalid:
 		 rel++) {
                 int type;
                 unsigned sym_index;
+#ifdef TCC_TARGET_TRANSPUTER
+                const char *sym_name = "<unknown>";
+                const char *sec_name = "<unknown>";
+#endif
                 /* convert symbol index */
                 type = ELFW(R_TYPE)(rel->r_info);
                 sym_index = ELFW(R_SYM)(rel->r_info);
+#ifdef TCC_TARGET_TRANSPUTER
+                if (reloc_summary && type == R_TRANSPUTER_IPREL32 &&
+                    sym_index < (unsigned)nb_syms) {
+                    const char *sum_name = "<unknown>";
+                    int found = 0, si;
+                    if (strtab && symtab[sym_index].st_name)
+                        sum_name = strtab + symtab[sym_index].st_name;
+                    for (si = 0; si < iprel_count; si++) {
+                        if (iprel_syms[si] == sum_name ||
+                            (iprel_syms[si] && sum_name &&
+                             0 == strcmp(iprel_syms[si], sum_name))) {
+                            iprel_counts[si]++;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        if (iprel_count == iprel_cap) {
+                            iprel_cap = iprel_cap ? iprel_cap * 2 : 16;
+                            iprel_syms = tcc_realloc(iprel_syms,
+                                                     iprel_cap * sizeof(*iprel_syms));
+                            iprel_counts = tcc_realloc(iprel_counts,
+                                                       iprel_cap * sizeof(*iprel_counts));
+                        }
+                        iprel_syms[iprel_count] = sum_name;
+                        iprel_counts[iprel_count] = 1;
+                        iprel_count++;
+                    }
+                }
+                if ((reloc_log || reloc_syminfo) && sym_index < (unsigned)nb_syms) {
+                    if (strtab && symtab[sym_index].st_name)
+                        sym_name = strtab + symtab[sym_index].st_name;
+                    if (sh->sh_info < (unsigned)ehdr.e_shnum)
+                        sec_name = strsec + shdr[sh->sh_info].sh_name;
+                    if ((!reloc_sym_filter || strstr(sym_name, reloc_sym_filter)) &&
+                        (reloc_type_filter < 0 || reloc_type_filter == type)) {
+                        fprintf(stderr,
+                                "RELOC_LOAD: file=%s member=%s section=%s r_offset=0x%lx type=%d sym=%s\n",
+                                s1->current_filename ? s1->current_filename : "<unknown>",
+                                archive_member_name_ptr ? archive_member_name_ptr : "<none>",
+                                sec_name, (unsigned long)rel->r_offset, type, sym_name);
+                        if (reloc_load_dump && type == R_TRANSPUTER_IPREL32) {
+                            Section *ts = sm_table[sh->sh_info].s;
+                            unsigned long off = rel->r_offset + offseti;
+                            if (ts && ts->data && off < ts->data_offset) {
+                                unsigned long start = off >= 8 ? off - 8 : 0;
+                                unsigned long end = off + 8;
+                                unsigned char *data = (unsigned char *)ts->data;
+                                unsigned long di;
+                                int opcode = -1;
+                                int scan = 0;
+                                const char *kind = "unknown";
+                                if (end >= ts->data_offset)
+                                    end = ts->data_offset - 1;
+                                fprintf(stderr, "RELOC_LOAD_BYTES:");
+                                for (di = start; di <= end; di++) {
+                                    fprintf(stderr, " %02x", data[di]);
+                                }
+                                fprintf(stderr, "\n");
+                                for (; off + scan < ts->data_offset && scan < 16; scan++) {
+                                    unsigned char b = data[off + scan];
+                                    unsigned char hi = b & 0xF0;
+                                    if (hi != 0x20 && hi != 0x60) {
+                                        opcode = hi >> 4;
+                                        break;
+                                    }
+                                }
+                                if (opcode == 0x9)
+                                    kind = "call";
+                                else if (opcode == 0x0)
+                                    kind = "j";
+                                else if (opcode == 0xA)
+                                    kind = "cj";
+                                else if (opcode == 0x4)
+                                    kind = "ldc";
+                                fprintf(stderr,
+                                        "RELOC_LOAD_DECODE: start=0x%lx opcode=0x%x kind=%s scan=%d\n",
+                                        off, opcode, kind, scan);
+                            }
+                        }
+                    }
+                    if (reloc_ldc_mismatch && type == R_TRANSPUTER_IPREL32) {
+                        Section *ts = sm_table[sh->sh_info].s;
+                        unsigned long off = rel->r_offset + offseti;
+                        int opcode = -1;
+                        int scan = 0;
+                        if (ts && ts->data && off < ts->data_offset) {
+                            unsigned char *data = (unsigned char *)ts->data;
+                            for (; off + scan < ts->data_offset && scan < 16; scan++) {
+                                unsigned char b = data[off + scan];
+                                unsigned char hi = b & 0xF0;
+                                if (hi != 0x20 && hi != 0x60) {
+                                    opcode = hi;
+                                    break;
+                                }
+                            }
+                            if (opcode == 0x40) {
+                                fprintf(stderr,
+                                        "RELOC_LDC_MISMATCH: file=%s member=%s section=%s r_offset=0x%lx sym=%s scan=%d\n",
+                                        s1->current_filename ? s1->current_filename : "<unknown>",
+                                        archive_member_name_ptr ? archive_member_name_ptr : "<none>",
+                                        sec_name, (unsigned long)rel->r_offset, sym_name, scan);
+                            }
+                        }
+                    }
+                    if (reloc_syminfo && sym_name && (!reloc_syminfo_filter ||
+                        strstr(sym_name, reloc_syminfo_filter))) {
+                        unsigned char st_info = symtab[sym_index].st_info;
+                        fprintf(stderr,
+                                "RELOC_SYMINFO: sym=%s st_info=0x%x bind=%u type=%u shndx=%u st_value=0x%lx\n",
+                                sym_name, st_info, ELFW(ST_BIND)(st_info),
+                                ELFW(ST_TYPE)(st_info),
+                                (unsigned) symtab[sym_index].st_shndx,
+                                (unsigned long) symtab[sym_index].st_value);
+                    }
+                }
+#endif
                 /* NOTE: only one symtab assumed */
                 if (sym_index >= nb_syms)
                     goto invalid_reloc;
+#ifdef TCC_TARGET_TRANSPUTER
+                {
+                    unsigned old_sym_index = sym_index;
+                    const char *merge_name = NULL;
+                    if (symmerge_debug && strtab &&
+                        sym_index < (unsigned)nb_syms &&
+                        symtab[sym_index].st_name)
+                        merge_name = strtab + symtab[sym_index].st_name;
+                    sym_index = old_to_new_syms[sym_index];
+                    if (merge_name && strstr(merge_name, symmerge_debug)) {
+                        fprintf(stderr,
+                                "SYMMERGE_RELOC: file=%s sym='%s' old_sym=%u "
+                                "new_sym=%u type=%d offset=0x%lx\n",
+                                s1->current_filename ? s1->current_filename : "<unknown>",
+                                merge_name, old_sym_index, sym_index,
+                                type, (unsigned long)rel->r_offset);
+                    }
+                }
+#else
                 sym_index = old_to_new_syms[sym_index];
+#endif
                 /* ignore link_once in rel section. */
                 if (!sym_index && !sm_table[sh->sh_info].link_once
 #ifdef TCC_TARGET_ARM
@@ -3583,6 +3864,22 @@ invalid:
         }
     }
  done:
+#ifdef TCC_TARGET_TRANSPUTER
+    if (reloc_summary && iprel_count) {
+        int si;
+        fprintf(stderr, "RELOC_SUMMARY: file=%s member=%s iprel32=%d\n",
+                s1->current_filename ? s1->current_filename : "<unknown>",
+                archive_member_name_ptr ? archive_member_name_ptr : "<none>",
+                iprel_count);
+        for (si = 0; si < iprel_count; si++) {
+            fprintf(stderr, "RELOC_SUMMARY_ITEM: sym=%s count=%d\n",
+                    iprel_syms[si] ? iprel_syms[si] : "<unknown>",
+                    iprel_counts[si]);
+        }
+    }
+    tcc_free(iprel_syms);
+    tcc_free(iprel_counts);
+#endif
     ret = !s1->nb_errors - 1; /* errors possibly from set_elf_sym() */
  the_end:
     tcc_free(symtab);
@@ -3670,6 +3967,20 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             off += len;
             if (s1->verbose == 2)
                 printf("   -> %s\n", hdr.ar_name);
+#ifdef TCC_TARGET_TRANSPUTER
+            archive_member_name_ptr = NULL;
+            if (hdr.ar_name[0]) {
+                int n = (int)sizeof(archive_member_name) - 1;
+                memcpy(archive_member_name, hdr.ar_name, n);
+                archive_member_name[n] = '\0';
+                for (n = (int)strlen(archive_member_name); n > 0; n--) {
+                    if (archive_member_name[n - 1] != ' ')
+                        break;
+                    archive_member_name[n - 1] = '\0';
+                }
+                archive_member_name_ptr = archive_member_name;
+            }
+#endif
             if (tcc_load_object_file(s1, fd, off) < 0)
                 goto the_end;
             ++bound;
@@ -3711,6 +4022,20 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
         } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
             if (s1->verbose == 2)
                 printf("   -> %s\n", hdr.ar_name);
+#ifdef TCC_TARGET_TRANSPUTER
+            archive_member_name_ptr = NULL;
+            if (hdr.ar_name[0]) {
+                int n = (int)sizeof(archive_member_name) - 1;
+                memcpy(archive_member_name, hdr.ar_name, n);
+                archive_member_name[n] = '\0';
+                for (n = (int)strlen(archive_member_name); n > 0; n--) {
+                    if (archive_member_name[n - 1] != ' ')
+                        break;
+                    archive_member_name[n - 1] = '\0';
+                }
+                archive_member_name_ptr = archive_member_name;
+            }
+#endif
             if (tcc_load_object_file(s1, fd, file_offset) < 0)
                 return -1;
         }

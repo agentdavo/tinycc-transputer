@@ -1,0 +1,330 @@
+
+;; Function __alt (__alt, funcdef_no=18, decl_uid=1434, cgraph_uid=18)
+
+starting the processing of deferred insns
+ending the processing of deferred insns
+df_analyze called
+starting the processing of deferred insns
+ending the processing of deferred insns
+df_analyze called
+Ignoring reg 24, has equiv memory
+Reg 23 uninteresting
+Reg 28 uninteresting
+Reg 26 uninteresting
+;; 1 loops found
+;;
+;; Loop 0
+;;  header 0, latch 1
+;;  depth 0, outer -1
+;;  nodes: 0 1 2 3 4
+;; 2 succs { 3 4 }
+;; 3 succs { 4 }
+;; 4 succs { 1 }
+Building IRA IR
+starting the processing of deferred insns
+ending the processing of deferred insns
+df_analyze called
+init_insns for 24: (insn_list:REG_DEP_TRUE 12 (nil))
+init_insns for 28: (insn_list:REG_DEP_TRUE 15 (nil))
+
+Pass 0 for finding pseudo/allocno costs
+
+    a2 (r28,l0) best AREG, allocno AREG
+    a3 (r27,l0) best NO_REGS, allocno NO_REGS
+    a1 (r26,l0) best NO_REGS, allocno NO_REGS
+    a5 (r24,l0) best AREG, allocno AREG
+    a4 (r23,l0) best AREG, allocno AREG
+    a6 (r22,l0) best AREG, allocno AREG
+    a0 (r15,l0) best AREG, allocno AREG
+
+  a0(r15,l0) costs: AREG:-1000,-1000 BREG:3984,3984 CREG:19920,19920 AB_REGS:5984,5984 GENERAL_REGS:29920,29920 BASE_REGS:29920,29920 STACK_REGS:3000000,3000000 ALL_REGS:3000000,3000000 MEM:11968,11968
+  a1(r26,l0) costs: AB_REGS:1001984,1001984 GENERAL_REGS:1009920,1009920 BASE_REGS:1009920,1009920 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:11904,11904
+  a2(r28,l0) costs: AREG:0,0 BREG:3968,3968 CREG:19840,19840 AB_REGS:3968,3968 GENERAL_REGS:19840,19840 BASE_REGS:19840,19840 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:7936,7936
+  a3(r27,l0) costs: AB_REGS:2000000,2000000 GENERAL_REGS:2000000,2000000 BASE_REGS:2000000,2000000 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:15872,15872
+  a4(r23,l0) costs: AREG:0,0 BREG:3968,3968 CREG:19840,19840 AB_REGS:3968,3968 GENERAL_REGS:19840,19840 BASE_REGS:19840,19840 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:7936,7936
+  a5(r24,l0) costs: AREG:0,0 BREG:3968,3968 CREG:19840,19840 AB_REGS:3968,3968 GENERAL_REGS:19840,19840 BASE_REGS:19840,19840 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:0,0
+  a6(r22,l0) costs: AREG:1984,1984 BREG:4000,4000 CREG:29920,29920 AB_REGS:5984,5984 GENERAL_REGS:29920,29920 BASE_REGS:29920,29920 STACK_REGS:3000000,3000000 ALL_REGS:3000000,3000000 MEM:11968,11968
+
+
+Pass 1 for finding pseudo/allocno costs
+
+    r28: preferred AREG, alternative AB_REGS, allocno AB_REGS
+    r27: preferred NO_REGS, alternative NO_REGS, allocno NO_REGS
+    r26: preferred NO_REGS, alternative NO_REGS, allocno NO_REGS
+    r24: preferred AREG, alternative NO_REGS, allocno AREG
+    r23: preferred AREG, alternative AB_REGS, allocno AB_REGS
+    r22: preferred AREG, alternative AB_REGS, allocno AB_REGS
+    r15: preferred AREG, alternative AB_REGS, allocno AB_REGS
+
+  a0(r15,l0) costs: AREG:2968,2968 BREG:9952,9952 CREG:33888,33888 AB_REGS:9952,9952 GENERAL_REGS:33888,33888 BASE_REGS:33888,33888 STACK_REGS:3000000,3000000 ALL_REGS:3000000,3000000 MEM:15936,15936
+  a1(r26,l0) costs: AB_REGS:1005952,1005952 GENERAL_REGS:1013888,1013888 BASE_REGS:1013888,1013888 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:31744,31744
+  a2(r28,l0) costs: AREG:15872,15872 BREG:19840,19840 CREG:35712,35712 AB_REGS:19840,19840 GENERAL_REGS:35712,35712 BASE_REGS:35712,35712 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:23808,23808
+  a3(r27,l0) costs: AB_REGS:2000000,2000000 GENERAL_REGS:2000000,2000000 BASE_REGS:2000000,2000000 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:39680,39680
+  a4(r23,l0) costs: AREG:9920,9920 BREG:13888,13888 CREG:29760,29760 AB_REGS:13888,13888 GENERAL_REGS:29760,29760 BASE_REGS:29760,29760 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:17856,17856
+  a5(r24,l0) costs: AREG:1984,1984 BREG:5952,5952 CREG:21824,21824 AB_REGS:5952,5952 GENERAL_REGS:21824,21824 BASE_REGS:21824,21824 STACK_REGS:2000000,2000000 ALL_REGS:2000000,2000000 MEM:1984,1984
+  a6(r22,l0) costs: AREG:3968,3968 BREG:5984,5984 CREG:31904,31904 AB_REGS:7968,7968 GENERAL_REGS:31904,31904 BASE_REGS:31904,31904 STACK_REGS:3000000,3000000 ALL_REGS:3000000,3000000 MEM:13952,13952
+
+   Insn 28(l0): point = 0
+   Insn 25(l0): point = 2
+   Insn 18(l0): point = 5
+   Insn 16(l0): point = 7
+   Insn 15(l0): point = 9
+   Insn 14(l0): point = 11
+   Insn 13(l0): point = 13
+   Insn 12(l0): point = 15
+   Insn 10(l0): point = 18
+   Insn 5(l0): point = 20
+   Insn 8(l0): point = 22
+   Insn 3(l0): point = 24
+   Insn 2(l0): point = 26
+ a0(r15): [18..20] [3..5]
+ a1(r26): [6..7]
+ a2(r28): [8..9]
+ a3(r27): [8..11]
+ a4(r23): [12..13]
+ a5(r24): [14..15]
+ a6(r22): [14..22]
+Compressing live ranges: from 29 to 12 - 41%
+Ranges after the compression:
+ a0(r15): [10..11] [0..1]
+ a1(r26): [2..3]
+ a2(r28): [4..5]
+ a3(r27): [4..5]
+ a4(r23): [6..7]
+ a5(r24): [8..9]
+ a6(r22): [8..11]
++++Allocating 56 bytes for conflict table (uncompressed size 56)
+;; a0(r15,l0) conflicts: a6(r22,l0)
+;;     total conflict hard regs: 0
+;;     conflict hard regs: 0
+
+;; a1(r26,l0) conflicts:
+;;     total conflict hard regs:
+;;     conflict hard regs:
+
+;; a2(r28,l0) conflicts:
+;;     total conflict hard regs:
+;;     conflict hard regs:
+
+;; a3(r27,l0) conflicts:
+;;     total conflict hard regs:
+;;     conflict hard regs:
+
+;; a4(r23,l0) conflicts:
+;;     total conflict hard regs:
+;;     conflict hard regs:
+
+;; a5(r24,l0) conflicts: a6(r22,l0)
+;;     total conflict hard regs:
+;;     conflict hard regs:
+
+;; a6(r22,l0) conflicts: a0(r15,l0) a5(r24,l0)
+;;     total conflict hard regs: 0 1
+;;     conflict hard regs: 0 1
+
+  cp0:a4(r23)<->a6(r22)@124:shuffle
+  cp1:a4(r23)<->a5(r24)@124:shuffle
+  cp2:a3(r27)<->a4(r23)@124:shuffle
+  cp3:a1(r26)<->a3(r27)@124:shuffle
+  cp4:a1(r26)<->a2(r28)@124:shuffle
+  cp5:a0(r15)<->a1(r26)@992:move
+  regions=1, blocks=5, points=12
+    allocnos=7 (big 0), copies=6, conflicts=0, ranges=8
+
+**** Allocnos coloring:
+
+
+  Loop 0 (parent -1, header bb2, depth 0)
+    bbs: 4 3 2
+    all: 0r15 1r26 2r28 3r27 4r23 5r24 6r22
+    modified regnos: 15 22 23 24 26 27 28
+    border:
+    Pressure: CREG=1 FAREG=1 FBREG=1 FCREG=1 AB_REGS=2
+    Hard reg set forest:
+      0:( 0-5)@0
+        1:( 0 1)@31744
+          2:( 1)@14968
+          3:( 0)@0
+      Spill a1(r26,l0)
+      Spill a3(r27,l0)
+      Spill a6(r22,l0)
+      Allocno a0r15 of AB_REGS(2) has 1 avail. regs  1, node:  1 (confl regs =  0 2-7)
+      Allocno a2r28 of AB_REGS(2) has 2 avail. regs  0 1, node:  0 1 (confl regs =  2-7)
+      Allocno a4r23 of AB_REGS(2) has 2 avail. regs  0 1, node:  0 1 (confl regs =  2-7)
+      Allocno a5r24 of AREG(1) has 1 avail. regs  0, node:  0 (confl regs =  1-7)
+      Pushing a4(r23,l0)(cost 0)
+      Pushing a2(r28,l0)(cost 0)
+      Pushing a5(r24,l0)(cost 0)
+      Pushing a0(r15,l0)(cost 0)
+      Popping a0(r15,l0)  -- assign reg 1
+      Popping a5(r24,l0)  -- assign reg 0
+      Popping a2(r28,l0)  -- assign reg 0
+      Popping a4(r23,l0)  -- assign reg 0
+Disposition:
+    0:r15  l0     1    6:r22  l0   mem    4:r23  l0     0    5:r24  l0     0
+    1:r26  l0   mem    3:r27  l0   mem    2:r28  l0     0
+New iteration of spill/restore move
++++Costs: overall 123104, reg 37728, mem 85376, ld 0, st 0, move 0
++++       move loops 0, new jumps 0
+
+
+__alt
+
+Dataflow summary:
+;;  invalidated by call 	 0 [Areg] 1 [Breg] 2 [Creg] 3 [FAreg] 4 [FBreg] 5 [FCreg]
+;;  hardware regs used 	 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  regular block artificial uses 	 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  eh block artificial uses 	 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  entry block defs 	 0 [Areg] 1 [Breg] 2 [Creg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;;  exit block uses 	 0 [Areg] 6 [Wreg] 8 [Fake2]
+;;  regs ever live 	 0[Areg] 1[Breg] 2[Creg] 3[FAreg] 4[FBreg] 5[FCreg] 6[Wreg]
+;;  ref usage 	r0={2d,3u} r1={2d,1u} r2={2d} r3={1d} r4={1d} r5={1d} r6={1d,10u,1e} r7={1d,3u} r8={1d,4u} r15={2d,1u} r22={1d,2u} r23={1d,1u} r24={1d,1u} r26={1d,1u} r27={1d,1u,1e} r28={1d,1u} 
+;;    total ref usage 51{20d,29u,2e} in 13{13 regular + 0 call} insns.
+(note 1 0 6 NOTE_INSN_DELETED)
+;; basic block 2, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 0, next block 3, flags: (RTL)
+;;  pred:       ENTRY [100.0%]  (FALLTHRU)
+;; bb 2 artificial_defs: { }
+;; bb 2 artificial_uses: { u0(6){ }u1(7){ }u2(8){ }}
+;; lr  in  	 0 [Areg] 1 [Breg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;; lr  use 	 0 [Areg] 1 [Breg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+;; lr  def 	 1 [Breg] 2 [Creg] 3 [FAreg] 4 [FBreg] 5 [FCreg] 15 22
+(note 6 1 2 2 [bb 2] NOTE_INSN_BASIC_BLOCK)
+(insn 2 6 3 2 (set (mem/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+        (reg:SI 0 Areg [ skip ])) libxputer/alt.c:50 8 {_stl}
+     (expr_list:REG_DEAD (reg:SI 0 Areg [ skip ])
+        (nil)))
+(insn 3 2 4 2 (set (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+        (reg:SI 1 Breg [ clist ])) libxputer/alt.c:50 8 {_stl}
+     (expr_list:REG_DEAD (reg:SI 1 Breg [ clist ])
+        (nil)))
+(note 4 3 8 2 NOTE_INSN_FUNCTION_BEG)
+(insn 8 4 5 2 (parallel [
+            (set (reg:SI 22 [ res ])
+                (asm_operands/v:SI ("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	") ("=a") 0 [
+                        (mem/f/c:SI (reg/f:SI 6 Wreg) [1 tmp+0 S4 A32])
+                        (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+                        (mem/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+                    ]
+                     [
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                    ]
+                     [] libxputer/alt.c:53))
+            (clobber (reg:QI 5 FCreg))
+            (clobber (reg:QI 4 FBreg))
+            (clobber (reg:QI 3 FAreg))
+            (clobber (reg:QI 2 Creg))
+            (clobber (reg:QI 1 Breg))
+        ]) libxputer/alt.c:53 -1
+     (expr_list:REG_UNUSED (reg:QI 5 FCreg)
+        (expr_list:REG_UNUSED (reg:QI 4 FBreg)
+            (expr_list:REG_UNUSED (reg:QI 3 FAreg)
+                (expr_list:REG_UNUSED (reg:QI 2 Creg)
+                    (expr_list:REG_UNUSED (reg:QI 1 Breg)
+                        (nil)))))))
+(insn 5 8 10 2 (set (reg:SI 15 [ iftmp@@0 ])
+        (const_int -1 [0xffffffffffffffff])) libxputer/alt.c:79 1 {_ldc}
+     (expr_list:REG_EQUAL (const_int -1 [0xffffffffffffffff])
+        (nil)))
+(jump_insn 10 5 11 2 (set (pc)
+        (if_then_else (eq:SI (reg:SI 22 [ res ])
+                (const_int 0 [0]))
+            (label_ref:SI 19)
+            (pc))) libxputer/alt.c:79 125 {_cj}
+     (expr_list:REG_BR_PROB (const_int 73 [0x49])
+        (nil))
+ -> 19)
+;;  succ:       3 [99.3%]  (FALLTHRU)
+;;              4 [0.7%] 
+;; lr  out 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15 22
+
+;; basic block 3, loop depth 0, count 0, freq 9927, maybe hot
+;;  prev block 2, next block 4, flags: (RTL)
+;;  pred:       2 [99.3%]  (FALLTHRU)
+;; bb 3 artificial_defs: { }
+;; bb 3 artificial_uses: { u11(6){ }u12(7){ }u13(8){ }}
+;; lr  in  	 6 [Wreg] 7 [Fake1] 8 [Fake2] 22
+;; lr  use 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 22
+;; lr  def 	 15 23 24 26 27 28
+(note 11 10 12 3 [bb 3] NOTE_INSN_BASIC_BLOCK)
+(insn 12 11 13 3 (set (reg/f:SI 24 [ clist ])
+        (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])) libxputer/alt.c:79 7 {_ldl}
+     (expr_list:REG_EQUIV (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+        (nil)))
+(insn 13 12 14 3 (set (reg:SI 23 [ D.1538 ])
+        (minus:SI (reg:SI 22 [ res ])
+            (reg/f:SI 24 [ clist ]))) libxputer/alt.c:79 43 {*t800.md:1333}
+     (expr_list:REG_DEAD (reg/f:SI 24 [ clist ])
+        (expr_list:REG_DEAD (reg:SI 22 [ res ])
+            (nil))))
+(insn 14 13 15 3 (set (reg:DI 27 [ D.1538 ])
+        (sign_extend:DI (reg:SI 23 [ D.1538 ]))) libxputer/alt.c:79 111 {extendsidi2}
+     (expr_list:REG_DEAD (reg:SI 23 [ D.1538 ])
+        (nil)))
+(insn 15 14 16 3 (set (reg:SI 28)
+        (const_int 2 [0x2])) libxputer/alt.c:79 1 {_ldc}
+     (expr_list:REG_EQUIV (const_int 2 [0x2])
+        (nil)))
+(insn 16 15 18 3 (set (reg:DI 26)
+        (lshiftrt:DI (reg:DI 27 [ D.1538 ])
+            (reg:SI 28))) libxputer/alt.c:79 76 {*t800.md:2023}
+     (expr_list:REG_DEAD (reg:SI 28)
+        (expr_list:REG_DEAD (reg:DI 27 [ D.1538 ])
+            (expr_list:REG_EQUAL (lshiftrt:DI (reg:DI 27 [ D.1538 ])
+                    (const_int 2 [0x2]))
+                (nil)))))
+(insn 18 16 19 3 (set (reg:SI 15 [ iftmp@@0 ])
+        (subreg:SI (reg:DI 26) 0)) libxputer/alt.c:79 9 {_dup}
+     (expr_list:REG_DEAD (reg:DI 26)
+        (nil)))
+;;  succ:       4 [100.0%]  (FALLTHRU)
+;; lr  out 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+
+;; basic block 4, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 3, next block 1, flags: (RTL)
+;;  pred:       2 [0.7%] 
+;;              3 [100.0%]  (FALLTHRU)
+;; bb 4 artificial_defs: { }
+;; bb 4 artificial_uses: { u22(6){ }u23(7){ }u24(8){ }}
+;; lr  in  	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+;; lr  use 	 6 [Wreg] 7 [Fake1] 8 [Fake2] 15
+;; lr  def 	 0 [Areg]
+(code_label 19 18 20 4 2 "" [1 uses])
+(note 20 19 25 4 [bb 4] NOTE_INSN_BASIC_BLOCK)
+(insn 25 20 28 4 (set (reg/i:SI 0 Areg)
+        (reg:SI 15 [ iftmp@@0 ])) libxputer/alt.c:80 9 {_dup}
+     (expr_list:REG_DEAD (reg:SI 15 [ iftmp@@0 ])
+        (nil)))
+(insn 28 25 0 4 (use (reg/i:SI 0 Areg)) libxputer/alt.c:80 -1
+     (nil))
+;;  succ:       EXIT [100.0%]  (FALLTHRU)
+;; lr  out 	 0 [Areg] 6 [Wreg] 7 [Fake1] 8 [Fake2]
+

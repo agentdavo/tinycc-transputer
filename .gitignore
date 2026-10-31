@@ -68,3 +68,110 @@ tests/vla_test
 tests/hello
 tests/tests2/fred.txt
 libtcc.dylib
+
+*.Identifier
+sdcard.img
+
+# --- transputer/ build artifacts (track source, ignore objects/compiler output) ---
+# object files / archives / libs
+*.o
+*.a
+*.ko
+*.so
+*.so.*
+*.lo
+*.la
+# compiled/linked binaries
+*.elf
+*.flt
+*.btl
+*.bin
+# kernel build outputs
+vmlinux
+vmlinux.o
+System.map
+Module.symvers
+modules.builtin
+modules.order
+*.mod
+*.mod.c
+*.order
+*.symvers
+*.cmd
+.tmp_*
+.tmp_versions/
+# runtime / capture artifacts
+*.uart
+*.img
+framebuffer.bmp
+transputer/**/*.bmp
+transputer/logs/
+transputer/rootfs/output/
+# built tool binaries (extensionless)
+transputer/t4/t4
+transputer/busybox-1.37.0/busybox
+transputer/busybox-1.37.0/busybox_unstripped
+transputer/busybox-1.37.0/busybox.test
+transputer/ttools/dast/dast
+transputer/initramfs/init
+transputer/initramfs/busybox
+transputer/**/build-tp/
+transputer/**/build-native/
+# secrets / keys — never commit
+*.gpg
+*.pem
+*.p12
+# large binary data / archives / packages / images
+*.wad
+*.tpz
+*.tar.gz
+*.tgz
+*.sit
+*.image
+*.cpio
+*.cpio.gz
+*.orig
+# prebuilt / compiled binaries under transputer/
+transputer/t4/bin/
+transputer/t4/examples/minix-demo/0
+transputer/t4/examples/minix-demo/fs
+transputer/t4/examples/minix-demo/init
+transputer/t4/examples/minix-demo/kernel
+transputer/t4/examples/minix-demo/mm
+transputer/t4/examples/minix-demo/monitorl
+transputer/ttools/**/store/
+transputer/ttools/ast/ast
+transputer/ttools/dast/mktabs
+transputer/ttools/lit/lit
+transputer/ttools/litdump/litdump
+transputer/ttools/oserver/oserver
+transputer/busybox-1.37.0/applets/applet_tables
+transputer/busybox-1.37.0/applets/usage
+transputer/busybox-1.37.0/applets/usage_pod
+transputer/busybox-1.37.0/applets/usage_compressed
+transputer/busybox-1.37.0/scripts/basic/docproc
+transputer/busybox-1.37.0/scripts/basic/fixdep
+transputer/busybox-1.37.0/scripts/basic/split-include
+transputer/busybox-1.37.0/scripts/kconfig/conf
+transputer/initramfs/directprobe
+transputer/initramfs/shprobe
+transputer/initramfs/uclibcprobe
+transputer/c-testsuite/dump
+/logs
+
+# session-local agent state
+.claude/
+
+# active kernel tree is its own git repository
+transputer/linux-7/
+/tpos-rootfs.ext2
+*.sd
+/boot-capture-run1
+/boot-capture
+/showcase-capture
+*.bmp
+
+# transputer host tools built by make
+/transputer-elf2flt
+/transputer-mksd
+/transputer-netload

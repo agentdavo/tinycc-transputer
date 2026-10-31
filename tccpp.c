@@ -3592,6 +3592,14 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
     if (s1->float_abi == ARM_HARD_FLOAT)
       putdef(cs, "__ARM_PCS_VFP");
 #endif
+#ifdef TCC_TARGET_TRANSPUTER
+    if (s1->tp_t425)
+      putdef(cs, "__SOFTFP__");
+    if (s1->tp_tvx) {
+      putdef(cs, "__TVX__");
+      putdef(cs, "__MXFP4__");
+    }
+#endif
     if (is_asm)
       putdef(cs, "__ASSEMBLER__");
     if (s1->output_type == TCC_OUTPUT_PREPROCESS)

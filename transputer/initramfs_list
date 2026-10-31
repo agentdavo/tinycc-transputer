@@ -1,0 +1,36 @@
+# Transputer initramfs file list
+# Used by CONFIG_INITRAMFS_SOURCE to create an embedded cpio archive.
+#
+# The /init binary is a bFLT flat binary built from initramfs/init.c
+# via transputer-tcc (ELF) → transputer-elf2flt (bFLT).
+
+# Directories first
+dir /dev 0755 0 0
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+dir /tmp 0755 0 0
+dir /root 0700 0 0
+dir /bin 0755 0 0
+dir /sbin 0755 0 0
+dir /etc 0755 0 0
+
+# Device nodes
+nod /dev/console 0600 0 0 c 5 1
+nod /dev/null 0666 0 0 c 1 3
+
+# /init is the standalone PID1 init program (opens console, mounts, execs /bin/sh)
+file /init ../../transputer/initramfs/init 0755 0 0
+
+# busybox binary and applet symlinks
+file /bin/busybox ../../transputer/initramfs/busybox.flt 0755 0 0
+slink /bin/sh /bin/busybox 0777 0 0
+slink /bin/init /bin/busybox 0777 0 0
+slink /sbin/init /bin/busybox 0777 0 0
+slink /bin/echo /bin/busybox 0777 0 0
+slink /bin/cat /bin/busybox 0777 0 0
+slink /bin/yes /bin/busybox 0777 0 0
+slink /bin/true /bin/busybox 0777 0 0
+slink /bin/false /bin/busybox 0777 0 0
+
+# Config
+file /etc/inittab ../../transputer/initramfs/inittab 0644 0 0

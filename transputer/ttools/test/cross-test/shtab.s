@@ -1,0 +1,36 @@
+.globl ___shtab;
+.data
+	.align 4;
+___shtab:
+	.word 1
+	.word 2
+	.word 4
+	.word 8
+	.word 16
+	.word 32
+	.word 64
+	.word 128
+	.word 256
+	.word 512
+	.word 1024
+	.word 2048
+	.word 4096
+	.word 8192
+	.word 16384
+	.word 32768
+	.word 65536
+	.word 131072
+	.word 262144
+	.word 524288
+	.word 1048576
+	.word 2097152
+	.word 4194304
+	.word 8388608
+	.word 16777216
+	.word 33554432
+	.word 67108864
+	.word 134217728
+	.word 268435456
+	.word 536870912
+	.word 1073741824
+	.word -2147483648

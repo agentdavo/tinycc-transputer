@@ -162,3 +162,81 @@ int __builtin_parity(unsigned int x) __attribute__((alias("__tcc_builtin_parity"
 int __builtin_parityl(unsigned long x) __attribute__((alias("__tcc_builtin_parityl")));
 int __builtin_parityll(unsigned long long x) __attribute__((alias("__tcc_builtin_parityll")));
 #endif
+
+#ifdef __transputer__
+/* Type-specific back ends for the type-generic checked arithmetic builtins.
+   The compiler selects these from the type of the result pointer. */
+#define TCC_UNSIGNED_OVERFLOW(bits, type, max) \
+int __tcc_add_overflow_u##bits(type a, type b, type *r) \
+{ type v = (type)(a + b); *r = v; return a > (type)((max) - b); } \
+int __tcc_sub_overflow_u##bits(type a, type b, type *r) \
+{ *r = (type)(a - b); return a < b; } \
+int __tcc_mul_overflow_u##bits(type a, type b, type *r) \
+{ *r = (type)(a * b); return b != 0 && a > (type)((max) / b); }
+
+#define TCC_SIGNED_SMALL_OVERFLOW(bits, type, wide, min, max) \
+int __tcc_add_overflow_s##bits(type a, type b, type *r) \
+{ wide v = (wide)a + (wide)b; *r = (type)v; return v < (wide)(min) || v > (wide)(max); } \
+int __tcc_sub_overflow_s##bits(type a, type b, type *r) \
+{ wide v = (wide)a - (wide)b; *r = (type)v; return v < (wide)(min) || v > (wide)(max); } \
+int __tcc_mul_overflow_s##bits(type a, type b, type *r) \
+{ wide v = (wide)a * (wide)b; *r = (type)v; return v < (wide)(min) || v > (wide)(max); }
+
+TCC_UNSIGNED_OVERFLOW(8, unsigned char, 0xffu)
+TCC_UNSIGNED_OVERFLOW(16, unsigned short, 0xffffu)
+TCC_UNSIGNED_OVERFLOW(32, unsigned int, 0xffffffffu)
+TCC_SIGNED_SMALL_OVERFLOW(8, signed char, int, -128, 127)
+TCC_SIGNED_SMALL_OVERFLOW(16, short, int, -32768, 32767)
+TCC_SIGNED_SMALL_OVERFLOW(32, int, long long,
+                          (-2147483647LL - 1), 2147483647LL)
+
+int __tcc_add_overflow_u64(unsigned long long a, unsigned long long b,
+                           unsigned long long *r)
+{
+    *r = a + b;
+    return *r < a;
+}
+
+int __tcc_sub_overflow_u64(unsigned long long a, unsigned long long b,
+                           unsigned long long *r)
+{
+    *r = a - b;
+    return a < b;
+}
+
+int __tcc_mul_overflow_u64(unsigned long long a, unsigned long long b,
+                           unsigned long long *r)
+{
+    *r = a * b;
+    return b != 0 && a > 0xffffffffffffffffULL / b;
+}
+
+int __tcc_add_overflow_s64(long long a, long long b, long long *r)
+{
+    unsigned long long ua = a, ub = b, ur = ua + ub;
+    *r = (long long)ur;
+    return (int)((~(ua ^ ub) & (ua ^ ur)) >> 63);
+}
+
+int __tcc_sub_overflow_s64(long long a, long long b, long long *r)
+{
+    unsigned long long ua = a, ub = b, ur = ua - ub;
+    *r = (long long)ur;
+    return (int)(((ua ^ ub) & (ua ^ ur)) >> 63);
+}
+
+int __tcc_mul_overflow_s64(long long a, long long b, long long *r)
+{
+    unsigned long long ua = a, ub = b;
+    unsigned long long ma = a < 0 ? 0 - ua : ua;
+    unsigned long long mb = b < 0 ? 0 - ub : ub;
+    int negative = (a < 0) != (b < 0);
+    unsigned long long limit = negative ? 0x8000000000000000ULL
+                                        : 0x7fffffffffffffffULL;
+    unsigned long long product = ma * mb;
+    int overflow = mb != 0 && ma > limit / mb;
+    *r = (long long)(negative ? 0 - product : product);
+    return overflow;
+}
+
+#endif

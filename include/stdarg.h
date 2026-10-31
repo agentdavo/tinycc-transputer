@@ -9,6 +9,9 @@ typedef __builtin_va_list va_list;
 
 /* fix a buggy dependency on GCC in libio.h */
 typedef va_list __gnuc_va_list;
+#ifdef __transputer__
+#define __GNUC_VA_LIST 1
+#endif
 #define _VA_LIST_DEFINED
 
 #endif /* _STDARG_H */

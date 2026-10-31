@@ -1,0 +1,481 @@
+
+;; Function __alt (__alt, funcdef_no=18, decl_uid=1434, cgraph_uid=18)
+
+__alt (int skip, channel_t * * clist)
+{
+  channel_t * * tmp;
+  channel_t * * res;
+  long int clist__2@@3;
+  channel_t * * clist@@2;
+  long int res@@1;
+  int iftmp@@0;
+  long int _7;
+
+;;   basic block 2, loop depth 0
+;;    pred:       ENTRY
+  __asm__ __volatile__("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	" : "=a" res_3 : "m" tmp, "m" clist, "m" skip : "Wreg[0]", "FCreg", "FBreg", "FAreg", "Creg", "Breg", "FCreg", "FBreg", "FAreg", "Creg", "Breg", "FBreg", "FAreg", "Creg", "Breg", "FAreg", "Creg", "Breg", "Creg", "Breg", "Breg");
+  if (res_3 != 0B)
+    goto <bb 3>;
+  else
+    goto <bb 4>;
+;;    succ:       3
+;;                4
+
+;;   basic block 3, loop depth 0
+;;    pred:       2
+  res@@1_4 = (long int) res_3;
+  clist@@2_5 = clist;
+  clist__2@@3_6 = (long int) clist@@2_5;
+  _7 = res@@1_4 - clist__2@@3_6;
+  iftmp@@0_8 = _7 /[ex] 4;
+;;    succ:       4
+
+;;   basic block 4, loop depth 0
+;;    pred:       3
+;;                2
+  # iftmp@@0_1 = PHI <iftmp@@0_8(3), -1(2)>
+  tmp ={v} {CLOBBER};
+  return iftmp@@0_1;
+;;    succ:       EXIT
+
+}
+
+
+
+Partition map 
+
+Partition 1 (iftmp@@0_1 - 1 )
+Partition 3 (res_3 - 3 )
+Partition 4 (res@@1_4 - 4 )
+Partition 5 (clist@@2_5 - 5 )
+Partition 6 (clist__2@@3_6 - 6 )
+Partition 7 (_7 - 7 )
+Partition 8 (iftmp@@0_8 - 8 )
+
+
+Partition map 
+
+Partition 0 (iftmp@@0_1 - 1 )
+Partition 1 (iftmp@@0_8 - 8 )
+
+
+Live on entry to BB2 : 
+
+Live on entry to BB3 : 
+
+Live on entry to BB4 : 
+
+Conflict graph:
+
+After sorting:
+Sorted Coalesce list:
+(9927) iftmp@@0_1 <-> iftmp@@0_8
+
+Partition map 
+
+Partition 0 (iftmp@@0_1 - 1 )
+Partition 1 (iftmp@@0_8 - 8 )
+
+Coalesce list: (1)iftmp@@0_1 & (8)iftmp@@0_8 [map: 0, 1] : Success -> 0
+After Coalescing:
+
+Partition map 
+
+Partition 0 (iftmp@@0_1 - 1 8 )
+Partition 1 (res_3 - 3 )
+Partition 2 (res@@1_4 - 4 )
+Partition 3 (clist@@2_5 - 5 )
+Partition 4 (clist__2@@3_6 - 6 )
+Partition 5 (_7 - 7 )
+
+
+Replacing Expressions
+res@@1_4 replace with --> res@@1_4 = (long int) res_3;
+
+clist@@2_5 replace with --> clist@@2_5 = clist;
+
+clist__2@@3_6 replace with --> clist__2@@3_6 = (long int) clist@@2_5;
+
+_7 replace with --> _7 = res@@1_4 - clist__2@@3_6;
+
+
+__alt (int skip, channel_t * * clist)
+{
+  channel_t * * tmp;
+  channel_t * * res;
+  long int clist__2@@3;
+  channel_t * * clist@@2;
+  long int res@@1;
+  int iftmp@@0;
+  long int _7;
+
+;;   basic block 2, loop depth 0
+;;    pred:       ENTRY
+  __asm__ __volatile__("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	" : "=a" res_3 : "m" tmp, "m" clist, "m" skip : "Wreg[0]", "FCreg", "FBreg", "FAreg", "Creg", "Breg", "FCreg", "FBreg", "FAreg", "Creg", "Breg", "FBreg", "FAreg", "Creg", "Breg", "FAreg", "Creg", "Breg", "Creg", "Breg", "Breg");
+  if (res_3 != 0B)
+    goto <bb 3>;
+  else
+    goto <bb 4>;
+;;    succ:       3
+;;                4
+
+;;   basic block 3, loop depth 0
+;;    pred:       2
+  res@@1_4 = (long int) res_3;
+  clist@@2_5 = clist;
+  clist__2@@3_6 = (long int) clist@@2_5;
+  _7 = res@@1_4 - clist__2@@3_6;
+  iftmp@@0_8 = _7 /[ex] 4;
+;;    succ:       4
+
+;;   basic block 4, loop depth 0
+;;    pred:       3
+;;                2
+  # iftmp@@0_1 = PHI <iftmp@@0_8(3), -1(2)>
+  tmp ={v} {CLOBBER};
+  return iftmp@@0_1;
+;;    succ:       EXIT
+
+}
+
+
+Partition 0: size 4 align 4
+	tmp
+Inserting a value copy on edge BB2->BB4 : PART.0 = -1
+
+;; Generating RTL for gimple basic block 2
+
+;; __asm__ __volatile__("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	" : "=a" res_3 : "m" tmp, "m" clist, "m" skip, "m" clist, "m" skip, "m" skip : "Wreg[0]", "FCreg", "FBreg", "FAreg", "Creg", "Breg", "FCreg", "FBreg", "FAreg", "Creg", "Breg", "FBreg", "FAreg", "Creg", "Breg", "FAreg", "Creg", "Breg", "Creg", "Breg", "Breg");
+
+(insn 8 7 9 (parallel [
+            (set (reg:SI 22 [ res ])
+                (asm_operands/v:SI ("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	") ("=a") 0 [
+                        (mem/f/c:SI (reg/f:SI 10 virtual-stack-vars) [1 tmp+0 S4 A32])
+                        (mem/f/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+                        (mem/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+                    ]
+                     [
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                    ]
+                     [] libxputer/alt.c:53))
+            (clobber (reg:QI 5 FCreg))
+            (clobber (reg:QI 4 FBreg))
+            (clobber (reg:QI 3 FAreg))
+            (clobber (reg:QI 2 Creg))
+            (clobber (reg:QI 1 Breg))
+        ]) libxputer/alt.c:53 -1
+     (nil))
+
+(insn 9 8 0 (set (reg/v/f:SI 16 [ res ])
+        (reg:SI 22 [ res ])) libxputer/alt.c:53 -1
+     (nil))
+
+;; if (res_3 != 0B)
+
+(jump_insn 10 9 0 (set (pc)
+        (if_then_else (eq:SI (reg/v/f:SI 16 [ res ])
+                (const_int 0 [0]))
+            (label_ref 0)
+            (pc))) libxputer/alt.c:79 -1
+     (expr_list:REG_BR_PROB (const_int 73 [0x49])
+        (nil))
+ -> 0)
+
+;; Generating RTL for gimple basic block 3
+
+;; iftmp@@0_8 = _7 /[ex] 4;
+
+(insn 12 11 13 (set (reg:SI 24)
+        (mem/f/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])) libxputer/alt.c:79 -1
+     (nil))
+
+(insn 13 12 14 (set (reg:SI 23 [ D.1538 ])
+        (minus:SI (reg/v/f:SI 16 [ res ])
+            (reg:SI 24))) libxputer/alt.c:79 -1
+     (nil))
+
+(insn 14 13 15 (set (reg:DI 27)
+        (sign_extend:DI (reg:SI 23 [ D.1538 ]))) libxputer/alt.c:79 -1
+     (nil))
+
+(insn 15 14 16 (set (reg:SI 28)
+        (const_int 2 [0x2])) libxputer/alt.c:79 -1
+     (nil))
+
+(insn 16 15 17 (set (reg:DI 26)
+        (lshiftrt:DI (reg:DI 27)
+            (reg:SI 28))) libxputer/alt.c:79 -1
+     (nil))
+
+(insn 17 16 18 (set (reg:SI 25)
+        (subreg:SI (reg:DI 26) 0)) libxputer/alt.c:79 -1
+     (expr_list:REG_EQUAL (div:SI (reg:SI 23 [ D.1538 ])
+            (const_int 4 [0x4]))
+        (nil)))
+
+(insn 18 17 0 (set (reg:SI 15 [ iftmp@@0 ])
+        (reg:SI 25)) libxputer/alt.c:79 -1
+     (nil))
+
+;; Generating RTL for gimple basic block 4
+
+;; 
+
+(code_label 19 18 20 2 "" [0 uses])
+
+(note 20 19 0 NOTE_INSN_BASIC_BLOCK)
+
+;; tmp ={v} {CLOBBER};
+
+(nil)
+
+;; return iftmp@@0_1;
+
+(insn 21 20 22 (set (reg:SI 21 [ <retval> ])
+        (reg:SI 15 [ iftmp@@0 ])) libxputer/alt.c:79 -1
+     (nil))
+
+(jump_insn 22 21 23 (set (pc)
+        (label_ref 0)) libxputer/alt.c:79 -1
+     (nil))
+
+(barrier 23 22 0)
+Edge 2->4 redirected to 7
+deleting block 6
+
+
+try_optimize_cfg iteration 1
+
+Merging block 3 into block 2...
+Merged blocks 2 and 3.
+Merged 2 and 3 without moving.
+Merging block 7 into block 6...
+Merged blocks 6 and 7.
+Merged 6 and 7 without moving.
+
+
+try_optimize_cfg iteration 2
+
+
+
+;;
+;; Full RTL generated for this function:
+;;
+(note 1 0 6 NOTE_INSN_DELETED)
+;; basic block 2, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 0, next block 4, flags: (NEW, REACHABLE, RTL, MODIFIED)
+;;  pred:       ENTRY [100.0%]  (FALLTHRU)
+(note 6 1 2 2 [bb 2] NOTE_INSN_BASIC_BLOCK)
+(insn 2 6 3 2 (set (mem/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+        (reg:SI 0 Areg [ skip ])) libxputer/alt.c:50 -1
+     (nil))
+(insn 3 2 4 2 (set (mem/f/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+        (reg:SI 1 Breg [ clist ])) libxputer/alt.c:50 -1
+     (nil))
+(note 4 3 8 2 NOTE_INSN_FUNCTION_BEG)
+(insn 8 4 9 2 (parallel [
+            (set (reg:SI 22 [ res ])
+                (asm_operands/v:SI ("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	") ("=a") 0 [
+                        (mem/f/c:SI (reg/f:SI 10 virtual-stack-vars) [1 tmp+0 S4 A32])
+                        (mem/f/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+                        (mem/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+                    ]
+                     [
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                    ]
+                     [] libxputer/alt.c:53))
+            (clobber (reg:QI 5 FCreg))
+            (clobber (reg:QI 4 FBreg))
+            (clobber (reg:QI 3 FAreg))
+            (clobber (reg:QI 2 Creg))
+            (clobber (reg:QI 1 Breg))
+        ]) libxputer/alt.c:53 -1
+     (nil))
+(insn 9 8 10 2 (set (reg/v/f:SI 16 [ res ])
+        (reg:SI 22 [ res ])) libxputer/alt.c:53 -1
+     (nil))
+(jump_insn 10 9 11 2 (set (pc)
+        (if_then_else (eq:SI (reg/v/f:SI 16 [ res ])
+                (const_int 0 [0]))
+            (label_ref:SI 33)
+            (pc))) libxputer/alt.c:79 125 {_cj}
+     (expr_list:REG_BR_PROB (const_int 73 [0x49])
+        (nil))
+ -> 33)
+;;  succ:       4 [99.3%]  (FALLTHRU)
+;;              5 [0.7%] 
+
+;; basic block 4, loop depth 0, count 0, freq 9927, maybe hot
+;;  prev block 2, next block 5, flags: (NEW, REACHABLE, RTL)
+;;  pred:       2 [99.3%]  (FALLTHRU)
+(note 11 10 12 4 [bb 4] NOTE_INSN_BASIC_BLOCK)
+(insn 12 11 13 4 (set (reg:SI 24)
+        (mem/f/c:SI (plus:SI (reg/f:SI 10 virtual-stack-vars)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])) libxputer/alt.c:79 -1
+     (nil))
+(insn 13 12 14 4 (set (reg:SI 23 [ D.1538 ])
+        (minus:SI (reg/v/f:SI 16 [ res ])
+            (reg:SI 24))) libxputer/alt.c:79 -1
+     (nil))
+(insn 14 13 15 4 (set (reg:DI 27)
+        (sign_extend:DI (reg:SI 23 [ D.1538 ]))) libxputer/alt.c:79 -1
+     (nil))
+(insn 15 14 16 4 (set (reg:SI 28)
+        (const_int 2 [0x2])) libxputer/alt.c:79 -1
+     (nil))
+(insn 16 15 17 4 (set (reg:DI 26)
+        (lshiftrt:DI (reg:DI 27)
+            (reg:SI 28))) libxputer/alt.c:79 -1
+     (nil))
+(insn 17 16 18 4 (set (reg:SI 25)
+        (subreg:SI (reg:DI 26) 0)) libxputer/alt.c:79 -1
+     (expr_list:REG_EQUAL (div:SI (reg:SI 23 [ D.1538 ])
+            (const_int 4 [0x4]))
+        (nil)))
+(insn 18 17 30 4 (set (reg:SI 15 [ iftmp@@0 ])
+        (reg:SI 25)) libxputer/alt.c:79 -1
+     (nil))
+(jump_insn 30 18 31 4 (set (pc)
+        (label_ref 19)) -1
+     (nil)
+ -> 19)
+;;  succ:       6 [100.0%] 
+
+(barrier 31 30 33)
+;; basic block 5, loop depth 0, count 0, freq 73, maybe hot
+;;  prev block 4, next block 6, flags: (NEW, REACHABLE, RTL, MODIFIED)
+;;  pred:       2 [0.7%] 
+(code_label 33 31 32 5 3 "" [1 uses])
+(note 32 33 5 5 [bb 5] NOTE_INSN_BASIC_BLOCK)
+(insn 5 32 19 5 (set (reg:SI 15 [ iftmp@@0 ])
+        (const_int -1 [0xffffffffffffffff])) libxputer/alt.c:79 -1
+     (nil))
+;;  succ:       6 [100.0%]  (FALLTHRU)
+
+;; basic block 6, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 5, next block 1, flags: (NEW, REACHABLE, RTL, MODIFIED)
+;;  pred:       5 [100.0%]  (FALLTHRU)
+;;              4 [100.0%] 
+(code_label 19 5 20 6 2 "" [1 uses])
+(note 20 19 21 6 [bb 6] NOTE_INSN_BASIC_BLOCK)
+(insn 21 20 25 6 (set (reg:SI 21 [ <retval> ])
+        (reg:SI 15 [ iftmp@@0 ])) libxputer/alt.c:79 -1
+     (nil))
+(insn 25 21 28 6 (set (reg/i:SI 0 Areg)
+        (reg:SI 21 [ <retval> ])) libxputer/alt.c:80 -1
+     (nil))
+(insn 28 25 0 6 (use (reg/i:SI 0 Areg)) libxputer/alt.c:80 -1
+     (nil))
+;;  succ:       EXIT [100.0%]  (FALLTHRU)
+

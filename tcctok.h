@@ -31,6 +31,9 @@
      DEF(TOK_SIGNED2, "__signed") /* gcc keyword */
      DEF(TOK_SIGNED3, "__signed__") /* gcc keyword */
      DEF(TOK_AUTO, "auto")
+#ifdef TCC_TARGET_TRANSPUTER
+     DEF(TOK_AUTO_TYPE, "__auto_type") /* GNU inferred type */
+#endif
      DEF(TOK_INLINE1, "inline")
      DEF(TOK_INLINE2, "__inline") /* gcc keyword */
      DEF(TOK_INLINE3, "__inline__") /* gcc keyword */
@@ -111,6 +114,10 @@
      DEF(TOK_ALIGNED2, "__aligned__")
      DEF(TOK_PACKED1, "packed")
      DEF(TOK_PACKED2, "__packed__")
+#ifdef TCC_TARGET_TRANSPUTER
+     DEF(TOK_TRANSPARENT_UNION1, "transparent_union")
+     DEF(TOK_TRANSPARENT_UNION2, "__transparent_union__")
+#endif
      DEF(TOK_WEAK1, "weak")
      DEF(TOK_WEAK2, "__weak__")
      DEF(TOK_ALIAS1, "alias")
@@ -145,7 +152,12 @@
      DEF(TOK_DESTRUCTOR2, "__destructor__")
      DEF(TOK_ALWAYS_INLINE1, "always_inline")
      DEF(TOK_ALWAYS_INLINE2, "__always_inline__")
+#ifdef TCC_TARGET_TRANSPUTER
+     DEF(TOK_NOINLINE1, "noinline")
+     DEF(TOK_NOINLINE2, "__noinline__")
+#else
      DEF(TOK_NOINLINE, "__noinline__")
+#endif
      DEF(TOK_PURE1, "pure")
      DEF(TOK_PURE2, "__pure__")
 
@@ -168,10 +180,28 @@
      DEF(TOK_builtin_types_compatible_p, "__builtin_types_compatible_p")
      DEF(TOK_builtin_choose_expr, "__builtin_choose_expr")
      DEF(TOK_builtin_constant_p, "__builtin_constant_p")
+#ifdef TCC_TARGET_TRANSPUTER
+     DEF(TOK_builtin_object_size, "__builtin_object_size")
+#endif
      DEF(TOK_builtin_frame_address, "__builtin_frame_address")
      DEF(TOK_builtin_return_address, "__builtin_return_address")
      DEF(TOK_builtin_expect, "__builtin_expect")
+#ifdef TCC_TARGET_TRANSPUTER
+     DEF(TOK_builtin_clz, "__builtin_clz")
+     DEF(TOK_builtin_clzl, "__builtin_clzl")
+     DEF(TOK_builtin_clzll, "__builtin_clzll")
+     DEF(TOK_builtin_strlen, "__builtin_strlen")
+     DEF(TOK_builtin_strcmp, "__builtin_strcmp")
+     DEF(TOK_builtin_strncmp, "__builtin_strncmp")
+     DEF(TOK_builtin_add_overflow, "__builtin_add_overflow")
+     DEF(TOK_builtin_sub_overflow, "__builtin_sub_overflow")
+     DEF(TOK_builtin_mul_overflow, "__builtin_mul_overflow")
+#endif
      DEF(TOK_builtin_unreachable, "__builtin_unreachable")
+#if defined TCC_TARGET_TRANSPUTER
+     DEF(TOK_builtin_popcount, "__builtin_popcount")
+     DEF(TOK_builtin_popcountl, "__builtin_popcountl")
+#endif
      /*DEF(TOK_builtin_va_list, "__builtin_va_list")*/
 #if defined TCC_TARGET_PE && defined TCC_TARGET_X86_64
      DEF(TOK_builtin_va_start, "__builtin_va_start")
@@ -340,6 +370,209 @@
      DEF(TOK___getf2, "__getf2")
 #endif
 
+#ifdef TCC_TARGET_TRANSPUTER
+/* Transputer intrinsics - hardware operations */
+     /* Channel I/O (DMA) */
+     DEF(TOK___out, "__out")
+     DEF(TOK___in, "__in")
+     DEF(TOK___outbyte, "__outbyte")
+     DEF(TOK___outword, "__outword")
+     DEF(TOK___tin, "__tin")
+     DEF(TOK___resetch, "__resetch")
+     /* Memory operations */
+     DEF(TOK___move, "__move")
+     DEF(TOK___move2dinit, "__move2dinit")
+     DEF(TOK___move2dall, "__move2dall")
+     DEF(TOK___move2dnonzero, "__move2dnonzero")
+     DEF(TOK___move2dzero, "__move2dzero")
+     /* T805 CRC instructions */
+     DEF(TOK___crcbyte, "__crcbyte")
+     DEF(TOK___crcword, "__crcword")
+     /* Timer operations */
+     DEF(TOK___ldtimer, "__ldtimer")
+     DEF(TOK___sttimer, "__sttimer")
+     /* Process/scheduler operations */
+     DEF(TOK___mint, "__mint")
+     DEF(TOK___ldpri, "__ldpri")
+     DEF(TOK___startp, "__startp")
+     DEF(TOK___endp, "__endp")
+     DEF(TOK___runp, "__runp")
+     DEF(TOK___stopp, "__stopp")
+     /* ALT operations */
+     DEF(TOK___alt, "__alt")
+     DEF(TOK___altwt, "__altwt")
+     DEF(TOK___altend, "__altend")
+     DEF(TOK___talt, "__talt")
+     DEF(TOK___taltwt, "__taltwt")
+     DEF(TOK___enbc, "__enbc")
+     DEF(TOK___enbs, "__enbs")
+     DEF(TOK___enbt, "__enbt")
+     DEF(TOK___disc, "__disc")
+     DEF(TOK___diss, "__diss")
+     DEF(TOK___dist, "__dist")
+     /* Scheduler queue registers (saveh/savel/sthf/sthb/stlf/stlb) */
+     DEF(TOK___saveh, "__saveh")
+     DEF(TOK___savel, "__savel")
+     DEF(TOK___sthf, "__sthf")
+     DEF(TOK___sthb, "__sthb")
+     DEF(TOK___stlf, "__stlf")
+     DEF(TOK___stlb, "__stlb")
+     /* Workspace operations */
+     DEF(TOK___gajw, "__gajw")
+     DEF(TOK___wcnt, "__wcnt")
+     /* Error handling */
+     DEF(TOK___seterr, "__seterr")
+     DEF(TOK___testerr, "__testerr")
+     DEF(TOK___sethalterr, "__sethalterr")
+     DEF(TOK___clrhalterr, "__clrhalterr")
+     DEF(TOK___testhalterr, "__testhalterr")
+     DEF(TOK___stoperr, "__stoperr")
+     DEF(TOK___testpranal, "__testpranal")
+     /* Bit manipulation */
+     DEF(TOK___norm, "__norm")
+     DEF(TOK___bitcnt, "__bitcnt")
+     DEF(TOK___bitrevword, "__bitrevword")
+     DEF(TOK___bitrevnbits, "__bitrevnbits")
+     /* Bounds checking */
+     DEF(TOK___csub0, "__csub0")
+     /* Fractional multiply */
+     DEF(TOK___fmul, "__fmul")
+     /* Device identification */
+     DEF(TOK___lddevid, "__lddevid")
+     /* FPU square root / absolute value.  Spelled as explicit builtins
+        rather than hooking sqrtf()/fabsf(): sqrt() owes errno and a domain
+        error on negative input, which the bare instruction does not do. */
+     DEF(TOK___fpsqrt, "__fpsqrt")
+     DEF(TOK___fpabs, "__fpabs")
+     /* FPU error flag, rounding to an integer, remainder (T800 and later:
+        the T425 and T414 have no FPU) */
+     DEF(TOK___fpchkerr, "__fpchkerr")
+     DEF(TOK___fptesterr, "__fptesterr")
+     DEF(TOK___fpseterr, "__fpseterr")
+     DEF(TOK___fpclrerr, "__fpclrerr")
+     DEF(TOK___fpint, "__fpint")
+     DEF(TOK___fpintrp, "__fpintrp")
+     DEF(TOK___fpintrm, "__fpintrm")
+     DEF(TOK___fpintrz, "__fpintrz")
+     DEF(TOK___fprem, "__fprem")
+     /* TVX: the __bf16 storage type (x86-64 psABI / ARM ACLE spelling) */
+     DEF(TOK___bf16, "__bf16")
+     /* IEEE-754 binary16, spelled as the ARM ACLE storage-only type.
+        Deliberately NOT spelled _Float16: that name is C23 Annex H and
+        requires in-type arithmetic, which VT_BTYPE has no room to express
+        separately from __fp16.  See the comment in gen_op(). */
+     DEF(TOK___fp16, "__fp16")
+     /* C23 Annex H / TS 18661-3 binary16.  Same format as __fp16 but a real
+        arithmetic type: an operation on it yields _Float16, not float. */
+     DEF(TOK__Float16, "_Float16")
+     /* TVX: bfloat16 */
+     DEF(TOK___bf16tof32, "__bf16tof32")
+     DEF(TOK___f32tobf16, "__f32tobf16")
+     DEF(TOK___bf16pack, "__bf16pack")
+     DEF(TOK___bf16unpkh, "__bf16unpkh")
+     /* TVX: MXFP4 (OCP microscaling E2M1 + E8M0) */
+     DEF(TOK___mxfp4tof32, "__mxfp4tof32")
+     DEF(TOK___f32tomxfp4, "__f32tomxfp4")
+     DEF(TOK___mxe8m0tof32, "__mxe8m0tof32")
+     DEF(TOK___mxe8m0of, "__mxe8m0of")
+     /* TVX: block dot products */
+     DEF(TOK___mxfp4dot, "__mxfp4dot")
+     DEF(TOK___bf16dot, "__bf16dot")
+     DEF(TOK___mxfp4gemv, "__mxfp4gemv")
+     /* TVX: sub-word SIMD */
+     DEF(TOK___mxfp4unpk8, "__mxfp4unpk8")
+     DEF(TOK___f32tomxfp4x8, "__f32tomxfp4x8")
+     DEF(TOK___bf16mul2, "__bf16mul2")
+     DEF(TOK___bf16add2, "__bf16add2")
+     /* TVX: vector kernels for inference */
+     DEF(TOK___vsetlen, "__vsetlen")
+     DEF(TOK___mxfp4gemvbf, "__mxfp4gemvbf")
+     DEF(TOK___vadd, "__vadd")
+     DEF(TOK___vmul, "__vmul")
+     DEF(TOK___vsilu, "__vsilu")
+     DEF(TOK___vrmsnorm, "__vrmsnorm")
+     DEF(TOK___vsoftmax, "__vsoftmax")
+     /* TVX: IEEE binary16 and GGUF Q8_0 */
+     DEF(TOK___f16tof32, "__f16tof32")
+     DEF(TOK___f32tof16, "__f32tof16")
+     DEF(TOK___q8dot, "__q8dot")
+     DEF(TOK___q8dotbf, "__q8dotbf")
+     /* TVX: GGUF i-quants */
+     DEF(TOK___iq1mdot, "__iq1mdot")
+     DEF(TOK___iq2xxsdot, "__iq2xxsdot")
+     DEF(TOK___iq3xxsdot, "__iq3xxsdot")
+     DEF(TOK___qsetfmt, "__qsetfmt")
+     DEF(TOK___qdot, "__qdot")
+     /* TVX: block rotation (BRQ) */
+     DEF(TOK___vhad32, "__vhad32")
+     DEF(TOK___mxqrot, "__mxqrot")
+     DEF(TOK___mxqrotbf, "__mxqrotbf")
+     /* FTP: transform & project (T&L geometry) */
+     DEF(TOK___ftsetvp, "__ftsetvp")
+     DEF(TOK___ftransp, "__ftransp")
+     DEF(TOK___ftranspb, "__ftranspb")
+     DEF(TOK___fsincos, "__fsincos")
+     DEF(TOK___frsqrtb, "__frsqrtb")
+     DEF(TOK___frecipb, "__frecipb")
+     DEF(TOK___fsincosb, "__fsincosb")
+     DEF(TOK___vsetstride, "__vsetstride")
+     DEF(TOK___ftcull, "__ftcull")
+     DEF(TOK___tskin, "__tskin")
+     DEF(TOK___vsetfmt, "__vsetfmt")
+     DEF(TOK___ftsetlit, "__ftsetlit")
+     DEF(TOK___flitb, "__flitb")
+     DEF(TOK___qgemm, "__qgemm")
+     DEF(TOK___vblend8, "__vblend8")
+     DEF(TOK___vfill, "__vfill")
+     DEF(TOK___vfill2d, "__vfill2d")
+     DEF(TOK___csumb, "__csumb")
+     DEF(TOK___vblend2d, "__vblend2d")
+     DEF(TOK___stvxstate, "__stvxstate")
+     DEF(TOK___csumcpy, "__csumcpy")
+     DEF(TOK___vq8k, "__vq8k")
+     DEF(TOK___vq80, "__vq80")
+     DEF(TOK___vcvt, "__vcvt")
+     DEF(TOK___vxfer, "__vxfer")
+     /* T9000 configuration space and virtual channel processor */
+     DEF(TOK___ldconf, "__ldconf")
+     DEF(TOK___stconf, "__stconf")
+     DEF(TOK___initvlcb, "__initvlcb")
+     DEF(TOK___sethdr, "__sethdr")
+     DEF(TOK___writehdr, "__writehdr")
+     DEF(TOK___readhdr, "__readhdr")
+     DEF(TOK___setchmode, "__setchmode")
+     DEF(TOK___stopch, "__stopch")
+     DEF(TOK___swapbfr, "__swapbfr")
+     DEF(TOK___vin, "__vin")
+     DEF(TOK___vout, "__vout")
+     DEF(TOK___ldchstatus, "__ldchstatus")
+     DEF(TOK___chantype, "__chantype")
+     /* T9000 semaphores (ISM 8.6) and resource channels (ISM 8.8, 12.7);
+        not __wait/__signal, which kernel and libc code use as names */
+     DEF(TOK___semwait, "__semwait")
+     DEF(TOK___semsignal, "__semsignal")
+     DEF(TOK___mkrc, "__mkrc")
+     DEF(TOK___unmkrc, "__unmkrc")
+     DEF(TOK___grant, "__grant")
+     DEF(TOK___enbg, "__enbg")
+     DEF(TOK___disg, "__disg")
+     DEF(TOK___irdsq, "__irdsq")
+     DEF(TOK___erdsq, "__erdsq")
+     DEF(TOK___ldresptr, "__ldresptr")
+     DEF(TOK___stresptr, "__stresptr")
+     /* T9 FPU Temps T0-T7 (ip/cpu/ISA.md) */
+     DEF(TOK___tld, "__tld")
+     DEF(TOK___tst, "__tst")
+     DEF(TOK___tclr, "__tclr")
+     DEF(TOK___f2ldm, "__f2ldm")
+     DEF(TOK___f4ldm, "__f4ldm")
+     DEF(TOK___f2ldma, "__f2ldma")
+     DEF(TOK___f2stm, "__f2stm")
+     DEF(TOK___fmvmul4, "__fmvmul4")
+     DEF(TOK___fmvmul4st, "__fmvmul4st")
+     DEF(TOK___fpoly3, "__fpoly3")
+#endif
+
 /* bound checking symbols */
 #ifdef CONFIG_TCC_BCHECK
      DEF(TOK___bound_ptr_add, "__bound_ptr_add")
@@ -377,7 +610,11 @@
 #define TOK_ASM_int TOK_INT
 
 #define TOK_ASMDIR_FIRST TOK_ASMDIR_byte
+#ifdef TCC_TARGET_TRANSPUTER
+#define TOK_ASMDIR_LAST TOK_ASMDIR_incbin
+#else
 #define TOK_ASMDIR_LAST TOK_ASMDIR_section
+#endif
 
  DEF_ASMDIR(byte)       /* must be first directive */
  DEF_ASMDIR(word)
@@ -423,7 +660,12 @@
  DEF_ASMDIR(int)
  DEF_ASMDIR(symver)
  DEF_ASMDIR(reloc)
+#ifdef TCC_TARGET_TRANSPUTER
+ DEF_ASMDIR(section)
+ DEF_ASMDIR(incbin)    /* must be last directive */
+#else
  DEF_ASMDIR(section)    /* must be last directive */
+#endif
 
 #if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
 #include "i386-tok.h"

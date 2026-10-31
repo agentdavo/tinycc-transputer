@@ -1,0 +1,136 @@
+
+;; Function __alt (__alt, funcdef_no=18, decl_uid=1434, cgraph_uid=18)
+
+(note 1 0 6 NOTE_INSN_DELETED)
+;; basic block 2, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 0, next block 4, flags: (NEW, REACHABLE, RTL, MODIFIED)
+;;  pred:       ENTRY [100.0%]  (FALLTHRU)
+(note 6 1 2 2 [bb 2] NOTE_INSN_BASIC_BLOCK)
+(insn 2 6 3 2 (set (mem/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+        (reg:SI 0 Areg [ skip ])) libxputer/alt.c:50 8 {_stl}
+     (nil))
+(insn 3 2 4 2 (set (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+        (reg:SI 1 Breg [ clist ])) libxputer/alt.c:50 8 {_stl}
+     (nil))
+(note 4 3 8 2 NOTE_INSN_FUNCTION_BEG)
+(insn 8 4 9 2 (parallel [
+            (set (reg:SI 22 [ res ])
+                (asm_operands/v:SI ("  alt                           
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; enbc  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldl %w3; enbs                 
+	  altwt                         
+	  ldl %w2; stl %w1              
+	0:                              
+	  ldl %w1; ldnl 0; cj 1f        
+	  ldl %w1; ldnl 0; ldc 1; ldl %w1; disc 
+	  eqc 0; cj 1f                  
+	  ldl %w1; ldnlp 1; stl %w1     
+	  ldc 0; cj 0b                  
+	1:                              
+	  ldc %w3; ldc 0; diss          
+	  ldl 0                         
+	") ("=a") 0 [
+                        (mem/f/c:SI (reg/f:SI 6 Wreg) [1 tmp+0 S4 A32])
+                        (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                                (const_int 8 [0x8])) [1 clist+0 S4 A32])
+                        (mem/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                                (const_int 4 [0x4])) [4 skip+0 S4 A32])
+                    ]
+                     [
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                        (asm_input:SI ("m") (null):0)
+                    ]
+                     [] libxputer/alt.c:53))
+            (clobber (reg:QI 5 FCreg))
+            (clobber (reg:QI 4 FBreg))
+            (clobber (reg:QI 3 FAreg))
+            (clobber (reg:QI 2 Creg))
+            (clobber (reg:QI 1 Breg))
+        ]) libxputer/alt.c:53 -1
+     (nil))
+(insn 9 8 10 2 (set (reg/v/f:SI 16 [ res ])
+        (reg:SI 22 [ res ])) libxputer/alt.c:53 9 {_dup}
+     (nil))
+(jump_insn 10 9 11 2 (set (pc)
+        (if_then_else (eq:SI (reg/v/f:SI 16 [ res ])
+                (const_int 0 [0]))
+            (label_ref:SI 33)
+            (pc))) libxputer/alt.c:79 125 {_cj}
+     (expr_list:REG_BR_PROB (const_int 73 [0x49])
+        (nil))
+ -> 33)
+;;  succ:       4 [99.3%]  (FALLTHRU)
+;;              5 [0.7%] 
+
+;; basic block 4, loop depth 0, count 0, freq 9927, maybe hot
+;;  prev block 2, next block 5, flags: (NEW, REACHABLE, RTL)
+;;  pred:       2 [99.3%]  (FALLTHRU)
+(note 11 10 12 4 [bb 4] NOTE_INSN_BASIC_BLOCK)
+(insn 12 11 13 4 (set (reg:SI 24)
+        (mem/f/c:SI (plus:SI (reg/f:SI 6 Wreg)
+                (const_int 8 [0x8])) [1 clist+0 S4 A32])) libxputer/alt.c:79 7 {_ldl}
+     (nil))
+(insn 13 12 14 4 (set (reg:SI 23 [ D.1538 ])
+        (minus:SI (reg/v/f:SI 16 [ res ])
+            (reg:SI 24))) libxputer/alt.c:79 43 {*t800.md:1333}
+     (nil))
+(insn 14 13 15 4 (set (reg:DI 27)
+        (sign_extend:DI (reg:SI 23 [ D.1538 ]))) libxputer/alt.c:79 111 {extendsidi2}
+     (nil))
+(insn 15 14 16 4 (set (reg:SI 28)
+        (const_int 2 [0x2])) libxputer/alt.c:79 1 {_ldc}
+     (nil))
+(insn 16 15 17 4 (set (reg:DI 26)
+        (lshiftrt:DI (reg:DI 27)
+            (reg:SI 28))) libxputer/alt.c:79 76 {*t800.md:2023}
+     (nil))
+(insn 17 16 18 4 (set (reg:SI 25)
+        (subreg:SI (reg:DI 26) 0)) libxputer/alt.c:79 9 {_dup}
+     (expr_list:REG_EQUAL (div:SI (reg:SI 23 [ D.1538 ])
+            (const_int 4 [0x4]))
+        (nil)))
+(insn 18 17 30 4 (set (reg:SI 15 [ iftmp@@0 ])
+        (reg:SI 25)) libxputer/alt.c:79 9 {_dup}
+     (nil))
+(jump_insn 30 18 31 4 (set (pc)
+        (label_ref 19)) 134 {jump}
+     (nil)
+ -> 19)
+;;  succ:       6 [100.0%] 
+
+(barrier 31 30 33)
+;; basic block 5, loop depth 0, count 0, freq 73, maybe hot
+;;  prev block 4, next block 6, flags: (NEW, REACHABLE, RTL, MODIFIED)
+;;  pred:       2 [0.7%] 
+(code_label 33 31 32 5 3 "" [1 uses])
+(note 32 33 5 5 [bb 5] NOTE_INSN_BASIC_BLOCK)
+(insn 5 32 19 5 (set (reg:SI 15 [ iftmp@@0 ])
+        (const_int -1 [0xffffffffffffffff])) libxputer/alt.c:79 1 {_ldc}
+     (nil))
+;;  succ:       6 [100.0%]  (FALLTHRU)
+
+;; basic block 6, loop depth 0, count 0, freq 10000, maybe hot
+;;  prev block 5, next block 1, flags: (NEW, REACHABLE, RTL, MODIFIED)
+;;  pred:       5 [100.0%]  (FALLTHRU)
+;;              4 [100.0%] 
+(code_label 19 5 20 6 2 "" [1 uses])
+(note 20 19 21 6 [bb 6] NOTE_INSN_BASIC_BLOCK)
+(insn 21 20 25 6 (set (reg:SI 21 [ <retval> ])
+        (reg:SI 15 [ iftmp@@0 ])) libxputer/alt.c:79 9 {_dup}
+     (nil))
+(insn 25 21 28 6 (set (reg/i:SI 0 Areg)
+        (reg:SI 21 [ <retval> ])) libxputer/alt.c:80 9 {_dup}
+     (nil))
+(insn 28 25 0 6 (use (reg/i:SI 0 Areg)) libxputer/alt.c:80 -1
+     (nil))
+;;  succ:       EXIT [100.0%]  (FALLTHRU)
+

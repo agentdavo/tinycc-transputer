@@ -1,0 +1,51 @@
+
+;; Function __alt (__alt, funcdef_no=18, decl_uid=1434, cgraph_uid=18)
+
+insn=2, live_throughout: 1, 6, dead_or_set: 0
+insn=3, live_throughout: 6, dead_or_set: 1
+insn=8, live_throughout: 6, dead_or_set: 1, 2, 3, 4, 5, 22
+insn=5, live_throughout: 6, 22, dead_or_set: 15
+insn=10, live_throughout: 6, 15, 22, dead_or_set: 
+insn=12, live_throughout: 6, 22, dead_or_set: 24
+insn=13, live_throughout: 6, dead_or_set: 22, 23, 24
+insn=14, live_throughout: 6, dead_or_set: 23, 27
+insn=15, live_throughout: 6, 27, dead_or_set: 28
+insn=16, live_throughout: 6, dead_or_set: 26, 27, 28
+insn=18, live_throughout: 6, dead_or_set: 15, 26
+insn=19, live_throughout: 6, 15, dead_or_set: 
+insn=25, live_throughout: 6, dead_or_set: 0, 15
+insn=28, live_throughout: 0, 6, dead_or_set: 
+init_insns for 24: (insn_list:REG_DEP_TRUE 12 (nil))
+init_insns for 28: (insn_list:REG_DEP_TRUE 15 (nil))
+      Coalescing spilled allocnos a1r26->a6r22
+      Coalescing spilled allocnos a3r27->a6r22
+      Slot 1 (freq,size): a3r27(1984,8) a1r26(1984,8) a6r22(2992,4)
+      Assigning 26(freq=1000) a new slot 0
+      Assigning 27(freq=1000) slot 0 of 26
+      Assigning 22(freq=1000) slot 0 of 26 27
+changing reg in insn 18
+changing reg in insn 5
+changing reg in insn 25
+changing reg in insn 13
+changing reg in insn 14
+changing reg in insn 12
+changing reg in insn 13
+changing reg in insn 15
+changing reg in insn 16
+Spilling for insn 3.
+Using reg 0 for reload 0
+Spilling for insn 8.
+Using reg 0 for reload 0
+Spilling for insn 5.
+Using reg 0 for reload 0
+Spilling for insn 10.
+Using reg 0 for reload 0
+Spilling for insn 13.
+Using reg 1 for reload 0
+Spilling for insn 14.
+reload failure for reload 0
+
+Reloads for insn # 14
+Reload 0: reload_out (DI) = (reg:DI 27 [ D.1538 ])
+	AREG, RELOAD_FOR_OUTPUT (opnum = 0)
+	reload_out_reg: (reg:DI 27 [ D.1538 ])

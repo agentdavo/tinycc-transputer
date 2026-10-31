@@ -1,0 +1,342 @@
+.\" -*- nroff -*-
+.\" Copyright 1995 by Yury Shevchuk.  All Rights Reserved.
+.\" This file may be copied under the terms of GNU General Public License.
+.\"
+.Id $Id: lit.1,v 1.2 1996/02/25 15:48:05 sizif Exp $
+.TH lit 1 "$Date: 1996/02/25 15:48:05 $" "botik" "TTOOLS"
+.\"-------------------------------
+.SH NAME
+lit \- link editor for transputers
+.\"-------------------------------
+.SH SYNOPSIS
+.B lit
+.RB [ options ]
+.RI [ FILE " ...]"
+.\"-------------------------------
+.SH DESCRIPTION
+.B lit
+combines several LIT format object files and libraries into a single
+LIT format executable.
+.\"-------------------------------
+.SH OPTIONS
+.\"-------------------------------
+.TP
+.B --help
+show usage summary
+.\"-------------------------------
+.TP
+.TP
+.BI -o " FILE\fR," " --output" " FILE"
+output to 
+.I FILE
+instead of
+.B a.out\fR.
+.\"-------------------------------
+.TP
+.BI -p " N\fR," " --maxpasses" " N"
+limit the number of offset optimization passes by
+.I N\fR.
+.B lit
+runs offset optimizer repeatedly over the internal representation of
+the program until further optimization proves impossible or this limit
+is reached.  Default limit is 8, increasing it might make a bit
+tighter code.
+.\"-------------------------------
+.TP
+.BI -a " N\fR," " --segment-align" " N"
+assume segments will be aligned at the boundary of
+.I N
+bytes when the program is loaded.
+.B lit
+needs this info to be able to reduce most of expressions at link time,
+leaving only a minimum of work to a loader.  Default is 4, i.e.
+segments are assumed to be loaded at the word boundary.  For best
+results, this parameter should be set not lower than the biggest
+alignment requested by
+.B .align
+directives in the program being linked.
+.\"-------------------------------
+.TP
+.BI -h " NAME\fR," " --hook" " NAME"
+request that the fragment associated with
+.I NAME
+be included in the executable being build.  All fragments which this
+fragment
+.I needs
+will also be included.  More than one hook may be given; if none are
+given,
+.B lit
+will use the default hook 
+.B @@hook.
+.\"-------------------------------
+.TP
+.BI -l "AR\fR," " --library" " AR",
+add
+.BI lib AR .a
+to the list of files that
+.B lit
+will search for
+.I needed
+fragments.
+.\"-------------------------------
+.TP
+.BI -L "DIR\fR," " --libdir" " DIR"
+add
+.I DIR
+to the list of directories to search for libraries specified with
+.B -l
+option.
+.\"-------------------------------
+.TP
+.BR -T "[\fISEG\fR] \fInnn"
+assume that the segment
+.I SEG
+will be loaded at the address
+.I nnn\fR.
+.I nnn
+may be decimal (\fIddd\fR), octal (\fB0\fIooo\fR), or hexadecimal
+(\fB0x\fIhhh\fR) number.  In fact, this option is equivalent to
+assignment of
+.I nnn
+to special symbol
+.IB segment @@start\fR.
+If
+.I SEG
+is omitted,
+.B text
+is assumed.
+.\"-------------------------------
+.TP
+.BI -m[ FILE "], --map[=" FILE ]
+write primitive unsorted symbol map to
+.IR FILE .
+If
+.I FILE
+is omitted, the map is output to
+.BR stdout .
+The map is meant for primitive debuggers, but may also be useful when you
+want to find out where the linker has put what.
+.\"-------------------------------
+.TP
+.B -E\fR, \fB--expr-print-long
+affects verbosity of debugging dumps requested with
+.B --trace
+or
+.B --dump.
+Giving this option once causes elements and
+.I noname
+symbols referred from
+.B ELEMENT
+and
+.B NAME
+expressions to be prefixed with their memory addresses.  Giving this
+option twice results in
+.I every
+expression being prefixed with its memory address.
+.\"-------------------------------
+.TP
+.BI -t " SPEC\fR," " --trace" " SPEC"
+enable debugging output to stdout.
+.I SPEC
+is a string of the form
+.IR KEY [\fB+\fR|\fB- KEY ][\fB+\fR|\fB- KEY ]...
+where
+.BI + KEY
+turns on certain tracing facility,
+.BI - KEY
+turns the facility off.
+.I KEY
+may be any of the following:
+.B all, opt, opt2, reduce, files, read, needs, point, misc, expr\fR.
+.B all
+turns on all trace facilities; for the description of other facilities
+refer to the
+.B ast
+source.
+.\"-------------------------------
+.TP
+.BI -d " SPEC\fR," " --dump" " SPEC"
+enable debugging dumps of internal representation of the program being
+assembled at certain points.
+.I SPEC
+is parsed in the same way as for
+.B --trace
+; valid dump keys are 
+.B all, parse, opt, reduce, freeze, unroll, merge\fR.
+.\"-------------------------------
+.SH LINKER OPERATION OVERVIEW
+.B lit
+makes two passes through the files being linked.  The purpose of the
+first pass is to determine which fragments from which files are to be
+linked in.  The linker starts with some symbols (typically the only
+one \-
+.BR @@hook )
+marked as
+.IR needed ,
+and
+reads the
+.B NAMETABLE
+and
+.B NEEDS
+areas of every file, building a dependency graph for names found in
+the files based on the
+.I need list
+of every name.  In the end of the first pass, the linker has a
+nametable full with names, some subset of which is marked as needed.
+If there are needed names for which the linker has not seen a
+definition, the linker flags these symbols as undefined and
+terminates; otherwise, all is well and the linker goes on to the
+second pass.
+.PP
+The second pass visits each file which claimes to contain a definition
+for at least one needed name
+.B SEGMENTS
+and
+.B DEFINITIONS
+areas from them.  From the
+.B SEGMENTS
+areas, needed fragments are picked up; unneeded fragments are skipped.
+From the
+.B DEFINITIONS
+area, the definitions of needed names are read.  Also are read the
+definitions of (not necessarily needed)
+.I special
+names, such as
+.IB segment @@blocksize\fR.
+Other definitions are skipped to save memory.
+.PP
+At the end of the second pass, the linker has the whole program read
+in, represented in an internal form.  Fragments in every segment are
+placed back-to-back to each other, all fragment names become defined,
+the only possibly undefined names at this point are the special names
+.IB segment @@start\fR.
+.PP
+The offset optimizer (see
+.BR ast (1))
+is run over the internal representation of the program to minimize the
+commands whose arguments depend on relative positions of fragments,
+and so were nonoptimizable in assembly time.
+.PP
+The optimization normally results in most fragments' size intervals
+being narrowed down to constants.  If any elements are still of
+variable size after the end of optimization, their size if fixed at
+the higher boundary of the size interval.  If the actual size of such
+element turns out smaller than the size it is fixed at, it will have
+to be padded to that size when the code for that element is generated.
+.PP
+The linker then performs some simplifying transformations over the
+element chains:
+.B DATA
+and
+.B CMD
+elements with constant arguments are transformed into
+.B BLOCK
+elements
+.RI ( unrolling ),
+and adjacent
+.B BLOCK
+elements are merged.
+.PP
+Then the resulting program is written to the output file, the linking
+process is finished.
+.\"-------------------------------
+.SH HANDLING LIBRARIES
+.B lit
+is capable of traversing archives in the basic (without support for
+long character names and names with embedded spaces) "\fB!<arch>\\n\fR"
+format.  If
+.B ar
+on your system uses a different format, get the GNU
+.B ar.
+Currently, there is no
+.B ranlib
+in TTOOLS, and
+.B lit
+cannot use archive index yet; this is likely to change in a future
+release.
+.\"-------------------------------
+.SH SPECIAL NAMES
+Some names have special meaning to the linker.  This section
+enumerates these names and explains their effect on linker operation.
+.%
+.TP
+.IB segment @@start
+represents the start address of the
+.I segment
+in transputer's memory.  It may be assigned a value in one of the
+files being linked, or it may be set using the
+.BI -T "segment address"
+switch.  If it is not set in one way or the other, it remains
+undefined until loading.  The more info about segment placement you
+give to the linker, the better results you can expect from offset
+optimization.  For example, to allow offset optimizer to minimize
+commands whose arguments depend on relative placement of segments, you
+can tell the linker that the segments are going to be loaded
+back-to-back:
+
+.nf
+	.globl text@@size
+	.globl data@@size
+	.globl bss@@size
+
+	data@@start = text@@start + text@@size
+	bss@@start  = data@@start + data@@size
+.fi
+
+.%
+.TP
+.IB segment @@size
+represents the size of
+.I segment
+in bytes.  These symbols are defined by the linker, and may be
+referred to in programs.  Note that the linker always pads the segment
+with zeroes to a multiple of
+.IR segment-align ,
+so the above back-to-back segments example is safe in the sense of
+alignment of
+.B data
+and
+.B bss
+segments.
+.%
+.TP
+.IB segment @@blocksize
+may be defined in the program to tell the linker not hesitate to
+unroll
+.B DATA
+elements in the
+.IR segment ,
+if the 
+.B BLOCK
+elements resulting from the unrolling are not bigger than
+.IB segment @@blocksize\fR.
+By default,
+.B DATA
+elements with constant value and count are unrolled only if the
+resulting 
+.B BLOCK
+is smaller than 32 bytes, so as to keep the output file compact.
+.%
+.TP
+.B @@hook
+is the default name from which the linker starts to build the fragment
+dependency graph, which is used for selection of fragments to link in.
+Typically a startup file contains a fragment with this name.  You can
+specify an alternative starting symbol using
+.B --hook
+option.
+.\"-------------------------------
+.SH BUGS
+If you find any, please submit a description of the bug and the
+data the bug exposes on to bug-ttools@botik.ru.
+.SH "SEE ALSO"
+.BR ast (1),
+.BR dast (1),
+.BR lit (5),
+.BR litdump (1),
+.BR ttools (1)
+.\"-------------------------------
+.SH AUTHOR
+.B lit
+is written by Yury Shevchuk (sizif@botik.ru)
+.\"-------------------------------

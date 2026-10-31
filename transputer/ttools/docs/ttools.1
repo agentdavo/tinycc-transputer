@@ -1,0 +1,78 @@
+.\" -*- nroff -*-
+.\" Copyright 1995 by Yury Shevchuk.  All Rights Reserved.
+.\" This file may be copied under the terms of GNU General Public License.
+.\"
+.Id $Id: ttools.1,v 1.1.1.1 1995/12/22 12:24:39 sizif Exp $
+.TH ttools 1 "$Date: 1995/12/22 12:24:39 $" "botik" "TTOOLS"
+.\"-------------------------------
+.SH NAME
+TTOOLS \- low-level tools for transputer programming
+.SH DESCRIPTION
+TTOOLS is a collection of cross-tools for trasnputer software
+development.  TTOOLS comprise assembler
+.RB ( ast (1)),
+link editor
+.RB ( lit (1)),
+object file exploration utility
+.RB ( litdump (1)),
+and binary image disassembler
+.RB ( dast (1)).
+
+TTOOLS uses an original object and loadable file format
+.RB ( lit (5)).
+The LIT format is capable of representing commands and data with
+arbitrary argument expressions, which makes it possible to perform
+additional command size minimization in link time, resulting in more
+compact and faster programs.
+
+Another consequence of this capability is that assembly language
+programmer is allowed to perform arbitrary arithmetics on external
+symbols, while traditional systems can only handle certain addition
+and substraction type expressions.
+
+Finally, LIT format allows for omission of unnecessary
+.I fragments
+of object files in link time, whereas traditional systems treat
+object file as an indivisible whole.  See
+.BR ast (1)
+for more details.
+
+TTOOLS distribution includes a generic routine for loading of LIT
+format loadable files
+.RI ( startups/shared/litload.c ),
+and two reference loaders that use it.  The first one, found in
+.IR startups/absolute ,
+is a cross-loader, producing a ROM-able binary image.  The second one,
+in
+.IR startups/linkboot ,
+is a link-in loader for programs that boot via a transputer link.
+Using it, one can make
+.BR lit (1)
+produce link-bootable programs.
+.\"-------------------------------
+.SH COPYRIGHT
+Copyright (C) 1995 Yury Shevchuk
+
+TTOOLS is free software; you are welcome to use and modify it under
+the terms of the GNU General Public License version 2, as published
+by the Free Software Foundation.
+
+TTOOLS is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY, without even an implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+for more details.
+.\"-------------------------------
+.SH AVAILABILITY
+The home site for TTOOLS is ftp.botik.ru (193.232.174.1), directory
+.IR pub/local/ttools .
+.\"-------------------------------
+.SH "SEE ALSO"
+.BR ast (1),
+.BR dast (1),
+.BR lit (1),
+.BR lit (5),
+.BR litdump (1)
+.\"-------------------------------
+.SH AUTHOR
+Yury Shevchuk (sizif@botik.ru)
+.\"-------------------------------

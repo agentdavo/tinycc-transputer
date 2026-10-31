@@ -53,6 +53,10 @@
 #include "riscv64-gen.c"
 #include "riscv64-link.c"
 #include "riscv64-asm.c"
+#elif defined(TCC_TARGET_TRANSPUTER)
+#include "transputer-gen.c"
+#include "transputer-link.c"
+#include "transputer-asm.c"
 #else
 #error unknown target
 #endif
@@ -885,6 +889,17 @@ LIBTCCAPI TCCState *tcc_new(void)
     s->warn_discarded_qualifiers = 1;
     s->ms_extensions = 1;
     s->unwind_tables = 1;
+#ifdef TCC_TARGET_TRANSPUTER
+    s->unwind_tables = 0; /* transputer has no use for x86 DWARF unwind tables */
+    /* Default to the T9000 instruction set. The narrow-access ops (ls/lsx/ss/
+       lbx/ssub/xsword) are what make 16-bit C types cheap: without them every
+       short access is synthesised from two lb plus shl/or/and/xword, ~14
+       instructions where lsx is one. Measured on the gf180mcu core, CoreMark
+       runs 1.82x faster with these enabled (16.20M -> 8.92M cycles) for
+       identical CRCs. Pass -mt805 to fall back to the T805 subset; TVX
+       needs -mt9000tvx. */
+    s->tp_t9000 = 1;
+#endif
 
 #ifdef CHAR_IS_UNSIGNED
     s->char_is_unsigned = 1;
@@ -1076,6 +1091,9 @@ static int tcc_add_binary(TCCState *s1, int flags, const char *filename, int fd)
     switch (obj_type) {
 
     case AFF_BINTYPE_REL:
+#ifdef TCC_TARGET_TRANSPUTER
+        tcc_clear_archive_context();
+#endif
         ret = tcc_load_object_file(s1, fd, 0);
         break;
 
@@ -1785,6 +1803,8 @@ static const char dumpmachine_str[] =
     "aarch64"
 #elif defined TCC_TARGET_RISCV64
     "riscv64"
+#elif defined TCC_TARGET_TRANSPUTER
+    "transputer"
 #endif
     "-"
 #ifdef TCC_TARGET_PE
@@ -2059,6 +2079,41 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             continue;
 #endif
         case TCC_OPTION_m:
+#ifdef TCC_TARGET_TRANSPUTER
+            /* Target selection is last-one-wins: build scripts already pass
+               a hard-coded -mt800, so -mt9000 must be able to override it
+               (and vice versa) rather than the two ANDing together.  Naming
+               a target also makes the link refuse objects compiled for a
+               bigger part. */
+            {
+                static const struct {
+                    const char *name;
+                    unsigned char t9000, tvx, t425, t414, t800;
+                } tp_m[] = {
+                    { "t9000tvx", 1, 1, 0, 0, 0 },
+                    { "t9000",    1, 0, 0, 0, 0 },
+                    { "t805",     0, 0, 0, 0, 0 },
+                    { "no-t9000", 0, 0, 0, 0, 0 },
+                    { "t800",     0, 0, 0, 0, 1 },
+                    { "t425",     0, 0, 1, 0, 0 },
+                    { "t414",     0, 0, 1, 1, 0 },
+                };
+                int k;
+
+                for (k = 0; k < countof(tp_m); k++)
+                    if (!strcmp(optarg, tp_m[k].name))
+                        break;
+                if (k < countof(tp_m)) {
+                    s->tp_t9000 = tp_m[k].t9000;
+                    s->tp_tvx = tp_m[k].tvx;
+                    s->tp_t425 = tp_m[k].t425;
+                    s->tp_t414 = tp_m[k].t414;
+                    s->tp_t800 = tp_m[k].t800;
+                    s->tp_link_check = 1;
+                    break;
+                }
+            }
+#endif
             if (set_flag(s, options_m, optarg) < 0) {
                 if (x = atoi(optarg), x != 32 && x != 64)
                     goto unsupported_option;

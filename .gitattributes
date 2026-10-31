@@ -1,0 +1,6 @@
+# Store and check out text as LF on every platform: the tree is built from
+# WSL/Linux even when checked out on Windows, and CRLF breaks configure.
+* text=auto eol=lf
+
+# cmd.exe mishandles labels in LF-only batch files
+*.bat text eol=crlf

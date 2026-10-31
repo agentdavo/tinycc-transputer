@@ -1,0 +1,92 @@
+.\" -*- nroff -*-
+.\" Copyright 1995 by Yury Shevchuk.  All Rights Reserved.
+.\" This file may be copied under the terms of GNU General Public License.
+.\"
+.Id $Id: dast.1,v 1.1.1.1 1995/12/22 12:24:39 sizif Exp $
+.TH dast 1 "$Date: 1995/12/22 12:24:39 $" "botik" "TTOOLS"
+.\"-------------------------------
+.SH NAME
+dast \- binary image disassembler for transputers
+("Dizassembler Binarnogo Obraza")
+.\"-------------------------------
+.SH SYNOPSIS
+.B dast
+.RB [ options ]
+.RI [ FILE ]
+.\"-------------------------------
+.SH DESCRIPTION
+.B dast
+allows one to view a binary
+.I FILE
+as transputer instructions.  If
+.I FILE
+is not specified,
+.B dast
+takes input from stdin.  The input might be transputer memory dump,
+or an assembled program; however, for the latter consider
+.RB `` "litdump --disassemble" ''.
+
+The output of
+.B dast
+looks like this:
+
+.nf
+$ dast pushpull.image
+[ ... ]
+0x00000025: G        47                ldc 7
+0x00000026: %.       25 10             ldlp 80 (0x50)
+0x00000028: .        fd                startp
+0x00000029: $O       24 4f             ldc 79 (0x4f)
+0x0000002b: *.       2a 10             ldlp 160 (0xa0)
+0x0000002d: .        fd                startp
+0x0000002e: !.       21 f5             stopp
+0x00000030: /*K      2f 2a 4b          ldc 4011 (0xfab)
+[ ... ]
+$
+.fi
+
+Fourth column of every line contains a disassembled command, the third
+column contains hex dump of the memory occupied by the command
+(leftmost byte has the lowest address), the second is the ASCII dump
+of the same memory area (nonprintable charactes printed as '.'), and
+the first column is the memory address of the command, provided you
+have specified the correct origin of the memory image using the
+.B -O
+option.
+.\"-------------------------------
+.SH OPTIONS
+.\"-------------------------------
+.TP
+.B --help
+show usage summary
+.\"-------------------------------
+.TP
+.BI -o " F\fR," " --output" " F"
+output disassembled code to file
+.I F\fR.
+Defaults to
+.B stdout\fR.
+.\"-------------------------------
+.TP
+.BI -s " N\fR," " --skip" " N"
+skip first
+.I N
+bytes of the input; i.e. start disassembling at position
+.I N\fR.
+.\"-------------------------------
+.TP
+.BI -O " A\fR," " --origin" " A"
+assume the image being disassebled has been taken from the address
+.I A
+in transputer memory.
+.\"-------------------------------
+.SH BUGS
+If you find any, please submit a description of the bug and the
+data the bug exposes on to bug-ttools@botik.ru.
+.SH "SEE ALSO"
+.BR litdump (1)
+.\"-------------------------------
+.SH AUTHOR
+.B dast
+is written by Yury Shevchuk (sizif@botik.ru)
+.\"-------------------------------

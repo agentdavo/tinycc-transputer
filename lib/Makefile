@@ -74,6 +74,11 @@ OBJ-arm-eabi = $(OBJ-arm)
 OBJ-arm-eabihf = $(OBJ-arm)
 OBJ-arm-wince = $(ARM_O) $(WIN_O)
 OBJ-riscv64 = $(RISCV64_O) armflush.o $(LIN_O)
+OBJ-transputer = libtcc1.o transputer-runtime.o transputer-conc.o transputer-f16.o transputer-vla.o \
+                 $(TVX-transputer) $(COMMON_O)
+# Software TVX (transputer-tvx*.c): the TVX instructions as C, for parts
+# without TVX.
+TVX-transputer = transputer-tvx.o transputer-tvx-iq.o transputer-tvx-qdot.o
 
 OBJ-extra = $(filter $(EXTRA_O),$(OBJ-$T))
 OBJ-libtcc1 = $(addprefix $(X),$(filter-out $(OBJ-extra),$(OBJ-$T)))
@@ -84,6 +89,55 @@ all: $(ALL)
 
 $(TOP)/$(X)libtcc1.a : $(OBJ-libtcc1) $(TCC)
 	$S$(XAR) rcs $@ $(OBJ-libtcc1)
+
+# The same runtime again for the FPU-less IMS T425 (-mt425) and T414
+# (-mt414), each with the soft-float helpers its floating point calls, and
+# for the T800 (-mt800 and -mt805): the default one is -mt9000 code.
+ifeq "$T" "transputer"
+SOFTFP-transputer = transputer-softfp.o transputer-softfp-sn.o transputer-softfp-db.o
+OBJ-t425 = $(patsubst %.o,transputer-t425-%.o,$(OBJ-transputer) $(SOFTFP-transputer))
+OBJ-t414 = $(patsubst %.o,transputer-t414-%.o,$(OBJ-transputer) $(SOFTFP-transputer))
+OBJ-t800 = $(patsubst %.o,transputer-t800-%.o,$(OBJ-transputer))
+
+all: $(TOP)/transputer-libtcc1-t425.a $(TOP)/transputer-libtcc1-t414.a
+all: $(TOP)/transputer-libtcc1-t800.a
+
+# Software TVX is built from t4's semantic headers (vendored in
+# transputer-tvx/), which include <stdint.h> and friends: give it a
+# libc-free set rather than the host's /usr/include.
+$(addprefix $(X),$(TVX-transputer)) \
+$(addprefix transputer-t800-,$(TVX-transputer)) \
+$(addprefix transputer-t425-,$(TVX-transputer)) \
+$(addprefix transputer-t414-,$(TVX-transputer)) : \
+    XFLAGS += -nostdinc -I$(TOPSRC)/lib/transputer-tvx/include -I$(TOPSRC)/include
+
+$(TOP)/transputer-libtcc1-t425.a : $(OBJ-t425) $(TCC)
+	$S$(XAR) rcs $@ $(OBJ-t425)
+
+$(TOP)/transputer-libtcc1-t414.a : $(OBJ-t414) $(TCC)
+	$S$(XAR) rcs $@ $(OBJ-t414)
+
+$(TOP)/transputer-libtcc1-t800.a : $(OBJ-t800) $(TCC)
+	$S$(XAR) rcs $@ $(OBJ-t800)
+
+transputer-t800-%.o : %.c $(TCC)
+	$S$(XCC) -mt800 -c $< -o $@ $(XFLAGS)
+
+transputer-t800-%.o : %.S $(TCC)
+	$S$(XCC) -mt800 -c $< -o $@ $(XFLAGS)
+
+transputer-t425-%.o : %.c $(TCC)
+	$S$(XCC) -mt425 -c $< -o $@ $(XFLAGS)
+
+transputer-t425-%.o : %.S $(TCC)
+	$S$(XCC) -mt425 -c $< -o $@ $(XFLAGS)
+
+transputer-t414-%.o : %.c $(TCC)
+	$S$(XCC) -mt414 -c $< -o $@ $(XFLAGS)
+
+transputer-t414-%.o : %.S $(TCC)
+	$S$(XCC) -mt414 -c $< -o $@ $(XFLAGS)
+endif
 
 $(X)%.o : %.c $(TCC)
 	$S$(XCC) -c $< -o $@ $(XFLAGS)

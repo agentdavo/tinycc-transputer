@@ -1,0 +1,468 @@
+.\" -*- nroff -*-
+.\" Copyright 1995 by Yury Shevchuk.  All Rights Reserved.
+.\" This file may be copied under the terms of GNU General Public License.
+.\"
+.Id $Id: lit.5,v 1.2 1996/02/25 15:51:43 sizif Exp $
+.TH lit 5 "$Date: 1996/02/25 15:51:43 $" "botik" "TTOOLS"
+.\"-------------------------------
+.SH NAME
+LIT \- linkable and executable format used by TTOOLS
+.\"-------------------------------
+.SH SYNOPSIS
+.nf
+.B #include <expr.h>
+.B #include <litio.h>
+.fi
+.\"-------------------------------
+.SH GENERAL VIEW
+LIT format file consists of several
+.IR areas .
+The nomenclature of areas for linkable (object) and loadable files
+is different.  Linkable file contains the following areas:
+.BR NAMETABLE ,
+.BR NEEDS ,
+.BR SEGMENTS ,
+.BR DEFINITIONS ,
+and (optional)
+.BR STABS .
+A loadable file only contains the
+.BR SEGMENTS
+and (optional)
+.BR STABS
+areas.  At the end of every area there is a
+.IR marker
+containing the area identification and size in bytes.  Markers have a
+fixed size
+.RB ( LIT_MARKER_SIZE ),
+which makes it possible to seek to the beginning of any area within the
+file without having to read all preceding areas, by following the
+chain of markers starting from the end of the file.
+.PP
+Areas consists of
+.IR records ,
+which in turn consist of basic objects.  The following sections
+describe the records and objects in detail.
+.\"-------------------------------
+.SH BASIC OBJECTS
+The basic structural unit of the file larger than a mere byte is a
+.IR number ,
+a 32-bit integer specially encoded to save space.  The number encoding
+method is borrowed from the TCOFF object file file format [1].
+
+Numbers in the range [0..240] are represented by a single byte of that
+value.  Larger values may be encoded as 8-, 16-, or 32-bit numbers,
+stored plain in little-endian order, prefixed by a byte of 251,
+252, or 253 respectively.  Finally, effective encoding of negative
+numbers is achieved using an additional prefix byte of 255, which
+tells that the following number should be bitwise-inverted to get the
+encoded value:
+
+.nf
+number:  (byte) value
+      |  (byte) 251  (byte) value
+      |  (byte) 252  (byte) lsb  (byte) msb
+      |  (byte) 253  (byte) lsb  (byte) b2
+           (byte) b3  (byte) msb
+      |  (byte) 255  (number) ~value
+.fi
+
+Another simple object is a
+.IR string ,
+stored as a byte sequence with the length
+.I number
+prepended:
+
+.nf
+string:  (number) length  (byte) byte1  (byte) byte2 ...
+.fi
+
+The most complex basic object in the LIT format is
+.IR expression ,
+which is an unevaluated arithmetic expression in reverse polish
+notation.  Expressions are composed of
+.I leaf expressions
+and
+.I operators.
+The possible types of leaf expressions are:
+.TP
+.B CONST
+self-explanatory, stored as a single
+.IR number ;
+.\"------
+.TP
+.B RANGE
+represent an interval of possible values. Stored as a pair of
+.IR numbers ,
+lower boundary first, higher boundary next;
+.\"------
+.TP
+.B NAME
+one of the names from the file's nametable.  Stored as a single
+.IR number ,
+the nametable index;
+.\"------
+.TP
+.B ELEMENT
+refers to the size of one of the elements in the internal representation
+of the program.  Stored as a single
+.IR number ,
+the ordinal number of the element in this file;
+.\"------
+.TP
+.B ELSUM
+represents a sum of a number of
+.B ELEMENT
+expressions.  Although superfluous at the first sight, expressions of
+this type allow to save both space and CPU time requred for expression
+reduction.  Stored as a sequence of
+.I numbers
+\- ordinal numbers of sum member
+.BR ELEMENTs ,
+terminated with a
+.I number of -1.
+.PP
+.\"------
+The set of operators used in expressions is borrowed from
+.BR C .
+Every leaf expression type, as well as every operator, is assigned a
+unique tag; see
+.I shared/expr.h
+for the numeric values of the tags and more details about expressions.
+
+The end of expression is marked with a
+.B LIT_EXPR_END
+byte.
+
+.nf
+expr:  (subexpr) the_expr  (byte) LIT_EXPR_END
+
+subexpr:  leaf_expr
+	|  (subexpr) arg  (unary_tag) op
+	|  (subexpr) larg  (subexpr) rarg  (binary_tag) op
+	;
+
+leaf_expression:  (number) EXPR_CONST  (number) const_value
+	|  (number) EXPR_RANGE  (number) lo  (number) hi
+	|  (number) EXPR_NAME  (number) nametable_index
+	|  (number) EXPR_ELEMENT  (number) element_index
+	|  (number) EXPR_ELSUM  (number) element_index1
+	     (number) element_index2  ... (number) -1
+
+unary_tag:  (number) EXPR_NEG   /* - */
+	|  (number) EXPR_NOT    /* ! */
+	|  (number) EXPR_COMPL  /* ~ */
+	;
+
+binary_tag:  (number) EXPR_MINUS /* - */
+	|  (number) EXPR_PLUS   /* + */
+	|  (number) EXPR_LSH    /* << */
+	|  (number) EXPR_RSH    /* >> */
+	|  (number) EXPR_MUL    /* * */
+	|  (number) EXPR_DIV    /* / */
+	|  (number) EXPR_REM    /* % */
+	|  (number) EXPR_AND    /* & */
+	|  (number) EXPR_XOR    /* ^ */
+	|  (number) EXPR_OR     /* | */
+	|  (number) EXPR_LT     /* < */
+	|  (number) EXPR_LE     /* <= */
+	|  (number) EXPR_GT     /* > */
+	|  (number) EXPR_GE     /* >= */
+	|  (number) EXPR_EQ     /* == */
+	|  (number) EXPR_NE     /* != */
+	|  (number) EXPR_ANDAND /* && */
+	|  (number) EXPR_OROR   /* || */
+	|  (number) EXPR_QUEST  /* ? */
+	|  (number) EXPR_COLON  /* : */
+	;
+.fi
+.\"-------------------------------
+.SH RECORDS
+LIT file areas consist of records.  Every record starts with a record
+tag
+.IR number .
+Positive record tags introduce
+.B BLOCK
+records, zero tag is for
+.B DUMMY
+record, other records use negative tags.
+.\"----------------------
+.SH NAMETABLE AREA
+Nametable area consists of
+.B NAME
+type records, each containing name identifier and a flag word.
+
+.nf
+NAME:  (number) LIT_NAME  (string) id  (number) flags
+.fi
+
+The flag word may contain the following flags:
+.\"--------------
+.TP
+.B LIT_NAME_DEFINED
+says that this name is defined in this file: either there is a
+fragment with this name in the
+.B SEGMENTS
+area, or a definition for this name is found in the
+.B DEFINITIONS
+area;
+.\"--------------
+.TP
+.B LIT_NAME_FRAGMENT
+says that a fragment with this name is defined in this file;
+.\"--------------
+.TP
+.B LIT_NAME_COMMON
+says that this is a
+.I common
+name, declared with the
+.B .comm
+in the assembly language source.
+.\"----------------------------
+.SH NEEDS AREA
+NEEDS area consists of
+.B NEED
+type records.  Every
+.B NEED
+record contains a
+.I need list
+for certain name.  The list consists of
+.I numbers
+\- nametable indices, terminated with the
+.I number
+of -1.
+
+.nf
+NEED:  (number) LIT_NEED  (number) name  (number) need1
+         (number) need2 ... (number) -1
+.fi
+
+.\"------------------------
+.SH SEGMENTS AREA
+The
+.B SEGMENTS
+area is the main area of the file.  In fact, its contents is a file
+version of the internal representation of the program used in
+.B ast
+and
+.BR lit .
+Unlike other areas, it consists of records of several types.
+.TP
+.B CMD
+record corresponds to a
+.B CMD
+element in the internal program representation, and represents a
+command with unevaluable yet argument.
+
+.nf
+CMD:  (number) LIT_CMD  (number) opcode  (expr) arg
+	(expr) size
+.fi
+
+.I size
+is typically a RANGE expression.
+.\"------------------------------
+.TP
+.B DATA
+record corresponds to a
+.B DATA
+element in the internal program representation, and represents
+data with unevaluable yet value or count.
+
+.nf
+DATA:  (number) LIT_CMD  (number) width  (expr) value
+	(expr) count  (expr) size
+.fi
+
+The
+.I width
+parameter may be 1, 2, or 4, for data resulting from
+.BR .byte ,
+.BR .half ,
+and
+.BR .word
+assembler directives respectively.
+.I size
+is typically a RANGE expression.
+.\"------------------------------
+.TP
+.B BLOCK
+record corresponds to a
+.B BLOCK
+element in the internal program representation, and represents a
+completely translated piece of the program, a sequence of bytes.
+There is no single
+.B LIT_BLOCK
+tag; instead, every positive tag is considered a tag of a
+.B BLOCK
+record with the length equal to the value of the tag.
+
+.nf
+BLOCK:  (number) length  (byte) byte1  (byte) byte2 ...
+	  (byte) byte[length]
+.fi
+.\"------------------------------
+.TP
+.B FRAGMENT
+records separate portions of the program belonging to different
+fragments.  The record contains nametable index of the fragment's
+name, and the alignment required for this this fragment.
+
+.nf
+FRAGMENT:  (number) LIT_FRAGMENT  (number) name
+	     (number) align
+.fi
+
+Any
+.BR CMD ,
+.BR DATA ,
+and
+.BR BLOCK
+records appearing between a segment start and the first
+.B FRAGMENT
+record, are considered to belong to the
+.I default fragment
+of that segment.
+.\"------------------------------
+.TP
+.B SEGMENT
+records separate data belonging to different segments.  The record
+contains a string with the name of this segment (segment names are not
+in nametable, it's a separate namespace), and the nametable index of
+the default fragment of this segment.
+
+.nf
+SEGMENT:  (number) LIT_SEGMENT  (string) ident
+	    (number) deffrag
+.fi
+
+Any
+.BR CMD ,
+.BR DATA ,
+and
+.BR BLOCK
+records appearing between the start of the
+.B SEGMENTS
+area and the first
+.B SEGMENT
+record are considered to belong to the
+.B head
+ segment.
+.\"------------------------------
+.SH DEFINITIONS AREA
+The
+.B DEFINITIONS area consists of
+.B NAMEDEF records.  A
+.B NAMEDEF
+record associates a value with a name.
+
+.nf
+NAMEDEF:  (number) LIT_NAMEDEF  (number) name  (expr) value
+.fi
+
+Records of this kind result from assignments to global names in
+assembly language source, as well as from nonfragment public labels
+(see
+.BR ast (1)).
+.\"------------------------------
+.SH STUBS AREA
+This area is going to contain symbolic information for use by
+debuggers.  It is not implemented yet.
+.\"------------------------------
+.SH MISCELLANIOUS RECORDS
+This section discussed the records that may appear in more tahn one
+area.
+.\"--------------------
+.TP
+.B DUMMY
+record is a one-byte record with tag equal to zero.  This record
+carries no information and is used as a filler.
+.\"--------------------
+.TP
+.B MARKER
+records, found at the end of every area, have the following structure:
+
+.nf
+MARKER: (number) LIT_MARKER  area_type  (number) area_size
+
+area_type:  (number) LIT_AREA_NAMETABLE
+	|  (number) LIT_AREA_NEEDS
+	|  (number) LIT_AREA_SEGMENTS
+	|  (number) LIT_AREA_DEFINITIONS
+	|  (number) LIT_AREA_STABS
+	;
+.fi
+
+After a
+.BR MARKER ,
+an appropriate number of
+.B DUMMY
+records are appended to make the total size of the marker and
+dummies equal to
+.B LIT_MARKER_LENGTH
+bytes.
+.\"--------------------
+.TP
+.B COMMENT
+record may appear anywhere in the file, and consists of the only
+string of undefined contents.
+
+.nf
+COMMENT:  (string) abstract_string
+.fi
+
+This record is intended as means for specifying LIT format version and
+other pseudocomment information, but is not used by current TTOOLS
+(although carefully ignored by LIT format reading routines).
+.\"-------------------------------
+.SH LOADABLE LIT FILES
+Loadable files generated by
+.BR lit (1)
+have some differencies from linkable files that
+.BR lit (1)
+takes as input.
+
+Only the
+.B SEGMENTS
+and (optionally)
+.B STABS
+areas are present in loadable files.
+
+The only name
+references that may appear in a loadable file are references to
+segment addresses,
+.IB segment @@start\fR.
+No nametable is necessary to handle these references; the indices used
+for the
+.IB segment @@start
+names in loadable files are the ordinal numbers of their respective
+segments.
+.\"------------
+.SS LINK BOOTING
+As you may have noticed, the format of a small (<= 250 bytes)
+.B BLOCK
+record is identical to the format of the bootrstrap code block that
+the transputer expects to receive via a link after reset.  Since the
+first record of the
+.B head
+segment apeears at the start of a loadable LIT file, one can code a
+bootstrap routine in the
+.B head
+segment, and then the output from
+.B lit
+will be a
+.I bootable
+file.  One of startup modules that come with TTOOLS,
+.BR linkboot ,
+uses this technique; see
+.I startus/linkboot/crt0.S
+is you are interested.
+.\"-------------------------------
+.SH "SEE ALSO"
+.BR ast (1),
+.BR lit (1),
+.BR litdump (1),
+.BR ttools (1)
+.\"-------------------------------
+.SH AUTHOR
+Yury Shevchuk (sizif@botik.ru)
+.\"-------------------------------

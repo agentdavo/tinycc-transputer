@@ -1,0 +1,697 @@
+.\" -*- nroff -*-
+.\" Copyright 1995 by Yury Shevchuk.  All Rights Reserved.
+.\" This file may be copied under the terms of GNU General Public License.
+.\"
+.Id $Id: ast.1,v 1.1.1.1 1995/12/22 12:24:39 sizif Exp $
+.TH ast 1 "$Date: 1995/12/22 12:24:39 $" "botik" "TTOOLS"
+.\"-------------------------------
+.SH NAME
+ast \- assembler for transputers
+.\"-------------------------------
+.SH SYNOPSIS
+.B ast
+.RB [ options ]
+.RI [ FILE ]
+.\"-------------------------------
+.SH DESCRIPTION
+.B ast
+produces LIT format object file from a transputer assembly language
+program contained in the
+.I FILE\fR.
+If the
+.I FILE
+is omitted,
+.B ast
+takes the program from stdin.
+.\"-------------------------------
+.SH OPTIONS
+.\"-------------------------------
+.TP
+.B --help
+show usage summary
+.\"-------------------------------
+.TP
+.BI -o " FILE\fR," " --output" " FILE"
+output to 
+.I FILE
+instead of
+.B a.out\fR.
+.\"-------------------------------
+.TP
+.BI -p " N\fR," " --maxpasses" " N"
+limit the number of offset optimization passes by
+.I N\fR.
+.B ast
+runs offset optimizer repeatedly over the internal representation of
+the program until further optimization proves impossible or this limit
+is reached.  Default limit is 8, increasing it might make a bit
+tighter code.
+.\"-------------------------------
+.TP
+.B -E, --expr-print-long
+affects verbosity of debugging dumps requested with
+.B --trace
+or
+.B --dump.
+Giving this option once causes elements and
+.I noname
+symbols referred from
+.B ELEMENT
+and
+.B NAME
+expressions to be prefixed with their memory addresses.  Giving this
+option twice results in every expression being prefixed with its
+memory address.
+.\"-------------------------------
+.TP
+.BI -t " SPEC\fR," " --trace" " SPEC"
+enable debugging output to stdout.
+.I SPEC
+is a string of the form
+.IR KEY [\fB+\fR|\fB- KEY ][\fB+\fR|\fB- KEY ]...
+where
+.BI + KEY
+turns on certain tracing facility,
+.BI - KEY
+turns the facility off.
+.I KEY
+may be any of the following:
+.B all, lex, point, opt, opt2, reduce, misc, expr\fR.
+.B all
+turns on all trace facilities; for the description of other facilities
+refer to the
+.B ast
+source.
+.\"-------------------------------
+.TP
+.BI -d " SPEC\fR," " --dump" " SPEC"
+enable debugging dumps of internal representation of the program being
+assembled at certain points.
+.I SPEC
+is parsed in the same way as for
+.B --trace
+; valid dump keys are 
+.B all, parse, opt, canon, unroll, merge, needs\fR.
+.\"-------------------------------
+.SH INFORMAL DESCRIPTION OF THE INPUT LANGUAGE
+The language that
+.B ast
+takes as input is mostly what you would expect a transputer assembly
+language to be.  You might want to take a look at one of the assembly
+language files present in TTOOLS distribution, or examine the output
+of
+.RB `` "t800-gcc -O -S foo.c" ''
+to get a feel of it.
+.\"-------------------------------
+.SS NAMES
+Names, or symbols, are essential part of any assembly language.
+They serve to represent
+.I possibly not yet defined
+values.  For example, you need a name to code a forward reference:
+
+.nf
+		j mylabel
+		cmdfoo
+		cmdbar
+	mylabel:
+		cmdfoobar
+.fi
+
+In this example, the name
+.I mylabel
+represents the address of the command
+.I cmdfoobar
+in transputer's memory.
+.\"-------------------------------
+.SS DIGITAL LABELS
+In addition to names,
+.B ast
+supports
+.IR "digital labels" ,
+a feature commonly found in UNIX assemblers.  Digital labels are often
+handy when you need a short-range label which you hate to invent a
+name for.  Digital label is a single digit (0..9) followed by
+semicolon.  References to digital labels are written as a digit
+followed by letters
+.RB ' f '
+or
+.RB ' b '
+which denote forward and backward references, respectively.
+
+For example, here is a loop which cycles until
+.I cmdfoo
+leaves zero in Areg:
+
+.nf
+	1:
+		cmdfoo
+		cj 1f
+		cmdbar
+		j 1b
+	1:
+.fi
+.\"-------------------------------
+.SS ASSIGNMENTS
+Another way to define a name is an explicit
+.IR assignment .
+For example:
+
+.nf
+	mysize = mylabel - bottom
+	wordsize = 0x4
+	mysize_in_words = (mysize + (wordsize-1)) / wordsize
+.fi
+
+Left hand side of an assignment may contain an arbitrary
+.IR expression .
+Expression use the set of operators and constants notation of the
+.B C
+programming language.  Apart from names, constants, operators, and
+digital label references, appearing in expressions may be a dot
+.RB (' . ')
+which stands for the current value of the program counter, the
+assembly point.
+.\"-------------------------------
+.SS COMMANDS
+The syntax for commands on transputers is very simple, compared to
+that on traditional CISC processors.  Consider the following piece of
+code:
+
+.nf
+		ldc fp_array + 5*word_size
+		fpldnlsn
+		fpuabs
+		ldlp 1
+		fpstnlsn
+		j end
+.fi
+
+.B ldc
+is a
+.I direct
+command.  All direct commands take an arbitrary expression as an
+argument; the assembler will compute the expression and assemble the
+appropriate sequence of
+.BR pfix / nfix
+instructions before the direct command, if necessary.
+
+Three direct commands
+.RB ( j ,
+.BR cj ,
+and
+.BR call )
+have a special treatment of their argument:
+.B ast
+implicitly substracts the address of the end of the command being
+assembled from the argument.  The reason for this is that the
+transputer hardware interprets the argument of these commands as an
+.I offset
+from the end of the command to the destination label/function.  This
+special handling compensates for this, so that the commands look
+naturally, for example:
+
+.nf
+		call _printf
+.fi
+
+.B fpldnlsn
+is an
+.I indirect
+comand.  Indirect commands take no immediate operand.  Actually, they
+are assembled as
+
+.nf
+		opr indirect_opcode
+.fi
+
+Ast chooses the
+.I indirect_opcode
+based on the mnemonics of the indirect command.
+You might want to use
+.B opr
+directly if you ever need an indirect command which
+.B ast
+doesn not know a mnemonics for \- but better yet, submit a patch to
+get your new command added to
+.BR ast 's
+instruction table.  See
+.IR ttools*/ast/scan.l .
+
+.BR fpuabs ,
+as all 
+.BR fpu *
+commans, is a doubly-indirect floating point unit command.  It is
+doubly indirect because it is actually coded as
+
+.nf
+		ldc fpu_opcode; fpentry
+.fi
+
+where fpentry is an indirect command.
+.B ast
+hides the
+.BR ldc ,
+but bear in mind that the
+.B ldc
+.RB * is *
+there, so you should have one word of integer regstack unoccupied
+before any doubly-indirect command.
+.\"-------------------------------
+.SS SEGMENTS
+.B ast
+supports the notion of
+.I segment
+as a contiguous portion of program in transputer's memory.  The
+segments are
+.IR logical :
+they do not necessarily imply the presence of some kind of segment
+registers in the hardware.  Rather, they reflect the fact that a
+program may consist of several pieces scattered in transputer's memory.
+.B ast
+puts no limitation on the number of segments in a program, and allows
+stratup code programmer to choose whatever names he likes for them.
+(By the way, segment names never conflict with regular names; they are
+in separate namespace).  Switching from segment to segment in a
+program is accomplished with segment switch directives, like this:
+
+.nf
+			cmdfoo
+		.text
+			cmdbar
+			cmdfoobar
+		.data
+			.byte "that's it\\n", 0
+.fi
+
+Everything emitted between the start of the file and the first segment
+switch directive 
+.RI ( cmdfoo
+in this example) goes into the
+.B head
+segment.
+Other knowledge
+.B ast
+has about specific segment names is:
+
+.RS
+.B text
+segment uses the default filler of 0x20
+.RB ( "pfix\ 0" )
+for
+.B .align
+directive;
+.RE
+
+.RS
+.B bss
+is the segment where the
+.B .comm
+directive emits to.
+.RE
+
+Other than that,
+.B ast
+makes no assumptions about specific names of segments.
+.\"-------------------------------
+.SS FRAGMENTS
+The notion of
+.I fragment
+is probably the most nonstandard feature of TTOOLS.
+Fragments are atomic (indivisible) constituents of the program from
+the viewpoint of the TTOOLS linker,
+.BR lit .
+
+As you can recall, traditional linkers consider
+.I object files
+as atomic, indivisible consituents of the program being linked.  The
+traditional behaviour sometimes turn out awkward; for example, when
+writing a large library, programmers have to put every function in a
+separate file to avoid linking in unnecessary functions.  One known
+workaround for this problem is to enclose every function in a large
+file in #ifdef's:
+
+.nf
+	...
+
+	#ifdef L_foo
+	foo ()
+	{
+	}
+	#endif
+
+	#ifdef L_bar
+	bar ()
+	{
+	}
+	#endif
+
+	...
+.fi
+
+and then compile the file
+.I N
+times, where
+.I N
+is the amount of functions in the file, each time with the appropriate
+.BR L_ *
+symbol defined.
+
+TTOOLS addresses the problem of omitting unused code by
+considering every global function or data in a program as a separate
+.I fragment
+of the program which the linker can link in or omit depending on
+whether this fragment is
+.I needed
+in the unltimate file or not.  Assembler puts a
+.I need list
+for every fragment in the LIT format objects file, so that the linker
+can build a dependency graph to divide needed fragments from unneeded
+ones.  See
+.BR lit (1)
+for more detailed decription of how the linker decides whether a
+fragment is needed or not; here we are mostly concerned with how
+the assemblers determines fragment boundaries and fragment
+dependencies.
+
+The rule for boundaries is simple: when the assembler encounters a
+label which was before declared as global (a
+.IR "public label" ),
+it considers it a start of a new fragment.  The program counter
+.RB (' . ')
+is set equal to the fragment name at this point.
+
+"What if I want to put a global label in the middle of a fragment?"
+No problem.  Using double colon
+.RB ( :: )
+for a label causes it not to start a new fragment even if the name is
+declared global.  Example:
+
+.nf
+	.global fragment1
+	.global fragment2
+	.global middlelab
+
+	fragment1:
+		cmdfoo
+	middlelab::	// this label does NOT start a fragment
+		cmdbar
+	fragment2:
+		cmdfoobar
+.fi
+
+Every segment has its own current fragment.  Any code emitted between
+the start of a segment and the first public label in the segment goes
+into a noname
+.IR "default fragment" .
+Note that noname symbols are considired distinct by the linker,
+despite the fact that
+.BR strcmp (3)
+would return 0 for them.
+
+The rule for fragment dependencies is this: if the fragment
+.I foo
+is mentioned in expression argument of any command or data element
+of the fragment
+.IR bar ,
+then
+.I bar
+needs
+.IR foo .
+This natural rule is sufficient in most cases.  However, sometimes you
+may want to specify an "artificial" need; you can do that using the
+.B .need
+directive, which adds its argument to the need list of the current
+fragment:
+
+.nf
+	.globl foo
+	.globl bar
+
+	foo:
+		...
+	bar:
+		.need foo  // must link in foo if bar is linked in
+		...
+.fi
+
+"Great!  Can I turn all this off?  :-)"  No.  Although it wouldn't be
+hard to implement an option which yields the traditional behavior \-
+treat all public labels as nonfragments and add needs for next and
+previous segment to every segment's only fragment... well, I'll do it
+if you explain why you need it; mail me or do it yourself.
+.\"-------------------------------
+.SS DIRECTIVES
+.\"-------------------------------
+.TP
+.BR .word ", " .half ", " .byte
+emit data of the width of 4, 2, or 1 byte respectively at the current
+point.  More then one datum may be specified on one directive,
+separated by a comma
+.RB (' , ').
+A repeater expression may be specified after a datum in braces
+.RB ( [] ).
+Using a question mark
+.RB (' ? ')
+for a datum causes an uninitialized datum of the said width to be
+emitted.
+.B .byte
+in addition allows to specify a string in double quotes for a datum;
+the string contents is parsed according to the rules of the
+.B C
+language, except that the trailing zero is not appended automatically.
+Examples:
+
+.nf
+	.byte 8, "potatoes"
+	.word ?[3]
+	.word 0777, 0xfed, 0x55aa55aa[label2-label1]
+.fi
+
+.\"-------------------------------
+.TP
+.B .ascii
+is a synonym for
+.BR .byte ,
+recognized to mimic other assemblers.
+.\"-------------------------------
+.TP
+.BI .align " boundary [, filler]"
+advances the point up to the nearest multiple of
+.I boundary
+by emitting the necessary amount of bytes.
+.I filler
+expression may be given to specify the value of the padding bytes; if
+the filler is omitted, the value of 0x20
+.RB ( "pfix 0" )
+is used if current segment is
+.B text,
+the value of 0 for any other segment.
+.I boundary
+must be a power of two, and also a constant expression;
+.I filler
+may be an arbitrary expression.  Examples:
+
+.nf
+	.align 4, 0x20
+	.align 8, user_defined_filler
+.fi
+.\"-------------------------------
+.TP
+.BI .globl " name"
+declares
+.I name
+to be visible to linker.  If
+.I name
+is also defined in this file, it is called a
+.I public
+name, otherwise a
+.I external
+name.  The
+.B .globl
+directive may either precede or follow the name definition, except
+when the definition a label thus named: in this case,
+.B .globl
+must precede the label, or
+.B ast
+will not be able to recognize that the label starts a new fragment.
+.\"-------------------------------
+.TP
+.BI .comm " name\fR,\fI size"
+reserve a
+.I common block
+of
+.I size
+bytes long in the
+.B bss
+segment, and place the label
+.I name
+at the start of it.  The
+.I name
+is automatically declared global, so it does not need a separate
+.BR .globl .
+Essentially this directive creates a new fragment
+.I name
+in the
+.B bss
+segment.  The name also receives a special
+.I common
+flag, which tells the linker to expect multiple occurencies of this
+fragment in different files, and merge them silently, choosing the
+bigger size if they are not equal (this maximizationr is not yet
+implemented, if I can recall).  This directive poorly fits in TTOOLS
+ideology, and was a pain to implement, but you need it to assemble
+code generated by C compilers.
+.\"-------------------------------
+.TP
+.BI .need " name"
+add
+.I name
+to the
+.I need list
+of the fragment this directive appears in.  This directive is only
+necessary when
+.B ast
+cannot figure the dependency itself, which is a rare case,
+probably only arising in startup routines.
+.\"-------------------------------
+.TP
+.BI .slot " width"
+this directive may be used to specify the exact size in bytes for the
+next command emitted in the current segment.  By default,
+.B ast
+tries to minimize the size of generated commands; this directive
+cancels this behaviour for one command.  If the actual generates
+command turns out narrower than
+.IR width ,
+it is padded with no-ops
+.RB ( "pfix 0" )
+from the left.  If the actual generates
+command turns out wider than
+.IR width ,
+.B ast
+(or 
+.BR lit ,
+or a loader) will flag this as error.
+.I width
+must be a constant expression.
+.\"-------------------------------
+.TP
+.BI . segment "\fR, segment switch directives\fI"
+anything looking like a directive (starting from a dot) and not
+matching the directives enumerated above is considered a directive
+for setting up
+.I segment
+as the current segment, creating it if necessary.  This catchall
+behaviour is rather error-prone, but that is the cost of having both
+unlimited number of segments and traditionally looking segment
+switching directives.
+.\"-------------------------------
+.SS COMMENTS
+.B ast
+recognizes C++-style comments of both flavors, that is
+
+.nf
+	// this is a comment spanning up to the end of line
+	/* this is your ordinary embeddable comment */
+.fi
+
+.\"-------------------------------
+.SS MISCELLANEOUS
+Newline characters in the input are treated as mere whitespace, so you
+may write multiline commands if you wish.
+.PP
+Semicolon
+.RB (' ; ')
+is considered an empty statement.  You might want to separate commands
+written on one line with semicolons to improve readablilty and help
+.B ast
+recover from syntax errors, if any.  This is not required, though, as
+the syntax of the language allows for recognition of statement
+boundaries without any special separators, be that semicolons or
+newlines.
+.PP
+Identifiers may contain any of the characters [0-9a-zA-Z_.$@], the
+leading character must be one of [a-zA-Z_$@].
+.\"-------------------------------
+.SH OFFSETS OPTIMIZATION AND OTHER INNER WORKINGS OF ast
+The need for offset optimization is due to an interesing feature of
+transputer hardware: the dependence of command size on the value of
+the command's argument.  A command may require from one to eight bytes
+to encode, depending on its argument's value.  Choosing the minimal
+possible size for every command is an aim for every transputer
+programming system, because this gives more comact and faster code.
+.PP
+.B ast
+uses the following procedure to minimize command sizes.  First, the
+entire input file is parsed and translated into an internal form.
+The internal form looks like a linked list of
+.I elements
+of three types:
+.BR BLOCK ,
+.BR DATA ,
+and
+.BR CMD .
+.PP
+The
+.B BLOCK
+element is a plain sequence of bytes, resulting from translation of
+commands with constant arguments and data with known values and sizes.
+The size of a
+.B BLOCK
+element is always a constant.
+.PP
+The
+.B DATA
+and
+.B CMD
+elements result from translation of commands or data whose arguments
+are not constants, but rather expressions containing variable
+components, such as names and sizes of elements.  For every element,
+.B ast
+computes the
+.I interval
+where the future size of the element will lie.
+.PP
+Once the internal form is built,
+.B ast
+traverses the elements list repeatedly, recomputing sizes of elements
+based on the estimation of arguments' values.  When an element is
+found whose assigned size interval was wider than is necessary
+for the current estimation of the argument, the interval is
+narrowed.  This creates chances for other elements, whose arguments
+depend on that interval, to be narrowed too.  The process continues
+with estimations becoming better and better on every iteration, until
+no more shrinks can be made.
+.PP
+Actually, the fact that
+.B ast
+cannot optimize further does not mean that no longer optimization is
+possible.  In link time, when external references of the program are
+resolved, there will be new opportunities to optimize, and
+.B lit
+can do that.  So
+.B ast
+writes the element chains, including the variable elements, down to
+the output object file; thanks to LIT object file format which have
+means to represent variable elements (see
+.BR lit (5)).
+.\"-------------------------------
+.SH BUGS
+There are always bugs, even if we fancy we have none\ :-(.  I would be
+grateful if you let me know of mine; so if you find any, please submit
+a description of the bug and the assembly language program the bug
+exposes on (preprocessed, if the program requires a preprocessor \- my
+preprocessor and include files may differ from yours!) to
+bug-ttools@botik.ru.  Same for errors in this man page.
+.\"-------------------------------
+.SH "SEE ALSO"
+.BR dast (1),
+.BR lit (1),
+.BR lit (5),
+.BR litdump (1),
+.BR ttools (1)
+.\"-------------------------------
+.SH AUTHOR
+.B ast
+is written by Yury Shevchuk (sizif@botik.ru)
+.\"-------------------------------

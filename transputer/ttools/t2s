@@ -1,0 +1,10 @@
+#!/usr/bin/sed -f
+
+# Quick hack Kroc to TTOOLS assembly language format converter.
+# I don't have Kroc output specifications handy, so this is incomplete.
+# Please elaborate as needed.
+
+s,--,//,g
+s,align,.align 4,
+s,global,.globl,
+/^[ 	]*descriptor/,/"$/s,^,//,

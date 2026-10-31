@@ -1,0 +1,3 @@
+legacy bootconsole [earlycon15] enabled
+legacy console [ttyS0] enabled
+legacy bootconsole [earlycon15] disabled

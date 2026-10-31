@@ -117,6 +117,7 @@ DEF-arm64-NetBSD   = $(DEF-arm64) -DTARGETOS_NetBSD
 DEF-arm64-OpenBSD  = $(DEF-arm64) -DTARGETOS_OpenBSD
 DEF-arm64-win32    = $(DEF-arm64) -DTCC_TARGET_PE
 DEF-riscv64        = -DTCC_TARGET_RISCV64
+DEF-transputer     = -DTCC_TARGET_TRANSPUTER
 DEF-c67            = -DTCC_TARGET_C67 -w # disable warnigs
 DEF-x86_64-FreeBSD = $(DEF-x86_64) -DTARGETOS_FreeBSD
 DEF-x86_64-NetBSD  = $(DEF-x86_64) -DTARGETOS_NetBSD
@@ -134,7 +135,7 @@ all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 
 # cross compiler targets to build
 TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm64-win32 arm-wince c67
-TCC_X += riscv64 arm64-osx
+TCC_X += riscv64 arm64-osx transputer
 # TCC_X += arm-fpa arm-fpa-ld arm-vfp arm-eabi
 
 # cross libtcc1.a targets to build
@@ -217,6 +218,7 @@ arm64-osx_FILES = $(arm64_FILES) tccmacho.c
 arm64-win32_FILES = $(arm64_FILES) tccpe.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
+transputer_FILES = $(CORE_FILES) transputer-gen.c transputer-link.c transputer-asm.c transputer-enc.h transputer-opcodes.h lib/transputer-tvx/tvx.h
 
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 
@@ -265,6 +267,10 @@ $(X)%.o : %.c $(LIBTCC_INC)
 # additional dependencies
 $(X)tcc.o : tcctools.c
 $(X)tcc.o : DEFINES += $(DEF_GITHASH)
+# Transputer backend files need TCC_TARGET_TRANSPUTER defined
+transputer-gen.o : DEFINES += -DTCC_TARGET_TRANSPUTER
+transputer-link.o : DEFINES += -DTCC_TARGET_TRANSPUTER
+transputer-asm.o : DEFINES += -DTCC_TARGET_TRANSPUTER
 
 # Host Tiny C Compiler
 tcc$(EXESUF): tcc.o $(LIBTCC)
@@ -380,6 +386,9 @@ install-unx:
 	$(call IBw,$(PROGS) *-tcc,"$(bindir)")
 	$(call IFw,$(LIBTCC1) $(EXTRA_O) $(LIBTCC1_U),"$(tccdir)")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
+ifneq "$(wildcard transputer-tcc$(EXESUF))$(filter transputer,$(ARCH))" ""
+	$(call IF,$(TOPSRC)/include/transputer/*.h,"$(tccdir)/include/transputer")
+endif
 	$(call $(if $(findstring .so,$(LIBTCC)),IBw,IFw),$(LIBTCC),"$(libdir)")
 	$(call IF,$(TOPSRC)/libtcc.h,"$(includedir)")
 	$(call IFw,tcc.1,"$(mandir)/man1")

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Skip list for transputer tests.
+#
+# These are skipped because the *test environment* cannot support them, not
+# because the compiler is wrong.  Tests run bare-metal on the T4 emulator
+# against the minimal header set in transputer/c-testsuite/include (assert,
+# ctype, errno, limits, stdarg, stdbool, stddef, stdint, stdio, stdlib,
+# string), with no filesystem and no libm.
+#
+# Do NOT add tests here to hide a miscompilation.  A red test you understand
+# is more useful than a green one you have silenced; real codegen bugs stay
+# failing until they are fixed.  Every entry must name the missing facility.
+cat <<'EOF'
+./tests/single-exec/00174.c
+./tests/single-exec/00187.c
+./tests/single-exec/00220.c
+EOF
+
+# Tests tagged tvx use TVX instructions, which only -mt9000tvx has.  The
+# runner adds it when TP_EXTRA_CFLAGS picks no part; with another part
+# picked the processor has no TVX, so they cannot run.
+target=$(printf '%s\n' ${TP_EXTRA_CFLAGS:-} | grep '^-mt' | tail -n 1 || true)
+case "$target" in
+""|-mt9000tvx) ;;
+*) grep -lx tvx ./tests/single-exec/*.c.tags | sed 's/\.tags$//' ;;
+esac
+# Tests tagged move2d use the 2D block move, which the T414 lacks.
+case "$target" in
+-mt414) grep -lx move2d ./tests/single-exec/*.c.tags | sed 's/\.tags$//' ;;
+esac
+
+# 00174 - #include <math.h>: no math.h in the harness include set and no libm.
+#         Note this leaves its float coverage *untested* rather than passing;
+#         supplying math.h would be better than skipping it.
+# 00187 - fopen/fwrite/fread/fgetc on a real file; the bare-metal harness has
+#         no filesystem, so the program emits no output at all.
+# 00220 - #include <wchar.h> plus wide-character/UTF-8 handling; neither the
+#         header nor wchar_t support exists here.

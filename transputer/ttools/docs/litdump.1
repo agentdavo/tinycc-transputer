@@ -1,0 +1,66 @@
+.\" -*- nroff -*-
+.\" Copyright 1995 by Yury Shevchuk.  All Rights Reserved.
+.\" This file may be copied under the terms of GNU General Public License.
+.\"
+.Id $Id: litdump.1,v 1.1.1.1 1995/12/22 12:24:39 sizif Exp $
+.TH litdump 1 "$Date: 1995/12/22 12:24:39 $" "botik" "TTOOLS"
+.\"-------------------------------
+.SH NAME
+litdump \- LIT object/executable format browsing utility
+.\"-------------------------------
+.SH SYNOPSIS
+.BR litdump [ options ]
+.I FILE
+.\"-------------------------------
+.SH DESCRIPTION
+.B lidump
+prints the contents of the LIT format
+.I FILE
+in human-readable form.
+.\"-------------------------------
+.SH OPTIONS
+.\"-------------------------------
+.TP
+.B --help
+show usage summary
+.\"-------------------------------
+.TP
+.BI -o " F\fR," " --output" " F"
+output the dump to file
+.I F\fR.
+Default is to output to stdout.
+.\"-------------------------------
+.TP
+.B -E, --expr-print-long
+Affects the way expressions are printed in the dump.  Giving this
+option once causes elements and
+.I noname
+symbols referred from
+.B ELEMENT
+and
+.B NAME
+expressions to be prefixed with their memory addresses.  Giving this
+option twice results in
+.I every
+expression being prefixed with its memory address.
+.\"-------------------------------
+.TP
+.BI -d " S\fR," " --disassemble" " S"
+consider the contents of the segment
+.I S
+as machine instructions (rather than data), and print them in
+disassembled form instead of hex dump.  This option may be given more
+than once.
+.\"-------------------------------
+.SH BUGS
+If you find any, please submit a description of the bug and the
+data the bug exposes on to bug-ttools@botik.ru.
+.SH "SEE ALSO"
+.BR ast (1),
+.BR lit (1),
+.BR dast (1)
+.\"-------------------------------
+.SH AUTHOR
+.B litdump
+is written by Yury Shevchuk (sizif@botik.ru)
+.\"-------------------------------

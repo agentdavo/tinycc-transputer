@@ -1,0 +1,15 @@
+/*
+ * Assembly helper for test_tinycore_abi_mixed.
+ */
+
+.section .text,"ax"
+
+.global abi_call_c_helper
+abi_call_c_helper:
+    .byte 0x21, 0x20, 0x20, 0x20
+    .byte 0x20, 0x20, 0x20, 0x40
+    .byte 0x24, 0x41
+    .byte 0x20, 0xF0
+    .byte 0xE0
+    call abi_callee
+    .byte 0x22, 0xF0
