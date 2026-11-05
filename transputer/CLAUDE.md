@@ -1648,7 +1648,7 @@ void __outword(const void *chan, int word);
  * To do that, write the entry address into the Iptr slot at Wptr[-1] and
  * hand the descriptor to __runp; see PSetup() in lib/transputer-conc.c. */
 void __startp(void *wptr, int entry_offset); /* Start process */
-void __endp(void);                          /* End process */
+void __endp(void *successor);               /* Join at successor workspace */
 void __runp(int descriptor);                /* Schedule Wptr|priority */
 void __stopp(void);                         /* Stop process */
 
@@ -1682,8 +1682,8 @@ int  __testpranal(void); /* 1 if the processor booted after Analyse */
  *
  * See include/conc.h for the wrapped form (ChanAlt/ChanSkipAlt/ChanTimerAlt).
  */
-void __alt(void);  int __altwt(void);  void __altend(void);
-void __talt(void); int __taltwt(void);
+void __alt(void);  void __altwt(void);  void __altend(void);
+void __talt(void); void __taltwt(void);
 void __enbc(int guard, const void *chan);   /* AReg=guard, BReg=chan */
 void __enbt(int guard, unsigned int time);  /* AReg=guard, BReg=time */
 void __enbs(int guard);

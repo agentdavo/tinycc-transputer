@@ -614,7 +614,7 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___in,          "eee", gen_builtin_in,          1 },
         { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1 },
         { TOK___outword,     "ee",  gen_builtin_outword,     1 },
-        { TOK___tin,         "e",   gen_builtin_tin,         0 },
+        { TOK___tin,         "e",   gen_builtin_tin,         1 },
         { TOK___resetch,     "e",   gen_builtin_resetch,     0 },
         { TOK___move,        "eee", gen_builtin_move,        1 },
         { TOK___move2dinit,  "eee", gen_builtin_move2dinit,  1 },
@@ -628,14 +628,14 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___mint,        "",    gen_builtin_mint,        0 },
         { TOK___ldpri,       "",    gen_builtin_ldpri,       0 },
         { TOK___startp,      "ee",  gen_builtin_startp,      1 },
-        { TOK___endp,        "",    gen_builtin_endp,        1 },
+        { TOK___endp,        "e",   gen_builtin_endp,        1 },
         { TOK___runp,        "e",   gen_builtin_runp,        1 },
         { TOK___stopp,       "",    gen_builtin_stopp,       1 },
         { TOK___alt,         "",    gen_builtin_alt,         1 },
-        { TOK___altwt,       "",    gen_builtin_altwt,       0 },
+        { TOK___altwt,       "",    gen_builtin_altwt,       1 },
         { TOK___altend,      "",    gen_builtin_altend,      1 },
         { TOK___talt,        "",    gen_builtin_talt,        1 },
-        { TOK___taltwt,      "",    gen_builtin_taltwt,      0 },
+        { TOK___taltwt,      "",    gen_builtin_taltwt,      1 },
         { TOK___enbc,        "ee",  gen_builtin_enbc,        1 },
         { TOK___enbs,        "e",   gen_builtin_enbs,        1 },
         { TOK___enbt,        "ee",  gen_builtin_enbt,        1 },
@@ -649,7 +649,7 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___stlf,        "e",   gen_builtin_stlf,        1 },
         { TOK___stlb,        "e",   gen_builtin_stlb,        1 },
         { TOK___gajw,        "e",   gen_builtin_gajw,        0 },
-        { TOK___wcnt,        "",    gen_builtin_wcnt,        0 },
+        { TOK___wcnt,        "e",   gen_builtin_wcnt,        0 },
         { TOK___seterr,      "",    gen_builtin_seterr,      1 },
         { TOK___testerr,     "",    gen_builtin_testerr,     0 },
         { TOK___sethalterr,  "",    gen_builtin_sethalterr,  1 },
@@ -4357,13 +4357,7 @@ void gen_builtin_out(void) {
 }
 
 void gen_builtin_tin(void) {
-    /* Timer Input: __tin(time) - block until the current-priority clock
-     * is after `time`.  Leaves a result in AReg. */
     tp_emit_1op(TP_OPR_TIN);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
 }
 
 void gen_builtin_outbyte(void) {
@@ -4383,12 +4377,7 @@ void gen_builtin_alt(void) {
 }
 
 void gen_builtin_altwt(void) {
-    /* ALT WAIT - returns selected index */
     emit_instr(TP_OP_OPR, TP_OPR_ALTWT);
-    abcreg_push(1);  /* Result in A */
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
 }
 
 void gen_builtin_altend(void) {
@@ -4402,12 +4391,7 @@ void gen_builtin_talt(void) {
 }
 
 void gen_builtin_taltwt(void) {
-    /* TIMED ALT WAIT - returns selected index */
     emit_instr(TP_OP_OPR, TP_OPR_TALTWT);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
 }
 
 /* ALT guard enable/disable.
@@ -4496,17 +4480,13 @@ void gen_builtin_resetch(void) {
 }
 
 void gen_builtin_startp(void) {
-    /* START PROCESS: __startp(workspace, entry)
-     * eval: A=entry(1), B=workspace(0).
-     * Note `entry` is an offset relative to the *next* IPtr, not an
-     * address - see PSetup in lib/transputer-conc.c, which uses runp
-     * instead for exactly that reason. */
-    tp_emit_2op(TP_OPR_STARTP, 0, 1);
+    /* A is the child workspace, B the byte offset from the next IPtr. */
+    tp_emit_2op(TP_OPR_STARTP, 1, 0);
 }
 
 void gen_builtin_endp(void) {
-    /* END PROCESS - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_ENDP);
+    /* A points to the successor's join record. */
+    tp_emit_1op(TP_OPR_ENDP);
 }
 
 void gen_builtin_runp(void) {
@@ -4752,10 +4732,8 @@ void gen_builtin_crcword(void) {
 }
 
 void gen_builtin_wcnt(void) {
-    /* WORD COUNT - no args from frontend, returns value
-     * Note: This is WCNT opcode which returns word count info
-     */
-    emit_instr(TP_OP_OPR, TP_OPR_WCNT);
+    /* Return the signed word offset in A. The byte selector in B is unused. */
+    tp_emit_1op(TP_OPR_WCNT);
     abcreg_push(1);
     vpushi(0);
     vtop->r = REG_IRET;
