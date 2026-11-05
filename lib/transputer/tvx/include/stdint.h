@@ -1,5 +1,5 @@
 /* <stdint.h> for building the vendored TVX headers into the transputer
- * runtime (lib/transputer-tvx.c, built with -nostdinc: tcc would otherwise
+ * runtime (lib/transputer/transputer-tvx.c, built with -nostdinc: tcc would otherwise
  * find the host's /usr/include). */
 #ifndef TP_TVX_STDINT_H
 #define TP_TVX_STDINT_H

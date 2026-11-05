@@ -7,7 +7,7 @@
  * claiming their include guard keeps those decoders' codebooks out of this
  * object. */
 #define TVX_GGUF_DECODE_H
-#include "transputer-tvx/tvx_vec.h"
+#include "tvx/tvx_vec.h"
 
 /* acc + sum over nblk blocks of dot(decode(block), act[256]) */
 static float tvx_iqdot(const uint8_t *blk, const float *act, uint32_t nblk,

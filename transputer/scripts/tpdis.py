@@ -11,7 +11,7 @@ T9000 ones it names when it finds them); anything else prints as
 opr#<code>.
 
 Handy for checks such as "this function has no j or lend" - the timeslice
-points (see lib/transputer-conc.c):
+points (see lib/transputer/transputer-conc.c):
 
     tpdis.py conc.o __tp_proc_stop | grep -E ': (j |lend)'
 """

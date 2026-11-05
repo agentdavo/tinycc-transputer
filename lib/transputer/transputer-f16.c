@@ -1,12 +1,12 @@
 /* The 16-bit float conversions, for every target without TVX: binary16
  * (_Float16, __fp16) and bfloat16, held in the low half of a word, bit for
- * bit as the TVX conversions in transputer-tvx/tvx.h.  transputer-gen.c calls
+ * bit as the TVX conversions in tvx/tvx.h.  transputer-gen.c calls
  * these where -mt9000tvx would emit F16TOR32, R32TOF16 and R32TOBF16;
  * bfloat16 -> float is a shift, done inline.  A float travels as one word,
  * so they are written over integers and use no floating point.
  *
  * Built into every transputer runtime (transputer-libtcc1*.a).  Plain C, so
- * it also builds on the host to be checked against transputer-tvx/tvx.h.
+ * it also builds on the host to be checked against tvx/tvx.h.
  */
 
 typedef unsigned int u32;

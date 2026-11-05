@@ -5,7 +5,7 @@
  *
  * Wptr is the transputer's frame pointer and stack pointer at once, so VLAs
  * cannot move it: they come from the running process's arena
- * (lib/transputer-vla.c).  This checks the cases that used to break when
+ * (lib/transputer/transputer-vla.c).  This checks the cases that used to break when
  * they did move it - locals and parameters next to a VLA, loops, nested
  * scopes, goto, break/continue and return out of VLA scopes, VLAs in called
  * and recursive functions, statement expressions, 2-D VLAs (whose rows

@@ -18,7 +18,7 @@ printf '%s\n' "Connect HOST to processor 0 link 0" "Connect HOST to processor 1 
 for n in 0 1; do
     # __vxfer is a TVX instruction
     "$R/transputer-tcc" -mt9000tvx -static -nostdlib -I"$R/include" -DNODE=$n -o n$n.elf \
-        "$T/test_boot.S" "$HERE/vlink.c" "$R/lib/transputer-conc.c" "$R/transputer-libtcc1.a" &&
+        "$T/test_boot.S" "$HERE/vlink.c" "$R/lib/transputer/transputer-conc.c" "$R/transputer-libtcc1.a" &&
     "$R/transputer-netload" n$n.elf n$n.btl >/dev/null 2>&1 || { echo "node $n: build failed"; exit 1; }
 done
 export SPYNET=vlink.map

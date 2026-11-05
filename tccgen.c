@@ -25,7 +25,7 @@
    transputer/t4/tvx.h so the compiler builds without transputer/ (synced by
    transputer/scripts/sync-tvx-headers.sh).  Used here to fold __bf16
    conversions of constants. */
-#include "lib/transputer-tvx/tvx.h"
+#include "lib/transputer/tvx/tvx.h"
 #endif
 
 /********************************************************/

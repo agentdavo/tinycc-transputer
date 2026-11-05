@@ -6,7 +6,7 @@
  * the quantised dots) runs over a few thousand inputs, and each group's
  * results go into one hash.  The test has no Target line, so it runs on
  * every part: at -mt9000tvx t4 executes the instructions, everywhere else
- * the calls go to lib/transputer-tvx*.c, and the expected hashes (taken
+ * the calls go to lib/transputer/transputer-tvx*.c, and the expected hashes (taken
  * from the -mt9000tvx run) must match on all of them.
  *
  * The inputs are real GGUF blocks (Qwen3.8-27B and the DeepSeek/Qwen zoo)

@@ -7,7 +7,7 @@
  * processor: one per program here, shared by all its processes.  Besides the
  * GGUF block formats QDOT takes F32 (0), F16 (1) and BF16 (30) weights in
  * blocks of 32. */
-#include "transputer-tvx/tvx_gguf_decode.h"
+#include "tvx/tvx_gguf_decode.h"
 
 static int tvx_quant_fmt;
 

@@ -628,7 +628,7 @@ The transputer has a 3-deep hardware evaluation stack (AReg, BReg, CReg). TCC's 
   whose body has no `j` (`while (!flag) ;`, a summing loop) never yields to
   another low-priority process: spinning on a flag that one of them sets
   never ends.  Wait on a channel or timer instead (`include/conc.h`).
-  `lib/transputer-conc.c` *relies* on this: its process-record search must
+  `lib/transputer/transputer-conc.c` *relies* on this: its process-record search must
   contain no timeslice point (see "Variable-length arrays"), so if loop
   back-edges ever become `j`, that search needs another shape.
 
@@ -1216,7 +1216,7 @@ evidence: **`transputer/TVX-ISA.md`**.
 - Semantic core: `transputer/t4/tvx.h` — shared by the emulator *and* by
   `tccgen.c` for `__bf16` constant folding, so the two cannot diverge.  The
   compiler carries verbatim copies of it and of `tvx_iq.h`, `tvx_vec.h`,
-  `tvx_gguf_tables.h` and `tvx_gguf_decode.h` in `lib/transputer-tvx/`, so
+  `tvx_gguf_tables.h` and `tvx_gguf_decode.h` in `lib/transputer/tvx/`, so
   it builds without transputer/; after changing one in t4 run
   `sh transputer/scripts/sync-tvx-headers.sh` (`--check` only compares).
 - Two axes: block instructions (`MXFP4DOT`/`BF16DOT`/`MXFP4GEMV`, 32 or N×32
@@ -1241,7 +1241,7 @@ evidence: **`transputer/TVX-ISA.md`**.
   `test_tvx_qwen38.c` checks QDOT on them on every part (the instruction
   at -mt9000tvx, software TVX elsewhere); `test_gguf_decode_parts.c`
   compiles the same decoders (`t4/tvx_gguf_decode.h`, against the libc-free
-  `lib/transputer-tvx/include`) for whatever part is selected and checks
+  `lib/transputer/tvx/include`) for whatever part is selected and checks
   decode and dots bit for bit, so it also covers soft-float on real data.
   Both pass on -mt9000, -mt9000tvx, -mt805, -mt800, and on -mt425/-mt414
   under t4's strict `-s425`/`-s414`.
@@ -1256,7 +1256,7 @@ Plain `-mt9000`, still the default, is the T9000 (the RTL core) without
 TVX; the T9000's VCP builtins and the T9 core's T&L temps (`__tld` ..
 `__fpoly3`) need `-mt9000` or more.  Every target without TVX converts
 `__bf16`/`__fp16`/`_Float16` and runs the four 16-bit conversion builtins
-through `lib/transputer-f16.c` (bit for bit the TVX instructions; in every
+through `lib/transputer/transputer-f16.c` (bit for bit the TVX instructions; in every
 runtime archive), so 16-bit float code compiles everywhere.  The kernel uses
 CSUM for `do_csum` only under `__TVX__`, and the TVX tests carry
 `Target: -mt9000tvx` (local) or the `tvx` tag (c-testsuite).
@@ -1270,11 +1270,11 @@ calls into the runtime - the MX/bfloat16 scalar and SIMD ones
 `__iq1mdot`, `__iq2xxsdot`, `__iq3xxsdot`, `__qsetfmt`, `__qdot`).
 `tp_soft_tvx_descs` in `transputer-gen.c` lists them, with their parameter
 types (each argument is cast, then `__tvx_<name>` is called);
-`lib/transputer-tvx.c`, `-tvx-iq.c` and `-tvx-qdot.c` implement them by
+`lib/transputer/transputer-tvx.c`, `-tvx-iq.c` and `-tvx-qdot.c` implement them by
 repeating t4's p.c code for each instruction on the vendored headers, with the
 same float operations in the same order.  They are three objects so that
 `__bf16add2` does not pull in 55 KB of GGUF codebooks; they need no libc
-(built `-nostdinc` against `lib/transputer-tvx/include`), and the i-quant
+(built `-nostdinc` against `lib/transputer/tvx/include`), and the i-quant
 and QDOT helpers put about 1.3 KB on the caller's workspace (a decoded block).
 The QSETFMT latch is one static per program.  The rest - vector kernels
 (`__vsetlen` ..), block rotation, `__qgemm`/`__vq8k`/`__vq80`/`__vsetfmt`,
@@ -1353,7 +1353,7 @@ byte-identical).
 
 - **Soft float.** Every float/double operation becomes a call to a
   libgcc-named helper (`__adddf3`, `__ltsf2`, `__floatsidf`, `__fixdfsi`,
-  `__truncdfsf2`, ...) in `lib/transputer-softfp.c`: IEEE 754
+  `__truncdfsf2`, ...) in `lib/transputer/transputer-softfp.c`: IEEE 754
   round-to-nearest-even with subnormals, signed zeros, infinities and NaNs,
   no exception flags.  Floats already live in workspace words and a double
   is passed and returned like a long long, so they are ordinary calls
@@ -1364,7 +1364,7 @@ byte-identical).
   bit as the TVX instructions.  The file is plain C, checked on the host:
   2x10^8 random and special-value checks of the arithmetic against x86-64
   SSE, square roots against libm, and the 16-bit conversions against
-  `lib/transputer-tvx/tvx.h` for all 2^32 inputs - no differences.  Most
+  `lib/transputer/tvx/tvx.h` for all 2^32 inputs - no differences.  Most
   single-length helpers and the double arithmetic run in assembly instead
   (see "The FP-support instructions" below), with this C as their slow
   path.
@@ -1435,7 +1435,7 @@ byte-identical).
 - **The FP-support instructions** (2026-11-03).  The T414 and T425 both
   have `unpacksn` (#63), `postnormsn` (#6C), `roundsn` (#6D), `ldinf`
   (#71) and `cflerr` (#73) (TCWG 7.11, D.4; t4 `-s425`/`-s414` run them),
-  and `lib/transputer-softfp-sn.S` is single precision on them the way
+  and `lib/transputer/transputer-softfp-sn.S` is single precision on them the way
   INMOS's T414 REAL32 runtime is (`t4/examples/sqrroots/sqrroots.b4h`):
   `unpacksn` gives the fraction with its leading 1 at bit 31 and the biased
   exponent, `norm; postnormsn; roundsn` packs B:A with W[0] = exponent,
@@ -1466,7 +1466,7 @@ byte-identical).
     1120 -> 207, double to float 967 -> 225, a degree-6 Horner polynomial
     x6.4, a dot product x6.9; t4 instruction counts fall by similar
     factors.  +1 KB of runtime when floats are used.
-  - **Doubles** (`lib/transputer-softfp-db.S`): `__adddf3`, `__subdf3`,
+  - **Doubles** (`lib/transputer/transputer-softfp-db.S`): `__adddf3`, `__subdf3`,
     `__muldf3` and `__divdf3` the same way on the long arithmetic, with
     the rounding (`PACK`) by hand, since `roundsn` is single-length only:
     multiply is four `lmul` into 128 bits; divide is Knuth's algorithm D
@@ -1513,7 +1513,7 @@ locals 0..N; `00207` hung.  Now **`WPtr` never moves**.
   `gen_vla_result`, as it does for Win64 (a target-list addition).  Being
   ordinary `gfunc_call`s, the restores spill whatever the vstack holds -
   the return value, a statement expression's value - first.
-- **Whose arena** (`lib/transputer-vla.c`, `lib/transputer-conc.c`):
+- **Whose arena** (`lib/transputer/transputer-vla.c`, `lib/transputer/transputer-conc.c`):
   processes share globals and no instruction names the running process,
   so the only thing a process owns is `WPtr`, inside its workspace.
   `PSetup` now starts every process in `__tp_proc_start(func, ws)`, entered
@@ -1646,7 +1646,7 @@ void __outword(const void *chan, int word);
  * __startp's `entry` is an offset relative to the NEXT IPtr, not an address,
  * and it schedules immediately - so it cannot launch a function by pointer.
  * To do that, write the entry address into the Iptr slot at Wptr[-1] and
- * hand the descriptor to __runp; see PSetup() in lib/transputer-conc.c. */
+ * hand the descriptor to __runp; see PSetup() in lib/transputer/transputer-conc.c. */
 void __startp(void *wptr, int entry_offset); /* Start process */
 void __endp(void *successor);               /* Join at successor workspace */
 void __runp(int descriptor);                /* Schedule Wptr|priority */
@@ -1775,7 +1775,7 @@ when the message got through, 1 when it was abandoned (and the channel
 reset), -1 for a workspace under `PROC_WS_MIN`.  The TimeFail pair had been
 declared but never defined (`REVIEW-afcc4dfe.md` item 23).
 
-- **How** (`lib/transputer-conc.c`, `xfail`): the transfer runs in a
+- **How** (`lib/transputer/transputer-conc.c`, `xfail`): the transfer runs in a
   high-priority helper process in the caller's `ws`; the caller ALTs on the
   helper's completion channel and the timer or kill channel, and on a
   timeout resets the channel - the helper, waiting on it, is then on no

@@ -74,10 +74,10 @@ declare -A EXTRA_SOURCES=(
     [test_xfile_a]="test_xfile_b.c"
     [test_longlong]="lib64_runtime.c"
     [test_llong_call_arg_pair]="lib64_runtime.c"
-    [test_conc_alt]="../../lib/transputer-conc.c"
-    [test_return_timeslice]="../../lib/transputer-conc.c"
-    [test_vla]="../../lib/transputer-vla.c ../../lib/transputer-conc.c"
-    [test_xlink]="../../lib/transputer-conc.c"
+    [test_conc_alt]="../../lib/transputer/transputer-conc.c"
+    [test_return_timeslice]="../../lib/transputer/transputer-conc.c"
+    [test_vla]="../../lib/transputer/transputer-vla.c ../../lib/transputer/transputer-conc.c"
+    [test_xlink]="../../lib/transputer/transputer-conc.c"
     [test_reloc_iprel_fwd]="test_reloc_iprel_fwd_helper.c"
     [test_reloc_iprel_bwd]="test_reloc_iprel_bwd_helper.c"
     [test_reloc_duplocal]="test_reloc_duplocal_helper.c"
@@ -94,7 +94,7 @@ declare -A EXTRA_SOURCES=(
 # headers; built for the target they get the libc-free include set software
 # TVX is built with.
 declare -A EXTRA_CFLAGS=(
-    [test_gguf_decode_parts]="-nostdinc -I$ROOT_DIR/lib/transputer-tvx/include"
+    [test_gguf_decode_parts]="-nostdinc -I$ROOT_DIR/lib/transputer/tvx/include"
 )
 
 declare -A FORCE_SKIP=(

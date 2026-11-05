@@ -1777,7 +1777,7 @@ static int tp_t414(void)
 }
 
 /* -mt9000tvx: the only target with the TVX extension.  Everywhere else the
- * 16-bit float conversions call the helpers in lib/transputer-f16.c. */
+ * 16-bit float conversions call the helpers in lib/transputer/transputer-f16.c. */
 static int tp_tvx(void)
 {
     return tcc_state && tcc_state->tp_tvx;
@@ -3681,7 +3681,7 @@ ST_FUNC void gen_fill_nops(int bytes) {
  * local is an ldl/stl at a fixed offset from it, so moving Wptr re-bases
  * every later local access (and the array lands on top of locals 0..N).
  * Wptr therefore never moves.  VLAs come from the running process's arena
- * (lib/transputer-vla.c), and the stack-pointer save, adjust and restore
+ * (lib/transputer/transputer-vla.c), and the stack-pointer save, adjust and restore
  * that tccgen asks for operate on the arena's top instead:
  *
  *   gen_vla_sp_save     before a scope's first VLA: slot = __tp_vla_mark()
@@ -3788,7 +3788,7 @@ ST_FUNC void gen_struct_copy(int size) {
 
 /* -mt425/-mt414 soft float.  The T425 and T414 have no FPU, so every
  * floating-point operation becomes a call to the libgcc-named helper that
- * lib/transputer-softfp.c (in transputer-libtcc1-t425.a and -t414.a)
+ * lib/transputer/transputer-softfp.c (in transputer-libtcc1-t425.a and -t414.a)
  * provides.  Float values already live in workspace words, and a float or
  * double is passed and returned exactly like an int or a long long, so
  * these are ordinary calls.  Call `name` on the top `nargs` vstack entries
@@ -5277,7 +5277,7 @@ static void tp_soft_tvx_unary(const char *helper)
 }
 
 /* Software TVX.  Without -mt9000tvx, a TVX builtin with a C version in
- * lib/transputer-tvx*.c (every runtime archive has them) becomes a call to
+ * lib/transputer/transputer-tvx*.c (every runtime archive has them) becomes a call to
  * it, which gives the instruction's result bit for bit; the others stay
  * compile errors.  One letter per argument and for the result: u a word (an
  * unsigned or a pointer), i an int, f a float, v nothing. */

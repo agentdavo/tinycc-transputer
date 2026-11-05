@@ -7,17 +7,17 @@
  *
  * Every function repeats the T4 emulator's implementation of its
  * instruction (transputer/t4/p.c) on the same semantic headers, vendored
- * verbatim in transputer-tvx/, with the same floating-point operations in
+ * verbatim in tvx/, with the same floating-point operations in
  * the same order, so a program gets the same bits with or without TVX.
  * Memory is read the way the instruction reads it: blocks and bfloat16
  * vectors byte by byte, so they need no alignment; f32 activations as
  * words.
  *
  * Built into every transputer runtime (transputer-libtcc1*.a) with
- * -nostdinc against transputer-tvx/include, a libc-free <stdint.h> and
+ * -nostdinc against tvx/include, a libc-free <stdint.h> and
  * friends.  The float arithmetic is the part's own: the FPU on the T800,
- * T805 and T9000, lib/transputer-softfp.c on the T425 and T414. */
-#include "transputer-tvx/tvx.h"
+ * T805 and T9000, lib/transputer/transputer-softfp.c on the T425 and T414. */
+#include "tvx/tvx.h"
 
 /* A little-endian halfword at p, as the instructions read bfloat16 and
  * binary16 values. */

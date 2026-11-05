@@ -6,7 +6,7 @@
  * Expected: SSOFTFPOK\nH
  *
  * Built normally this runs on the FPU; with -mt425 (the FPU-less T425)
- * every operation is a call into lib/transputer-softfp.c, and the results
+ * every operation is a call into lib/transputer/transputer-softfp.c, and the results
  * must be bit-identical.  A NaN result hashes as one value, whatever its
  * sign and payload.  Relations skip NaN operands, found from their bits:
  * t4 gives fpgt/fpeq the T800's total ordering in T9000 mode too (see

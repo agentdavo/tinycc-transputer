@@ -28,7 +28,7 @@ cd "$WORK" || exit 1
 for n in $(seq 0 $((N - 1))); do
     v=0; [ $n -eq 0 ] && v=1
     "$R/transputer-tcc" -mt9000tvx -static -nostdlib -I"$R/include" -I"$T" -DNODE=$n -DVERIFY=$v \
-        -DSCHEME=$SCHEME -o n$n.elf "$T/test_boot.S" "$HERE/ffn_cube.c" "$R/lib/transputer-conc.c" &&
+        -DSCHEME=$SCHEME -o n$n.elf "$T/test_boot.S" "$HERE/ffn_cube.c" "$R/lib/transputer/transputer-conc.c" &&
     "$R/transputer-netload" n$n.elf n$n.btl >/dev/null 2>&1 || { echo "node $n: build failed"; exit 1; }
 done
 export SPYNET=cube.map
