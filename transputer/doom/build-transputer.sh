@@ -14,9 +14,10 @@
 #
 # CPU=t805 (or t800, t425, t414) builds for that part into build-tp-$CPU
 # and links its libtcc1 (the soft-float helpers on the T425/T414).  The
-# default is the T9000, into build-tp.  uClibc-ng's libc.a is built for
-# the T9000 (it has gtu), so an image for another part still needs a libc
-# built for it before it can run there.
+# default is the T9000, into build-tp.  uClibc-ng's lib/libc.a is built
+# for the T9000 (it has gtu, ls, ss), so another part links
+# lib/libc-$CPU.a, which transputer/scripts/build-uclibc-part.sh makes;
+# without it the link falls back to libc.a with a warning.
 #
 set -euo pipefail
 
@@ -32,6 +33,16 @@ case "$CPU" in
     *) echo "ERROR: unknown CPU=$CPU (t9000, t805, t800, t425, t414)"; exit 1 ;;
 esac
 UCLIBC="$TRANS_DIR/uClibc-ng"
+LIBC="$UCLIBC/lib/libc.a"
+if [ "$CPU" != t9000 ]; then
+    if [ -f "$UCLIBC/lib/libc-$CPU.a" ]; then
+        LIBC="$UCLIBC/lib/libc-$CPU.a"
+    else
+        echo "WARNING: no $UCLIBC/lib/libc-$CPU.a: linking the T9000 libc.a," \
+             "which has instructions the $CPU lacks" \
+             "(transputer/scripts/build-uclibc-part.sh $CPU builds one)"
+    fi
+fi
 INITRAMFS="$TRANS_DIR/initramfs"
 
 TCC="$ROOT_DIR/transputer-tcc"
@@ -208,7 +219,7 @@ do_link() {
         "$BUILD_DIR/m_fixed_tp.o" \
         "$BUILD_DIR/fbwm_shm.o" \
         "$syscall_stub" \
-        "$UCLIBC/lib/libc.a" \
+        "$LIBC" \
         "$ROOT_DIR/$LIBTCC1"
 
     local size=$(stat -c%s "$BUILD_DIR/doom.elf" 2>/dev/null || echo "?")
