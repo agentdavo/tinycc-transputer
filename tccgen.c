@@ -7769,13 +7769,23 @@ special_math_val:
                    (struct_layout stores the struct alignment in ref->r), so
                    nothing can be said about the parity of the base address; or
                  - the member sits at an odd offset (an individually packed
-                   member inside an otherwise aligned struct).
+                   member inside an otherwise aligned struct); or
+                 - the member's own alignment is more than the containing
+                   struct's, or more than its offset's: a 4-aligned member
+                   at offset 2 of a #pragma pack(2) struct, which the word
+                   accesses (a struct copied by ldnl/stnl) need to know.
                Backends only consult this for accesses that have an alignment
                precondition, so over-approximating costs code size, never
                correctness. */
-            unaligned = (vtop->r & VT_UNALIGNED)
-                        || (vtop->type.ref->r < 2)
-                        || (cumofs & 1);
+            {
+                int malign;
+                type_size(&s->type, &malign);
+                unaligned = (vtop->r & VT_UNALIGNED)
+                            || (vtop->type.ref->r < 2)
+                            || (cumofs & 1)
+                            || vtop->type.ref->r < malign
+                            || (cumofs & (malign - 1));
+            }
 #endif
             /* add field offset to pointer */
             gaddrof();

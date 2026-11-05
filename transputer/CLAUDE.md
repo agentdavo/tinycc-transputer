@@ -790,8 +790,22 @@ the occam compiler does, and what new codegen should be held to:
   (`tests/bench/doom.sh t800`) gained 6-13% before 4198801b hoisted their
   globals by hand; on the hoisted sources 0.1-0.5%, and the benchmark's
   FixedMul/FixedDiv loops over global arrays 6-7%.
-  `TCC_TRANSPUTER_GADDR=0` turns it off (`TP_SCHED_MASK=0x17f` S10),
+  `TCC_TRANSPUTER_GADDR=0` turns it off (`TP_SCHED_MASK=0x3d7f` S10),
   `TP_GADDR_STATS=1` lists what is kept; `test_gaddr_cache.c`.
+- A one-word struct with word alignment (the ray tracer's `W`, a union of
+  an int and a float) is copied by `ldnl`/`stnl`, not `ldc 4; move`
+  (`gen_struct_copy`).  `VT_UNALIGNED` now also marks a member whose own
+  alignment exceeds its container's or its offset's (a `W` at offset 2 of
+  a `#pragma pack(2)` struct), so packed members keep the byte-wise move.
+  The scheduler's S11 then recomputes the destination where the store
+  needs it instead of parking it: `ldl x; [ldnlp k;] stl a; <e>; ldl a;
+  stnl m` -> `<e>; ldl x; stnl m+k` (S12 folds `ldnlp k; ldnl/stnl m`),
+  so `shadowNode[n_dx] = light[l_dx]` is `ldl 28; ldnl 3; ldl 30; stnl
+  15`.  A local x qualifies when no pointer can reach it: no LDLP hands
+  out the address of its `tp_loc_marks` block (`tps_word_escapes`).
+  -28 M cycles (3,084 M -> 3,056 M, 3.7% over occam; `shadeNode` 634 ->
+  524 a call, occam 498), pictures unchanged.  `TP_SCHED_MASK=0xf7f`
+  turns S11/S12 off; `test_sched_copy.c`.
 - `(x >> K) & m`, where the mask keeps only bits the shift brings down
   from x (m < 2^(32-K)), is the same after an arithmetic or a logical
   shift, so a signed one is `ldc K; shr`, not `xdble; ldc K; lshr`
@@ -830,6 +844,23 @@ the occam compiler does, and what new codegen should be held to:
   `gen_vla_sp_save`.  Running the cleanup at every `vpop` miscompiled
   09103, 09109 and the ray tracer's start-up.
 - `ldlp x` hands out x and x+1 (a double): it reads both.
+- In the relaxation pass a branch can land on a `pfix 0` padding record,
+  or on an instruction an earlier round deleted, and `tps_next` steps over
+  both: a rule that scans forward must check for branch targets over the
+  whole span (`tps_free`), not only on the instructions it visits.  S11's
+  first cut did not, and moved a copy that findRange's `if (c > max) max =
+  c;` jumps over (the ray tracer hung; `test_sched_copy.c`).  Later S11
+  deleted an `ldl` that a `j` landed on, and S5 then carried a value
+  across that join that only the fall-through path had pushed (difftest
+  seeds 13017, 13021).
+- The scheduler computes liveness once per function.  A rule that moves a
+  read of slot x later (S10, S11) makes x live where the bitmask says it
+  is dead, and must set the bits over the span it extends: S11 did not,
+  a second S11 took x for dead and removed its store, and c-testsuite
+  00182 (`*p++ = ' '`), five local tests, difftest seeds 13001.. and the
+  kernel (a BUG in pcpu_setup_first_chunk) all failed.
+  `TP_SCHED_BISECT=lo-hi` keeps S11 to functions whose name hashes into
+  [lo, hi) of 4096, for bisecting such a miscompile over a kernel build.
 - The fused FP loads (`fpldnladdsn`/`fpldnlmulsn` and the `db` forms)
   leave FC undefined (TCWG chapter 11), so nothing may be kept in FC across
   one; pushes, pops, stores, compares and `fprev` carry FC along.  A first
@@ -842,7 +873,8 @@ the occam compiler does, and what new codegen should be held to:
 **Open** (roughly in order of what each would buy on the ray tracer;
 measured in T800 cycles with every instruction counted, fusion off: occam
 2.95 G, TinyCC 3.27 G, 1.11x, where instructions are 1.21x - most of the
-extra instructions are one- and two-cycle loads and stores)
+extra instructions are one- and two-cycle loads and stores.  On
+2026-11-05 it was 3.06 G, 1.04x, instructions 1.12x)
 - Parking through workspace: `ldl`/`stl`/`ldlp` +187 M cycles of the
   318 M gap.  What is left is integer: values parked between operations
   (`ldl a; adc 1; stl 9; ldl 9`), which the FPU-stack work does not reach.
