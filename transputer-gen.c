@@ -10865,6 +10865,26 @@ ST_FUNC void gen_opi(int op) {
      * needs no EQC 0. */
     cmp_zero_true = tp_cmp_complement_vs_literal(&op);
 
+    /* The unsigned relations, likewise.  With GTU, a <u b is b >u a with no
+     * REV.  Without it the mint/xor sequence is the other way round - REV
+     * comes free with a <u b and costs one for a >u b - so there the swap
+     * goes towards TOK_ULT/TOK_UGE.  A literal compare the complement has
+     * already rewritten is left as it is. */
+    if (!cmp_zero_true) {
+        int to = 0;
+        if (tp_have_t9000_feat(TP_T9K_GTU)) {
+            if (op == TOK_ULT) to = TOK_UGT;
+            else if (op == TOK_UGE) to = TOK_ULE;
+        } else {
+            if (op == TOK_UGT) to = TOK_ULT;
+            else if (op == TOK_ULE) to = TOK_UGE;
+        }
+        if (to) {
+            tp_cmp_swap_operands();
+            op = to;
+        }
+    }
+
     /* Transputer: comparison operations need explicit operand loading.
      *
      * For arithmetic ops (+, -, etc.), the operands are typically already
