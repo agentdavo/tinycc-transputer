@@ -1,5 +1,56 @@
 # Review of commit afcc4dfe ("transputer")
 
+## Checkout audit (2026-11-05)
+
+The current branch contains the earlier work in squash `63256c91`. The
+November 2 commit IDs below describe its development history. The finding
+numbers and line numbers in the original review refer to the older source.
+
+| Findings | Status in this checkout | Evidence |
+|---|---|---|
+| #1 | Fixed in the squash | The target header lives in `include/transputer/limits.h`. The Windows header is separately tracked. |
+| #2–9 | Fixed in the squash | Relaxation remaps local label symbols. Integer-result builtins and UMULL protect their result slots. The computed-goto, live-return, conversion, pointer-difference and narrow-argument UART regressions passed. |
+| #10–11 | Fixed for the reported cases | The peephole limits decoding to function ranges and skips relocated instructions. The linker skips non-allocated debug sections. A fresh `-g` link succeeded. |
+| #12 | Common storage fixed. Undefined-symbol policy remains a choice. | A `-g -fcommon` link placed a tentative definition in BSS. The strict linker suite rejects missing strong call targets with `T4_STRICT_UNRESOLVED_CALLS=1`. The default still warns. |
+| #13–14 | Opcode and branch sizing fixes present. Instruction addends still unsupported. | `rev` and `opr N` pass on T4, and `j 17` compiles. Before `04380cba`, `ldc target+4` emitted exactly the bytes and relocation for `ldc target`. It now fails assembly. The normal assembler also emits `21 27 fc` for `lddevid` and `21 2f ff` for `start`. |
+| #15–18 | Fixed in the squash | VLAs use an arena. Invalid jump patches report internal errors. The static call-frequency table is gone. Value-returning early exits use their own epilogue. The VLA and timeslice regressions passed. |
+| #19 | Fixed for the reported cases | The NaN comparison, signed-zero and conversion UART tests passed with `-mt800` on T4's T800 model (`-s8`). |
+| #20 | Fixed in `88d57e3d` | The new test starts and joins a child, checks signed word counts, and checks the void types of the timer and ALT waits. |
+| #21 | T414 lowering present | The backend uses software floating point and accounts for missing integer instructions. Soft-float, unsigned-comparison, process, ALT, timed-transfer and VLA tests passed with `-mt414` on `-s414`. |
+| #22 | Fixed in `6a8008d9` | Indexed and whole-archive links reported the exact member name for both padded and full-width fields. A native x86-64 binary linked and ran through both archive-loading paths. |
+| #23 | Timed transfers and a stopping trampoline were present. Workspace alignment fixed in `ce1da4af`. | `test_xlink` exercises timed transfers on soft channels. `test_conc_alt` starts processes at all four byte alignments. |
+| #24 | Fixed in the squash | The scheduler describes XWORD as binary. All 14 checks in `test_xword` printed a pass on the T9000 model. |
+
+**Other findings and remaining work**
+
+- **Linker safety.** `310efe5b` validates boot load slots before writing and
+  propagates malformed optional-slot errors. Ordinary programs no longer
+  get the missing-kernel-symbol or absent-BSS-pair warnings. The final
+  relocation switch still silently skips unhandled types, including the
+  narrow data relocations emitted for symbolic `.byte` and `.short`.
+  Full instruction addends require coordinated assembler, linker and
+  relaxation changes. Label boundaries now clear the backend's cached
+  register and peephole history.
+- **§2–§4, implementation and maintenance.** The experimental inliner,
+  compaction pass and call-frequency table are gone. Builtin dispatch uses
+  descriptors. Environment-controlled code generation, shared-file tracing,
+  symbol-repair paths, unconditional `.tccsym` output, standalone assembler
+  code, and kernel boot policy in the linker remain. The review's line-count
+  estimates describe the original commit.
+- **§5, generated code.** Same-section call relaxation, argument staging,
+  byte-load mask removal and capped inline memset are implemented. Debug
+  and switch-table functions still bypass compiler relaxation, dense switch
+  tables are opt-in, and the 64-bit division runtime still loops over 64 bits.
+- **§6, compiler speed.** The compiler limits the relaxer's relocation
+  scans to the current function. The linker's per-relocation symbol-repair
+  scan and the per-call scan of the inline-function list remain.
+
+Verification covered focused compiler, linker and UART regressions. The
+kernel boot, full test corpus, physical hardware, and the historical size
+and timing measurements were outside this run.
+
+## Historical fix log (2026-11-02)
+
 > **Fix status (2026-11-02).** These are fixed in commits on top of the squashed "transputer" commit:
 > - #1 limits.h (folded into bf3c2923)
 > - #4 and #5 conversions, with #7 `long double` constants (09b2f8c1)
@@ -35,13 +86,6 @@
 >
 > Fifth batch: call slots. Calls to an earlier function in the same section get a narrow slot at compile time, with ICF told not to fold their callees (f44e4d4b; corpus 274167 → 268554 at `-mt9000`, 312790 → 307199 at `-mt800`). The linker then shrinks the remaining same-section call slots after ICF, in the functions the compiler lists in `.note.tprelax` (bb8c2d95). linux-7 vmlinux: 5714528 → 5680652 → 5511560 bytes (−3.6%), boots to the desktop. The 8-byte `ldc sym` slots stay: about 8 KB of kernel for a lot of risk.
 >
-> Still open:
-> - #10 linker peephole
-> - the undefined-symbol policy in #12 (a deliberate default, left for the user)
-> - #15 VLAs
-> - #16 jump patching
-> - #17-24
-> - everything in §2-§6.
 
 The commit has 29 files and +21,908/−5 lines. Every line was read: I read the shared TinyCC files myself, and five parallel reviewers took the backend, linker, assembler, tools and runtime, about 3,500 lines each.
 
