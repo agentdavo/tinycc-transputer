@@ -72,4 +72,24 @@ if ! grep -q "undefined symbol 'only_static'" \
     exit 1
 fi
 
+echo "== malformed bootstrap LDC slots =="
+for point in __return_label_addr __test_main_load_point; do
+    cat > "$TMPDIR_LINKER/load.S" <<EOF
+.text
+.global _start, test_main, halt, $point
+_start:
+test_main:
+halt:
+    ret
+$point:
+    .long 0, 0
+EOF
+    if "$ROOT_DIR/transputer-tcc" -nostdlib -o "$TMPDIR_LINKER/load.elf" \
+        "$TMPDIR_LINKER/load.S" 2>"$TMPDIR_LINKER/load.stderr"; then
+        echo "FAIL: linker accepted malformed $point" >&2
+        exit 1
+    fi
+    grep -F "$point at " "$TMPDIR_LINKER/load.stderr" | grep -F 'eight-byte LDC'
+done
+
 echo "All strict linker mode tests passed."

@@ -440,79 +440,6 @@ static int tp_patch_u32_checked(uint8_t *image, uint32_t base_addr,
     return 0;
 }
 
-/*
- * Patch an 8-byte LDC sequence to load a 32-bit absolute address.
- * Used by the new Minix-style head.S bootstrap (2026-01-15).
- *
- * The 8-byte sequence encodes a 32-bit value as:
- *   PFIX nibble7, PFIX nibble6, ..., PFIX nibble1, LDC nibble0
- * For address 0xABCDEFGH:
- *   0x2A 0x2B 0x2C 0x2D 0x2E 0x2F 0x2G 0x4H
- */
-static int patch_ldc_absolute(uint8_t *image, uint32_t base_addr, TCCState *s1,
-                              Section *symtab, const char *load_point_name,
-                              const char *target_name)
-{
-    ElfW(Sym) *load_point_sym;
-    ElfW(Sym) *target_sym;
-    Section *load_point_sec;
-    Section *target_sec;
-    uint32_t load_point_addr;
-    uint32_t target_addr;
-    uint32_t patch_addr;
-    uint8_t nibble0;
-    int i;
-
-    load_point_sym = find_sym_by_name(symtab, load_point_name);
-    target_sym = find_sym_by_name(symtab, target_name);
-
-    if (!load_point_sym || !target_sym) {
-        fprintf(stderr,
-                "LDC patch: missing symbol(s) load_point=%s%s target=%s%s\n",
-                load_point_name, load_point_sym ? "" : " (not found)",
-                target_name, target_sym ? "" : " (not found)");
-        return -1;
-    }
-
-    if (load_point_sym->st_shndx <= 0 || load_point_sym->st_shndx >= s1->nb_sections) {
-        fprintf(stderr, "LDC patch: bad load_point shndx %d for %s\n",
-                load_point_sym->st_shndx, load_point_name);
-        return -1;
-    }
-
-    if (target_sym->st_shndx <= 0 || target_sym->st_shndx >= s1->nb_sections) {
-        fprintf(stderr, "LDC patch: bad target shndx %d for %s\n",
-                target_sym->st_shndx, target_name);
-        return -1;
-    }
-
-    load_point_sec = s1->sections[load_point_sym->st_shndx];
-    target_sec = s1->sections[target_sym->st_shndx];
-    load_point_addr = load_point_sec->sh_addr + load_point_sym->st_value;
-    target_addr = target_sec->sh_addr + target_sym->st_value;
-
-    /* Calculate patch address in image */
-    patch_addr = load_point_addr - base_addr;
-
-    /* Encode 32-bit address as 7 PFIX + 1 LDC (8 bytes total) */
-    /* Address nibbles from high to low: 7 6 5 4 3 2 1 0 */
-    /* Emit 7 PFIX instructions for nibbles 7-1 */
-    for (i = 7; i >= 1; i--) {
-        uint8_t nibble = (target_addr >> (i * 4)) & 0x0F;
-        image[patch_addr++] = 0x20 | nibble;  /* PFIX nibble */
-    }
-
-    /* Final LDC with nibble 0 */
-    nibble0 = target_addr & 0x0F;
-    image[patch_addr] = 0x40 | nibble0;  /* LDC nibble0 */
-
-    if (tp_env_enabled("T4_LINK_DEBUG")) {
-        fprintf(stderr, "LDC patched %s -> %s: target=0x%08X\n",
-                load_point_name, target_name, target_addr);
-    }
-    return 0;
-}
-
 static int tp_find_symbol_addr(TCCState *s1, Section *symtab,
                                const char *name, uint32_t *out_addr)
 {
@@ -548,7 +475,7 @@ static int tp_decode_abs_ldc32(const uint8_t *image, size_t total_size,
     if (load_addr < base_addr)
         return -1;
     off = (size_t)(load_addr - base_addr);
-    if (off + 8 > total_size)
+    if (off > total_size || total_size - off < 8)
         return -1;
 
     for (i = 0; i < 7; i++) {
@@ -611,36 +538,6 @@ static int tp_verify_abs_ldc_value(uint8_t *image, size_t total_size,
     return 1;
 }
 
-static int tp_verify_abs_ldc_target(uint8_t *image, size_t total_size,
-                                    uint32_t base_addr, TCCState *s1,
-                                    Section *symtab, const char *load_point_name,
-                                    const char *target_name)
-{
-    uint32_t target_addr;
-    int have_target;
-    int verify_rc;
-
-    have_target = tp_find_symbol_addr(s1, symtab, target_name, &target_addr);
-    if (have_target <= 0) {
-        if (have_target == 0) {
-            fprintf(stderr, "ERROR: required symbol %s missing for %s\n",
-                    target_name, load_point_name);
-        }
-        return -1;
-    }
-
-    verify_rc = tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab,
-                                        load_point_name, target_addr, target_name);
-    if (verify_rc != 1) {
-        if (verify_rc == 0) {
-            fprintf(stderr, "ERROR: required load point %s missing\n",
-                    load_point_name);
-        }
-        return -1;
-    }
-    return 0;
-}
-
 static void tp_dump_abs_ldc_bytes(uint8_t *image, size_t total_size,
                                   uint32_t base_addr, TCCState *s1,
                                   Section *symtab, const char *load_point_name,
@@ -666,7 +563,7 @@ static void tp_dump_abs_ldc_bytes(uint8_t *image, size_t total_size,
     }
 
     off = (size_t)(load_addr - base_addr);
-    if (off + 8 > total_size) {
+    if (off > total_size || total_size - off < 8) {
         fprintf(stderr, "BOOT_LDC_DUMP: %s out of range addr=0x%08x (%s)\n",
                 load_point_name, load_addr, label);
         return;
@@ -705,17 +602,15 @@ static int tp_patch_abs_ldc_value(uint8_t *image, size_t total_size,
                                   uint32_t value, const char *what)
 {
     size_t patch_off;
+    uint32_t old_value;
     int i;
 
-    if (load_addr < base_addr)
-        return -1;
-    patch_off = (size_t)(load_addr - base_addr);
-    if (patch_off + 8 > total_size) {
-        fprintf(stderr, "ERROR: LDC patch target %s at 0x%08x is outside image\n",
+    if (tp_decode_abs_ldc32(image, total_size, base_addr, load_addr, &old_value) < 0) {
+        fprintf(stderr, "error: %s at 0x%08x is not an eight-byte LDC in the image\n",
                 what, load_addr);
         return -1;
     }
-
+    patch_off = (size_t)(load_addr - base_addr);
     for (i = 7; i >= 1; i--) {
         uint8_t nibble = (value >> (i * 4)) & 0x0F;
         image[patch_off++] = 0x20 | nibble;
@@ -763,10 +658,11 @@ static int tp_patch_verified_symbol_target(uint8_t *image, size_t total_size,
                 load_point_name, target_name);
         return -1;
     }
-    if (patch_ldc_absolute(image, base_addr, s1, symtab, load_point_name, target_name) < 0)
+    if (tp_patch_abs_ldc_value(image, total_size, base_addr, load_addr,
+                               target_addr, load_point_name) < 0)
         return -1;
-    if (tp_verify_abs_ldc_target(image, total_size, base_addr, s1, symtab,
-                                 load_point_name, target_name) < 0)
+    if (tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab,
+                                load_point_name, target_addr, target_name) != 1)
         return -1;
     tp_dump_abs_ldc_bytes(image, total_size, base_addr, s1, symtab,
                           load_point_name, target_name, link_debug);
@@ -810,9 +706,10 @@ static int tp_patch_boot_bss_load_points(uint8_t *image, size_t total_size,
         uint32_t bss_start_addr = bss_runtime_start;
         uint32_t bss_size = bss_sec->sh_type == SHT_NOBITS ? bss_sec->data_offset : bss_sec->sh_size;
         uint32_t bss_stop_addr = bss_start_addr + bss_size;
-        Section *load_sec = s1->sections[bss_start_load->st_shndx];
-        uint32_t bss_start_load_addr = load_sec->sh_addr + bss_start_load->st_value;
-        uint32_t bss_stop_load_addr = load_sec->sh_addr + bss_stop_load->st_value;
+        uint32_t bss_start_load_addr = s1->sections[bss_start_load->st_shndx]->sh_addr
+                                       + bss_start_load->st_value;
+        uint32_t bss_stop_load_addr = s1->sections[bss_stop_load->st_shndx]->sh_addr
+                                      + bss_stop_load->st_value;
 
         if (tp_patch_abs_ldc_value(image, total_size, base_addr, bss_start_load_addr,
                                    bss_start_addr, "__bss_start_load_point") < 0 ||
@@ -837,7 +734,8 @@ static int tp_patch_boot_bss_load_points(uint8_t *image, size_t total_size,
         fprintf(stderr, "ERROR: Could not patch BSS load points (.bss section or symbols not found)\n");
         return -1;
     }
-    fprintf(stderr, "Warning: Could not patch BSS load points (.bss section or symbols not found)\n");
+    if (bss_start_load || bss_stop_load)
+        fprintf(stderr, "Warning: Could not patch BSS load points (.bss section or symbols not found)\n");
     return 0;
 }
 
@@ -1193,26 +1091,6 @@ static int tp_patch_linker_surrogates(uint8_t *image, size_t total_size,
     }
 
     return 0;
-}
-
-static void tp_patch_optional_symbol_target(uint8_t *image, size_t total_size,
-                                            uint32_t base_addr, TCCState *s1,
-                                            Section *symtab_sec,
-                                            const char *load_point_name,
-                                            const char *target_name,
-                                            int link_debug)
-{
-    ElfW(Sym) *load_sym;
-    ElfW(Sym) *target_sym;
-
-    load_sym = find_sym_by_name(symtab_sec, load_point_name);
-    target_sym = find_sym_by_name(symtab_sec, target_name);
-    if (!load_sym || !target_sym)
-        return;
-
-    (void)tp_patch_verified_symbol_target(image, total_size, base_addr, s1,
-                                          symtab_sec, load_point_name,
-                                          target_name, 0, link_debug);
 }
 
 static int tp_find_boot_entry_point(TCCState *s1, Section *symtab_sec,
@@ -3828,8 +3706,6 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                 break;
             }
         }
-        if (!start_kernel_addr)
-            fprintf(stderr, "WARNING: start_kernel symbol not found in linker symtab\n");
     }
     if (has_start_kernel_load_point && start_kernel_addr == 0) {
         fprintf(stderr, "ERROR: __start_kernel_load_point present but start_kernel symbol was not resolved\n");
@@ -3987,31 +3863,26 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                               "__bss_stop_load_point", ".bss stop", link_debug);
     }
 
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__test_main_load_point", "test_main",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__start_c_load_point", "_start_c",
-                                    link_debug);
-
-    /* crt1.S load points for userspace programs (uClibc-ng) */
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__main_load_point", "main",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__halt_load_point", "_halt",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__uclibc_main_load_point", "__uClibc_main",
-                                    link_debug);
-
-    /* crt0.S boot stub load points */
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__crt0_start_addr", "_start",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__crt0_halt_addr", "_crt0_halt",
-                                    link_debug);
+    {
+        static const char *const boot_targets[][2] = {
+            { "__test_main_load_point", "test_main" },
+            { "__start_c_load_point", "_start_c" },
+            { "__main_load_point", "main" },
+            { "__halt_load_point", "_halt" },
+            { "__uclibc_main_load_point", "__uClibc_main" },
+            { "__crt0_start_addr", "_start" },
+            { "__crt0_halt_addr", "_crt0_halt" }
+        };
+        int i;
+        for (i = 0; i < countof(boot_targets); i++) {
+            if (tp_patch_verified_symbol_target(image, total_size, base_addr,
+                                                s1, symtab_section, boot_targets[i][0],
+                                                boot_targets[i][1], 0, link_debug) < 0) {
+                tcc_free(image);
+                return -1;
+            }
+        }
+    }
 
     /* Populate the initcall table (__initcall_start[]) with sorted
      * function pointers from scattered __initcall_* symbols. */
