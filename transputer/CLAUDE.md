@@ -856,6 +856,14 @@ the occam compiler does, and what new codegen should be held to:
   packed odd one and one through a pointer take the high byte first, so
   only the address is parked (9 instructions, was 11:
   `tp_load_half_bytes`, `tp_load_local_half`).  `test_half_load.c`.
+- `*p`, p a pointer local that is not volatile, to a word or narrower
+  integer or pointer, is an lvalue through p's own word (VT_LLOCAL,
+  `indir()` in tccgen.c) instead of p loaded into a register first, and
+  `vstore` leaves such a one-word target to `store()`, which reads p
+  right before the store: `<value>; ldl p; sb` where it was `ldl p; stl
+  9; <value>; ldl 9; sb`.  Structs, floats, long long, arrays and
+  functions keep the register path.  Doom's R_DrawColumn -1.3%, ~100
+  bytes less code; `test_deref_local_ptr.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`

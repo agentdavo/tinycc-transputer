@@ -4849,7 +4849,14 @@ ST_FUNC void vstore(void)
             }
 
             /* if lvalue was saved on stack, must read it */
+#ifdef TCC_TARGET_TRANSPUTER
+            /* store() reads the pointer from its word itself, right
+               before the store; a two-word value still wants it in a
+               register for the second word's address. */
+            if ((vtop[-1].r & VT_VALMASK) == VT_LLOCAL && USING_TWO_WORDS(dbt)) {
+#else
             if ((vtop[-1].r & VT_VALMASK) == VT_LLOCAL) {
+#endif
                 SValue sv;
                 r = get_reg(RC_INT);
                 sv.type.t = VT_PTRDIFF_T;
@@ -6487,6 +6494,25 @@ ST_FUNC void indir(void)
             return;
         expect("pointer");
     }
+#ifdef TCC_TARGET_TRANSPUTER
+    /* *p, p a pointer local that is not volatile, to a word or narrower
+       integer or pointer: the lvalue goes through p's own word (VT_LLOCAL),
+       and the pointer is read where the access happens - `ldl p; sb` -
+       rather than loaded into a register first and parked across the other
+       operand (`ldl p; stl 9; <value>; ldl 9; sb`). */
+    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == (VT_LOCAL | VT_LVAL) &&
+        !(vtop->type.t & VT_VOLATILE)) {
+        int pbt = pointed_type(&vtop->type)->t;
+        if (!(pbt & (VT_ARRAY | VT_VLA | VT_BITFIELD)) &&
+            ((pbt & VT_BTYPE) == VT_BYTE || (pbt & VT_BTYPE) == VT_SHORT ||
+             (pbt & VT_BTYPE) == VT_INT || (pbt & VT_BTYPE) == VT_PTR ||
+             (pbt & VT_BTYPE) == VT_BOOL)) {
+            vtop->r = (vtop->r & ~VT_VALMASK) | VT_LLOCAL;
+            vtop->type = *pointed_type(&vtop->type);
+            return;
+        }
+    }
+#endif
     if (vtop->r & VT_LVAL)
         gv(RC_INT);
     vtop->type = *pointed_type(&vtop->type);
@@ -6912,16 +6938,17 @@ static TokenString *tp_inline_copy(TokenString *src)
 
 /* Can fn's body be expanded here?  Reads a copy of its tokens without
    parsing them, and leaves the caller's token stream as it was.  *used gets
-   a bit for each parameter the body names. */
+   a bit for each parameter the body names, *written one for each it may
+   assign or take the address of. */
 static int tp_inline_shape(struct InlineFunc *fn, Sym *ftype, int *has_ret,
-                           int *used)
+                           int *used, int *written)
 {
     TokenString *c = tp_inline_copy(fn->func_str);
     int ok = 1, n = 0, braces = 0, paren = 0, quest = 0, stmt = 1;
-    int prev = '{', ret = 0, i;
+    int prev = '{', ret = 0, i, last = -1;
     Sym *pa, *x;
 
-    *has_ret = *used = 0;
+    *has_ret = *used = *written = 0;
     if (!c)
         return 0;
     unget_tok(0);
@@ -6942,6 +6969,10 @@ static int tp_inline_shape(struct InlineFunc *fn, Sym *ftype, int *has_ret,
             paren++;
         else if (t == ')')
             paren--;
+        if (last >= 0 && (t == '=' || TOK_ASSIGN(t) || t == TOK_INC
+                          || t == TOK_DEC))
+            *written |= 1 << last;
+        last = -1;
         if (!ok) {
         } else if (ret && stmt) {
             ok = 0;                         /* anything after `return x;` */
@@ -6956,6 +6987,9 @@ static int tp_inline_shape(struct InlineFunc *fn, Sym *ftype, int *has_ret,
                     break;
             if (pa) {
                 *used |= 1 << i;
+                last = i;
+                if (prev == '&' || prev == TOK_INC || prev == TOK_DEC)
+                    *written |= 1 << i;
             } else {
                 x = (prev == TOK_STRUCT || prev == TOK_UNION ||
                      prev == TOK_ENUM) ? struct_find(t) : sym_find(t);
@@ -7005,8 +7039,8 @@ static int tp_inline_call(Sym *ftype, int nb_args)
     SValue *fv = vtop - nb_args;
     Sym *fsym = fv->sym, *pa, *params[TP_INLINE_MAX_ARGS];
     struct InlineFunc *fn = NULL;
-    int tmp[TP_INLINE_MAX_ARGS];
-    int i, n = 0, bt, has_ret, used, size, align, has_val = 0;
+    int tmp[TP_INLINE_MAX_ARGS], konst[TP_INLINE_MAX_ARGS];
+    int i, n = 0, bt, has_ret, used, written, size, align, has_val = 0;
     struct scope o;
 
     if (!tp_inline_on() || nocode_wanted || debug_modes
@@ -7032,12 +7066,23 @@ static int tp_inline_call(Sym *ftype, int nb_args)
             fn = tcc_state->inline_fns[i];
             break;
         }
-    if (!fn || !tp_inline_shape(fn, ftype, &has_ret, &used)
+    if (!fn || !tp_inline_shape(fn, ftype, &has_ret, &used, &written)
         || (bt != VT_VOID && !has_ret))
         return 0;
     for (i = 0; i < n; i++) {
+        SValue *a = vtop - (n - 1 - i);
+        int pt = params[i]->type.t;
+        /* An integer constant the body only reads is bound by name, so it
+           folds there (rol32(x, 16) shifts by 16).  Below 2^31 when
+           unsigned, where its sign- and zero-extended forms agree. */
+        konst[i] = (a->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+            && !(written & (1 << i))
+            && ((pt & VT_BTYPE) == VT_INT || (pt & VT_BTYPE) == VT_SHORT
+                || (pt & VT_BTYPE) == VT_BYTE)
+            && (pt & VT_UNSIGNED ? (uint64_t)a->c.i <= 0x7fffffff
+                                 : a->c.i == (int)a->c.i);
         tmp[i] = -1;
-        if (!(used & (1 << i)))
+        if (!(used & (1 << i)) || konst[i])
             continue;
         size = type_size(&params[i]->type, &align);
         if ((tmp[i] = tp_inline_temp(size, align)) < 0) {
@@ -7052,6 +7097,12 @@ static int tp_inline_call(Sym *ftype, int nb_args)
     tp_inline_depth++;
     for (i = n - 1; i >= 0; i--) {
         CType *pt = &params[i]->type;
+        if (konst[i] && (used & (1 << i))) {
+            sym_push(params[i]->v & ~SYM_FIELD, pt, VT_CONST,
+                     (int)vtop->c.i);
+            vpop();
+            continue;
+        }
         if (tmp[i] < 0) {
             /* unnamed in the body: evaluated, and a volatile read kept */
             if ((vtop->r & VT_LVAL) && (vtop->type.t & VT_VOLATILE))
