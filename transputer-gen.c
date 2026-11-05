@@ -10811,6 +10811,61 @@ static int tp_shift_mask_fold(void)
     return 1;
 }
 
+/* tp_hist[a] is `and` and tp_hist[a + 1] the `ldc k`, 0 <= k <= 31, it
+ * masks with, back to back. */
+static int tp_hist_masks_31(int a)
+{
+    return a + 1 < tp_hist_n &&
+           tp_hist[a].kind == TP_HIST_INSTR && tp_hist[a].opc == TP_OP_OPR &&
+           tp_hist[a].val == TP_OPR_AND &&
+           tp_hist[a + 1].kind == TP_HIST_INSTR &&
+           tp_hist[a + 1].opc == TP_OP_LDC &&
+           tp_hist[a + 1].val >= 0 && tp_hist[a + 1].val <= 31 &&
+           tp_hist[a + 1].end == tp_hist[a].off;
+}
+
+/* Is the shift count now in AReg already in 0..31?  The count masked in the
+ * source, as rol32/ror32 do (`shift & 31`), makes the runtime clamp a no-op.
+ * AReg comes from the last instruction emitted, or from the one before a
+ * push and `rev`; that is `ldc k; and`, or `ldl r` where the latest write to
+ * pseudo-register r was `ldc k; and; stl r` and no `ldlp r` since could have
+ * changed it.  The history only holds contiguous code with no label inside
+ * it, so those instructions are what produced AReg. */
+static int tp_shift_count_masked(void)
+{
+    int a = 0, s, r;
+
+    if (nocode_wanted || tp_hist_n < 2 || tp_hist[0].end != ind)
+        return 0;
+    if (tp_hist[0].kind == TP_HIST_INSTR && tp_hist[0].opc == TP_OP_OPR &&
+        tp_hist[0].val == TP_OPR_REV) {
+        if (tp_hist_n < 4 || !tp_hist_is_pure_push(&tp_hist[1]) ||
+            tp_hist[1].end != tp_hist[0].off ||
+            tp_hist[2].end != tp_hist[1].off)
+            return 0;
+        a = 2;
+    }
+    if (tp_hist_masks_31(a))
+        return 1;
+    if (tp_hist[a].kind != TP_HIST_INSTR || tp_hist[a].opc != TP_OP_LDL)
+        return 0;
+    r = tp_hist[a].val;
+    if (r < 0 || r >= NB_REGS)
+        return 0;
+    for (s = a + 1; s < tp_hist_n; s++) {
+        if (tp_hist[s].end != tp_hist[s - 1].off)
+            return 0;
+        if (tp_hist[s].kind != TP_HIST_INSTR || tp_hist[s].val != r)
+            continue;
+        if (tp_hist[s].opc == TP_OP_LDLP)
+            return 0;
+        if (tp_hist[s].opc == TP_OP_STL)
+            return tp_hist_masks_31(s + 1) &&
+                   tp_hist[s + 1].end == tp_hist[s].off;
+    }
+    return 0;
+}
+
 ST_FUNC void gen_opi(int op) {
     int cmp_zero_true;
     int shl_add_opt = 0;
@@ -11420,11 +11475,15 @@ direct_ready:
         /* Clamp shift count to 0-31: TCWG warns count >= 32 can lock
          * the processor for minutes.  AReg=count, BReg=value.
          * A literal count already in range makes the clamp dead code. */
-        if (!shift_const_ok) { Tp_LDC(31); Tp_AND(); }
+        if (!shift_const_ok && !tp_shift_count_masked()) {
+            Tp_LDC(31); Tp_AND();
+        }
         Tp_SHL(); vtop--; break;
     case TOK_SHR:    /* >> logical shift right */
         /* Clamp shift count to 0-31 (same safety as SHL) */
-        if (!shift_const_ok) { Tp_LDC(31); Tp_AND(); }
+        if (!shift_const_ok && !tp_shift_count_masked()) {
+            Tp_LDC(31); Tp_AND();
+        }
         Tp_SHR(); vtop--; break;
     case TOK_A_SAR:  /* >>= compound assignment (arithmetic shift) */
     case TOK_SAR:    /* arithmetic shift right using XDBLE+LSHR (Compiler Guide p28) */
@@ -11462,7 +11521,9 @@ direct_ready:
         /* Entry: AReg=shift, BReg=value.
          * XDBLE sign-extends AReg into BReg:AReg (64-bit).
          * LSHR shifts CReg:BReg right by AReg bits, result in AReg. */
-        if (!shift_const_ok) { Tp_LDC(31); Tp_AND(); } /* clamp shift 0-31 */
+        if (!shift_const_ok && !tp_shift_count_masked()) {
+            Tp_LDC(31); Tp_AND();                /* clamp shift 0-31 */
+        }
         Tp_STL(FRAME_SLOT_SCRATCH2);   /* save shift; AReg=value */
         Tp_OPR(TP_OPR_XDBLE);         /* BReg=sign(-1/0), AReg=value */
         Tp_LDL(FRAME_SLOT_SCRATCH2);  /* AReg=shift, BReg=value, CReg=sign */
