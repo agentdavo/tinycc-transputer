@@ -806,6 +806,17 @@ the occam compiler does, and what new codegen should be held to:
   -28 M cycles (3,084 M -> 3,056 M, 3.7% over occam; `shadeNode` 634 ->
   524 a call, occam 498), pictures unchanged.  `TP_SCHED_MASK=0xf7f`
   turns S11/S12 off; `test_sched_copy.c`.
+- A word, long long or double member of a packed or `pack(N < 4)`
+  struct, or a local at a frame offset that is not a multiple of four, is
+  read with `lb`/`shl`/`or` and written with `sb`/`shr` (little endian, a
+  64-bit value as two words); the FPU gets the bytes copied to an aligned
+  frame temporary (`tp_emit_float_addr`).  `ldnl`/`stnl`/`ldl`/`stl`
+  ignore the low address bits, so `p->k` at offset 1 used to read the
+  struct's first word.  The address waits in a fresh frame temporary
+  (`tp_park_new`), not a scratch slot, which may hold a call's staged
+  arguments.  `VT_UNALIGNED` marks these lvalues and has to survive
+  `incr_offset` and `vstore`'s VT_LLOCAL reload (at -mt425 a soft-float
+  store lost it); `test_packed_words.c`.
 - `(x >> K) & m`, where the mask keeps only bits the shift brings down
   from x (m < 2^(32-K)), is the same after an arithmetic or a logical
   shift, so a signed one is `ldc K; shr`, not `xdble; ldc K; lshr`

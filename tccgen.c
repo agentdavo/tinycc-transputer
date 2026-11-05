@@ -2308,11 +2308,19 @@ static void tcc_debug_end_scope(Sym *b, int bounds)
 static void incr_offset(int offset)
 {
     int t = vtop->type.t;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* gen_op() builds a new SValue: keep the second word of a packed
+       member's long long or double known to be unaligned as well. */
+    int unaligned = vtop->r & VT_UNALIGNED;
+#endif
     gaddrof(); /* remove VT_LVAL */
     vtop->type.t = VT_PTRDIFF_T; /* set scalar type */
     vpushs(offset);
     gen_op('+');
     vtop->r |= VT_LVAL;
+#ifdef TCC_TARGET_TRANSPUTER
+    vtop->r |= unaligned;
+#endif
     vtop->type.t = t;
 }
 
@@ -4846,7 +4854,12 @@ ST_FUNC void vstore(void)
                 sv.c.i = vtop[-1].c.i;
 		sv.sym = NULL;
                 load(r, &sv);
+#ifdef TCC_TARGET_TRANSPUTER
+                /* still a packed member's address if it was one */
+                vtop[-1].r = r | VT_LVAL | (vtop[-1].r & VT_UNALIGNED);
+#else
                 vtop[-1].r = r | VT_LVAL;
+#endif
             }
 
             r = vtop->r & VT_VALMASK;

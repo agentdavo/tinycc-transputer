@@ -2367,6 +2367,85 @@ static void tp_sign_extend_16_in_areg(void) { tp_sign_extend(16, 0); }
 static void tp_sign_extend_8_in_areg(void) { tp_sign_extend(8, 0); }
 
 /* Push a floating-point SValue onto the T800 FPU stack (FA/FB/FC). */
+/*
+ * Words at an address that may not be word aligned.
+ *
+ * A member of a packed or #pragma pack(N < 4) struct can sit at any byte
+ * (VT_UNALIGNED, set by tccgen's member access), and so can a local at a
+ * frame byte offset that is not a multiple of four.  ldnl/stnl and ldl/stl
+ * ignore the low two address bits, so `p->k` with k at offset 1 read bytes
+ * 0..3 and a store wrote over the bytes before it.  lb and sb have no
+ * alignment precondition (ISM 4.4): such a word is four bytes, little
+ * endian, and a long long or double two such words.
+ *
+ * The address is parked in a word the access may use: a scratch slot
+ * (`slot` >= 0) or a frame temporary at tcc offset `off`.  The callers use
+ * a temporary of their own (tp_park_new): the scratch slots can hold a
+ * call's staged arguments while one of them is loaded, which emit_instr's
+ * staging check rejects.
+ */
+static int tp_park_new(int bytes)
+{
+    loc = (loc - bytes) & -4;
+    return loc;
+}
+
+static int tp_word_unaligned(const SValue *sv)
+{
+    if (!(sv->r & VT_LVAL))
+        return 0;
+    if ((sv->r & VT_VALMASK) == VT_LOCAL)
+        return (sv->c.i & 3) != 0;
+    return (sv->r & VT_UNALIGNED) != 0;
+}
+
+static void tp_park_op(int op, int slot, int off)
+{
+    if (slot >= 0) {
+        if (op == TP_OP_LDL) Tp_LDL(slot); else Tp_STL(slot);
+    } else {
+        emit_local_op(op, off);
+        if (op == TP_OP_LDL) abcreg_push(1); else abcreg_pop(1);
+    }
+}
+
+/* AReg = the word in bytes addr+k .. addr+k+3, the address parked.  Two
+ * stack places above whatever is below. */
+static void tp_bytes_load(int slot, int off, int k)
+{
+    int b;
+    for (b = 3; b >= 0; b--) {
+        tp_park_op(TP_OP_LDL, slot, off);
+        if (k + b)
+            Tp_ADC(k + b);
+        Tp_LB();
+        if (b < 3)
+            Tp_OR();
+        if (b) {
+            Tp_LDC(8);
+            Tp_SHL();
+        }
+    }
+}
+
+/* Bytes addr+k .. addr+k+3 = the word pushed by `push_val` (a workspace
+ * slot, or a frame word at tcc offset `voff` when vslot < 0). */
+static void tp_bytes_store(int slot, int off, int k, int vslot, int voff)
+{
+    int b;
+    for (b = 0; b < 4; b++) {
+        tp_park_op(TP_OP_LDL, vslot, voff);
+        if (b) {
+            Tp_LDC(8 * b);
+            Tp_SHR();
+        }
+        tp_park_op(TP_OP_LDL, slot, off);
+        if (k + b)
+            Tp_ADC(k + b);
+        Tp_SB();
+    }
+}
+
 /* Emit code leaving the ADDRESS of a float operand's storage in AReg,
  * so an FPU non-local load (plain or fused add/mul) can read it
  * directly.  Handles every SValue
@@ -2410,6 +2489,21 @@ static int tp_emit_float_addr(SValue *sv) {
             } else {
                 tp_push_reg_or_cancel_stl(v, sv);
             }
+        }
+        if (tp_word_unaligned(sv)) {
+            /* The FPU loads from an aligned address: copy the bytes to a
+             * frame temporary of the access's own, words at t and t+4,
+             * the address parked at t+8 (no scratch slot: this can run
+             * while a call's arguments are being staged). */
+            int t = tp_park_new(12);
+            tp_park_op(TP_OP_STL, -1, t + 8);
+            tp_bytes_load(-1, t + 8, 0);
+            tp_park_op(TP_OP_STL, -1, t);
+            if (use_db) {
+                tp_bytes_load(-1, t + 8, 4);
+                tp_park_op(TP_OP_STL, -1, t + 4);
+            }
+            emit_local_addr(t);
         }
     } else {
         if (v == VT_CONST) {
@@ -2558,6 +2652,19 @@ ST_FUNC void load(int r, SValue *sv) {
                     tp_sign_extend(16, 1);
                 Tp_STL(r);
                 return;
+            } else if (byte_off & 3) {
+                /* a member of a packed local: LDL would round the offset
+                 * down to its word (tp_word_unaligned) */
+                int t = tp_park_new(4);
+                emit_local_addr(byte_off);
+                tp_park_op(TP_OP_STL, -1, t);
+                tp_bytes_load(-1, t, 0);
+                Tp_STL(r);
+                if (size == 8) {
+                    tp_bytes_load(-1, t, 4);
+                    Tp_STL(r + 1);
+                }
+                return;
             }
             emit_local_op(TP_OP_LDL, byte_off);
             if (size == 8) {
@@ -2620,6 +2727,20 @@ ST_FUNC void load(int r, SValue *sv) {
                      * address-calculation stage instead of the ALU. */
                     tp_push_reg_or_cancel_stl(v, sv);
                 }
+            }
+
+            /* A word or two of a packed member: from its bytes, the address
+             * parked as the halfword path below parks it. */
+            if ((size == 4 || size == 8) && (sv->r & VT_UNALIGNED)) {
+                int t = tp_park_new(4);
+                tp_park_op(TP_OP_STL, -1, t);
+                tp_bytes_load(-1, t, 0);
+                Tp_STL(r);
+                if (size == 8) {
+                    tp_bytes_load(-1, t, 4);
+                    Tp_STL(r + 1);
+                }
+                return;
             }
 
             /* Memory access - dereference the address */
@@ -3097,6 +3218,40 @@ ST_FUNC void store(int r, SValue *v) {
                 "[tcc] store_trace func=%s r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld depth=%d flags=0x%x\n",
                 funcname ? funcname : "<unknown>",
                 r, vr, is_lval, size, bt, (long)v->c.i, abcreg_stack_depth, v->r);
+    }
+
+    /* A word of a packed member, or of a local at a misaligned offset
+     * (tp_word_unaligned): four byte stores.  Like the paths below this
+     * writes the one word in r - a long long's second word comes in a second
+     * call at +4 - except a value still on the FPU stack, written whole as
+     * the FPU path below writes it. */
+    if (is_lval && (size == 4 || size == 8) && tp_word_unaligned(v)) {
+        int t = tp_park_new(12);            /* address t+8, value t, t+4 */
+        int vslot = r, voff = 0, two = 0;
+        if (r == TREG_FA && tp_is_float_bt(bt) && fpureg_stack_depth > 0) {
+            emit_local_addr(t);             /* to an aligned temporary first */
+            emit_instr(TP_OP_OPR, size == 8 ? TP_FPU_STNLDB : TP_FPU_STNLSN);
+            abcreg_pop(1);
+            fpureg_pop(1);
+            vslot = -1;
+            voff = t;
+            two = size == 8;
+        } else if (r == TREG_A || r == TREG_B || r == TREG_C) {
+            tp_park_op(TP_OP_STL, -1, t);
+            vslot = -1;
+            voff = t;
+        }
+        if ((v->r & VT_VALMASK) == VT_CONST && v->sym && !(v->r & VT_SYM)) {
+            v->r |= VT_SYM;
+            vr = v->r & VT_VALMASK;
+        }
+        gen_store_addr(v, bt, vr, is_lval);
+        tp_park_op(TP_OP_STL, -1, t + 8);
+        tp_bytes_store(-1, t + 8, 0, vslot, voff);
+        if (two)
+            tp_bytes_store(-1, t + 8, 4, -1, voff + 4);
+        abcreg_stack_depth = 0;
+        return;
     }
 
     /* Float registers are stack-like; write through to memory explicitly. */
@@ -10519,8 +10674,14 @@ static void tp_push_sv(SValue *sv) {
                 /* two zero-extended bytes: already 0..0xFFFF */
                 if (!is_unsigned)
                     tp_sign_extend(16, 1);
+            } else if (sv->c.i & 3) {
+                /* a word of a packed local (tp_word_unaligned) */
+                int t = tp_park_new(4);
+                emit_local_addr(sv->c.i);
+                tp_park_op(TP_OP_STL, -1, t);
+                tp_bytes_load(-1, t, 0);
             } else {
-                /* Word or larger: LDL is correct (always word-aligned). */
+                /* Word or larger: LDL is correct (word-aligned). */
                 emit_local_op(TP_OP_LDL, sv->c.i);
                 abcreg_push(1);
             }
@@ -10592,6 +10753,11 @@ static void tp_push_sv(SValue *sv) {
                     /* two zero-extended bytes: already 0..0xFFFF */
                     if (!is_unsigned)
                         tp_sign_extend(16, 1);
+                } else if (fr & VT_UNALIGNED) {
+                    /* a word of a packed member: from its bytes */
+                    int t = tp_park_new(4);
+                    tp_park_op(TP_OP_STL, -1, t);
+                    tp_bytes_load(-1, t, 0);
                 } else {
                     Tp_LDNL(0);
                 }
@@ -10702,7 +10868,7 @@ static int tp_operand_is_simple(const SValue *sv)
     if (get_primitive_type_size(sv->type.t & VT_BTYPE) != 4)
         return 0;
     if (sv->r & VT_LVAL)
-        return v == VT_LOCAL;
+        return v == VT_LOCAL && !(sv->c.i & 3);    /* not a packed member */
     return v == VT_CONST || (v >= TREG_W0 && v < NB_REGS);
 }
 
@@ -11405,11 +11571,13 @@ ST_FUNC void gen_opi(int op) {
         int v2 = vtop[0].r & VT_VALMASK;
 
         /* Classify operands */
+        /* (a word of a packed local at a misaligned offset is not one LDL:
+         * tp_word_unaligned) */
         int first_local = (vtop[-1].r & VT_LVAL) && v1 == VT_LOCAL &&
-                          !(vtop[-1].r & VT_SYM) &&
+                          !(vtop[-1].r & VT_SYM) && !(vtop[-1].c.i & 3) &&
                           get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
         int second_local = (vtop[0].r & VT_LVAL) && v2 == VT_LOCAL &&
-                           !(vtop[0].r & VT_SYM) &&
+                           !(vtop[0].r & VT_SYM) && !(vtop[0].c.i & 3) &&
                            get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
         int first_const = (v1 == VT_CONST) && !(vtop[-1].r & VT_SYM);
         int second_const = (v2 == VT_CONST) && !(vtop[0].r & VT_SYM);
