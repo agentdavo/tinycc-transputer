@@ -18,6 +18,7 @@
 #ifndef TRANSPUTER_ENC_H
 #define TRANSPUTER_ENC_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Opcode nibble values */
@@ -139,29 +140,29 @@ static inline int tp_is_prefix_byte(uint8_t b)
     return (b & 0xF0) == (TP_ENC_PFIX << 4) || (b & 0xF0) == (TP_ENC_NFIX << 4);
 }
 
-/*
- * tp_decode_prefixed_value - Decode a sequence to verify/patch
- * NOTE: The 'opcode' argument is output-only (decoded instruction opcode)
- */
-static inline int tp_decode_prefixed_value(const uint8_t *buf, int len, int *opcode)
+/* Decode one instruction at pos. Return its byte length, or zero if the
+ * buffer ends before the opcode. Write the outputs only on success. */
+static inline int tp_decode_instr_at(const uint8_t *data, size_t len, size_t pos,
+                                     int *opcode, int *operand)
 {
-    int32_t oreg = 0;
-    int i;
-    
-    for (i = 0; i < len - 1; i++) {
-        uint8_t b = buf[i];
-        int nibble = b & 0xF;
-        oreg += nibble;
-        if ((b & 0xF0) == (TP_ENC_NFIX << 4)) {
-            oreg = (~oreg) << 4;
-        } else {
+    size_t start = pos;
+    uint32_t oreg = 0;
+
+    while (pos < len) {
+        uint8_t byte = data[pos++];
+        int op = byte >> 4;
+        oreg |= byte & 15;
+        if (op == TP_ENC_PFIX)
             oreg <<= 4;
+        else if (op == TP_ENC_NFIX)
+            oreg = ~oreg << 4;
+        else {
+            *opcode = op;
+            *operand = (int32_t)oreg;
+            return (int)(pos - start);
         }
     }
-
-    if (opcode) *opcode = (buf[len-1] >> 4) & 0xF;
-    
-    return oreg + (buf[len-1] & 0xF);
+    return 0;
 }
 
 #endif /* TRANSPUTER_ENC_H */

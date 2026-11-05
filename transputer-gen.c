@@ -6559,33 +6559,6 @@ static int tp_relax_newt(const struct tp_relax_insn *ins, int i,
     return outlen;
 }
 
-/* Decode one instruction starting at code[p]; returns its length. */
-static int tp_relax_decode(const uint8_t *code, int p, int end,
-                           int *opcode, int *operand)
-{
-    int oreg = 0;
-    int len = 0;
-
-    while (p + len < end) {
-        uint8_t b = code[p + len];
-        int f = b >> 4;
-        int n = b & 0xF;
-        len++;
-        if (f == TP_ENC_PFIX) {
-            oreg = (oreg | n) << 4;
-            continue;
-        }
-        if (f == TP_ENC_NFIX) {
-            oreg = (~(oreg | n)) << 4;
-            continue;
-        }
-        *opcode = f;
-        *operand = (oreg >= 0) ? (oreg | n) : (oreg + n);
-        return len;
-    }
-    return 0;   /* ran off the end mid-prefix: malformed */
-}
-
 /* Why the last function could not be relaxed, for the frame-size error. */
 static const char *tp_relax_why;
 
@@ -7854,7 +7827,7 @@ static int tp_relax_function(void)
             continue;
         }
 
-        len = tp_relax_decode(code, p, size, &opc, &opd);
+        len = tp_decode_instr_at(code, size, p, &opc, &opd);
         if (len <= 0) {           /* malformed tail — bail out entirely */
             tcc_free(ins);
             return tp_relax_bail("decode");

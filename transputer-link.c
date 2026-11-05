@@ -138,31 +138,6 @@ ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
  * first; both are left alone.
  */
 
-/* Decode the instruction at data[pos]: returns its length including
- * prefixes (0 if truncated), the function code and the operand. */
-static int tp_decode_instr_at(const uint8_t *data, size_t len, size_t pos,
-                               int *opcode_out, int *operand_out)
-{
-    size_t start = pos;
-    uint32_t oreg = 0;
-    while (pos < len) {
-        int byte = data[pos];
-        int nibble = byte & 0x0F;
-        int op = (byte >> 4) & 0x0F;
-        pos++;
-        if (op == TP_OP_PFIX) {
-            oreg = (oreg | nibble) << 4;
-        } else if (op == TP_OP_NFIX) {
-            oreg = (~(oreg | nibble)) << 4;
-        } else {
-            *opcode_out = op;
-            *operand_out = (int)(oreg | nibble);
-            return (int)(pos - start);
-        }
-    }
-    return 0;
-}
-
 static int tp_peep_has_reloc(const uint8_t *reloc, size_t pos, int n)
 {
     while (n-- > 0)
