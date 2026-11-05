@@ -45,6 +45,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ELF2FLT_SRC="$SCRIPT_DIR/tools/transputer-elf2flt.c"
 LOGS_DIR="${LOGS_DIR:-logs}"
 KERNEL_TREE="${KERNEL_TREE:-linux-7}"
 if [ -z "${TCC_GCC_VERSION:-}" ]; then
@@ -594,9 +595,9 @@ do_initramfs() {
     mkdir -p "$INITRAMFS_DIR"
 
     # Build elf2flt if needed
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -662,9 +663,9 @@ do_shprobe() {
         return 1
     fi
 
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -710,9 +711,9 @@ do_directprobe() {
     local INITRAMFS_DIR="$SCRIPT_DIR/initramfs"
     local ELF2FLT="$ROOT_DIR/transputer-elf2flt"
 
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -744,9 +745,9 @@ do_uclibcprobe() {
     local ELF2FLT="$ROOT_DIR/transputer-elf2flt"
     local UCLIBC="$SCRIPT_DIR/uClibc-ng"
 
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -842,9 +843,9 @@ do_tpsh() {
     fi
 
     # Build elf2flt if needed
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -989,9 +990,9 @@ do_busybox() {
     local UCLIBC="$SCRIPT_DIR/uClibc-ng"
 
     # Build elf2flt if needed
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi

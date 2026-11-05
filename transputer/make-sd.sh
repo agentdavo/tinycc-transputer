@@ -21,9 +21,9 @@ if [ ! -d "$STAGE" ]; then
 fi
 
 if [ ! -x "$ROOT_DIR/transputer-mksd" ] ||
-   [ "$ROOT_DIR/transputer-mksd.c" -nt "$ROOT_DIR/transputer-mksd" ]; then
+   [ "$SCRIPT_DIR/tools/transputer-mksd.c" -nt "$ROOT_DIR/transputer-mksd" ]; then
     cc -O2 -Wall -Wextra -o "$ROOT_DIR/transputer-mksd" \
-       "$ROOT_DIR/transputer-mksd.c"
+       "$SCRIPT_DIR/tools/transputer-mksd.c"
 fi
 
 # A full-size filesystem image makes replacement deterministic and ensures

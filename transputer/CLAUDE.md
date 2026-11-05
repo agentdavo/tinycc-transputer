@@ -110,7 +110,7 @@ T4 emulator → vmlinux.btl → Linux kernel (transputer/linux-7 — the ONLY ke
 - **`transputer-gen.c`** — TCC transputer code generator backend
 - **`transputer/build.sh`** — Master build script
 - **`transputer/rootfs/stage.sh`** — TransputerOS rootfs builder (1.2MB, self-contained)
-- **`transputer-elf2flt.c`** — ELF to bFLT converter for NOMMU binaries
+- **`transputer/tools/transputer-elf2flt.c`** — ELF to bFLT converter for NOMMU binaries
 - **`transputer-netload`** — Creates bootable `.btl` files from ELF
 
 ### Kernel & Userspace

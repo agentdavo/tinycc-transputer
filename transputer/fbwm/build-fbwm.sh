@@ -14,7 +14,7 @@ mkdir -p "$TMP"
 
 if [ ! -x "$TCC" ]; then echo "Need transputer-tcc"; exit 1; fi
 if [ ! -x "$ELF2FLT" ]; then
-  (cd "$ROOT_DIR" && gcc -O2 -o transputer-elf2flt transputer-elf2flt.c)
+  gcc -O2 -o "$ROOT_DIR/transputer-elf2flt" "$TRANS_DIR/tools/transputer-elf2flt.c"
   ELF2FLT="$ROOT_DIR/transputer-elf2flt"
 fi
 

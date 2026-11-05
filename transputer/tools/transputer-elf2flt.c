@@ -13,7 +13,7 @@
  *   bit 31 = 0: standard 32-bit data word
  *   bits 0-30:  offset from start of text in the bFLT image
  *
- * Build:  cc -o transputer-elf2flt transputer-elf2flt.c
+ * Build:  make transputer-elf2flt
  * Usage:  ./transputer-elf2flt [-k] input.elf output.flt
  */
 
@@ -22,7 +22,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <arpa/inet.h>  /* htonl */
-#include "elf.h"
+#include "../../elf.h"
 
 /* bFLT header — all fields in network (big-endian) byte order */
 struct flat_hdr {

@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "elf.h"
+#include "../../elf.h"
 
 /* Simple network loader utility. It converts a linked ELF binary
    into a chunked BTL stream accepted by the TEMU emulator. The

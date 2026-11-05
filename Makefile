@@ -133,6 +133,10 @@ TCCDOCS = tcc.1 tcc-doc.html tcc-doc.info
 
 all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 
+transputer-elf2flt transputer-netload transputer-mksd: %: $(TOPSRC)/transputer/tools/%.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+transputer-elf2flt transputer-netload: $(TOPSRC)/elf.h
+
 # cross compiler targets to build
 TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm64-win32 arm-wince c67
 TCC_X += riscv64 arm64-osx transputer
