@@ -798,6 +798,15 @@ the occam compiler does, and what new codegen should be held to:
   function and the code grew 17%.  Doom's texture lookups, `(frac >> 16)
   & 127`: R_DrawColumn -27%, R_DrawSpan -26% T800 cycles.
   `TCC_TRANSPUTER_SHIFT_MASK=0` turns it off; `test_shift_mask_fold.c`.
+- `x++`/`x--` used for its value, on a word that is neither volatile nor a
+  global, loads the saved value on its own and lets the add read x again
+  (`inc()` in tccgen.c), where gv_dup copied the loaded register through
+  a second slot: `while (n--)` is `ldl n; ldl n; adc -1; stl n; eqc 0;
+  cj`, 6 instructions where it took 10, and `*p++ = v` loses two.  Not
+  for a global: a second read is another eight-byte `ldc`, and `g++;` as
+  a statement kept the load (+0.7% Doom code until globals were left
+  out; size-neutral now).  Doom's drawers -3% to -5% T800 cycles;
+  `test_post_inc.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`
@@ -865,12 +874,12 @@ extra instructions are one- and two-cycle loads and stores)
   residency.
 - A float comes back through slot 7, an integer word, and the caller stores
   it again; occam leaves it in FA.  That one is an ABI change.
-- Byte loops (Dhrystone's `strcpy`, 25 instructions a byte): `p++` goes
-  through two slots (`ldl 13; stl 9; ldl 9; stl 10; ldl 9; adc 1; stl 13`
-  where `ldl p; dup; adc 1; stl p` would do), a loaded `char` is sign
-  extended (`ldc 128; xword`) although only `sb` uses it, and the loop test
-  extends it again (`ldc 255; and; ldc 128; xword; eqc 0`) for a zero test
-  that needs no extension at all.
+- Byte loops (Dhrystone's `strcpy`, 25 instructions a byte): `p++` went
+  through two slots (`ldl 13; stl 9; ldl 9; stl 10; ldl 9; adc 1; stl 13`;
+  `ldl 13; ldl 13; adc 1; stl 13` since `inc()` above), a loaded `char` is
+  sign extended (`ldc 128; xword`) although only `sb` uses it, and the
+  loop test extends it again (`ldc 255; and; ldc 128; xword; eqc 0`) for
+  a zero test that needs no extension at all.
 - **A miscompile, fixed 2026-11-03** (difftest seed 9010, older than this
   work): `u64 x4(void) { return (zero ? m64 : m64) + (-(u64)((u16)l0)); }`
   (all globals) returned the wrong sum.  gv() moves the `?:` result out of

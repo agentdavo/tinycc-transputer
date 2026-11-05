@@ -4875,6 +4875,28 @@ ST_FUNC void inc(int post, int c)
 {
     test_lvalue();
     vdup(); /* save lvalue */
+#ifdef TCC_TARGET_TRANSPUTER
+    /* x++ / x-- used for its value (`while (count--)`, `*p++ = v`) on a
+       word that is not volatile: the saved value is a load of its own and
+       the add reads x again.  gv_dup's copy of the loaded register costs
+       a store and a load more, through a second workspace slot.  Not for
+       a global: reading it again costs another eight-byte ldc of its
+       address, and `g++;` as a statement keeps the extra load. */
+    if (post && (vtop->r & VT_LVAL) && !(vtop->r & VT_SYM) &&
+        !(vtop->type.t & VT_VOLATILE) &&
+        !(vtop->type.t & VT_BITFIELD) &&
+        ((vtop->type.t & VT_BTYPE) == VT_INT ||
+         (vtop->type.t & VT_BTYPE) == VT_PTR)) {
+        gv(RC_INT);         /* lv val */
+        vswap();            /* val lv */
+        vdup();             /* val lv lv */
+        vpushi(c - TOK_MID);
+        gen_op('+');
+        vstore();           /* val (x + c) */
+        vpop();             /* val */
+        return;
+    }
+#endif
     if (post) {
         gv_dup(); /* duplicate value */
         vrotb(3);
