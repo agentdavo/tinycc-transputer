@@ -6780,14 +6780,15 @@ static int tps_stats[10];  /* S1..S10 hit counts */
 static int tps_stats_on = -1;
 
 /* Bitmask of enabled patterns (bit 0 = S1 ... bit 6 = S7, bit 8 = S9,
- * bit 9 = S10), for bisecting a suspected miscompile: TP_SCHED_MASK=0x33f
- * disables S7, and so on.  S8 has no switch. */
+ * bit 9 = S10, bit 10 = 5a' push hoisting), for bisecting a suspected
+ * miscompile: TP_SCHED_MASK=0x73f disables S7, and so on.  S8 has no
+ * switch. */
 static int tps_mask = -1;
 static int tps_on(int which)
 {
     if (tps_mask < 0) {
         const char *e = getenv("TP_SCHED_MASK");
-        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x37f;
+        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x77f;
     }
     return (tps_mask >> which) & 1;
 }
@@ -7662,6 +7663,144 @@ try_copy:
             ins[j1].old_len = t_old;
             ins[j1].new_len = t_new;
             an[j1].use = t_use;
+        }
+        an[i].dead = 1;
+        removed += 1;
+        tps_note(7);
+    }
+
+    /* ---- 5a'. hoist a pure push over the run that computed the value
+     * under it ----
+     *
+     * S5 keeps a value on the stack under <e> and pays a REV, as the two come
+     * back swapped.  Where <e> is a single pure push, the code that computed
+     * the value is a straight run, and the push depends on nothing the run
+     * does, the push can simply go first:
+     *
+     *     ldl i ; ldl p ; wsub ; ldc 0 ; rev ; stnl 0
+     *  -> ldc 0 ; ldl i ; ldl p ; wsub ; stnl 0
+     *
+     * which is every word-fill loop's body.  The run is the shortest that ends
+     * just before the push, leaves exactly one word, and never reads below
+     * where it started; it then runs one word deeper, which must still fit
+     * the stack.  It holds no store, call, branch, FPU operation or pinned or
+     * synthesised instruction, so an LDL push reads the same word before it
+     * as after, and only its first instruction may be a branch target - entry
+     * there now executes the push and then the run, as before it executed the
+     * run and then the push.  Like 5a this moves contents, not positions:
+     * old_off, the CFG and branch targets stay where they are. */
+    for (i = 0; i < n && tps_on(10); i++) {
+        int jp, j0, m, k, cand, best = -1, maxr = 0;
+        if (an[i].dead || ins[i].pinned || an[i].head)
+            continue;
+        if (ins[i].opcode != TP_ENC_OPR || ins[i].operand != TP_OPR_REV)
+            continue;
+        jp = -1;
+        for (k = i - 1; k >= 0; k--)
+            if (!an[k].dead && ins[k].opcode != -1) { jp = k; break; }
+        if (jp < 0 || ins[jp].pinned || an[jp].head || ins[jp].synth ||
+            ins[jp].is_branch || !an[jp].known)
+            continue;
+        /* Not LDLP: separated from its consumer, an address push would look
+         * like an escape to the slot analyses that follow. */
+        if (ins[jp].opcode != TP_ENC_LDL && ins[jp].opcode != TP_ENC_LDC)
+            continue;
+        j0 = -1;
+        for (k = jp - 1; k >= 0; k--)
+            if (!an[k].dead && ins[k].opcode != -1) { j0 = k; break; }
+        if (j0 < 0)
+            continue;
+
+        /* Find the run's start: walk back, re-checking the run forward. */
+        for (cand = j0; cand >= 0 && j0 - cand < TPS_MAXWIN; cand--) {
+            int r = 0, mr = 0, ok = 1, q;
+            if (an[cand].dead || ins[cand].opcode == -1)
+                continue;
+            for (q = cand; q <= j0 && ok; q++) {
+                int opc = ins[q].opcode, opd = ins[q].operand;
+                if (an[q].dead || opc == -1)
+                    continue;
+                if (ins[q].pinned || ins[q].synth || ins[q].is_branch ||
+                    !an[q].known || (q > cand && an[q].head))
+                    ok = 0;
+                else if (opc == TP_ENC_OPR) {
+                    switch (opd) {
+                    case TP_OPR_ADD: case TP_OPR_SUB: case TP_OPR_MUL:
+                    case TP_OPR_SUM: case TP_OPR_DIFF: case TP_OPR_PROD:
+                    case TP_OPR_AND: case TP_OPR_OR: case TP_OPR_XOR:
+                    case TP_OPR_SHL: case TP_OPR_SHR: case TP_OPR_GT:
+                    case TP_OPR_GTU: case TP_OPR_WSUB: case TP_OPR_BSUB:
+                    case TP_OPR_WSUBDB: case TP_OPR_SSUB: case TP_OPR_NOT:
+                    case TP_OPR_LB: case TP_OPR_LS: case TP_OPR_LSX:
+                    case TP_OPR_LBX: case TP_OPR_XSWORD: case TP_OPR_XBWORD:
+                    case TP_OPR_XWORD: case TP_OPR_MINT: case TP_OPR_DUP:
+                    case TP_OPR_REV:
+                        break;
+                    default:
+                        ok = 0;
+                    }
+                } else if (opc != TP_ENC_LDL && opc != TP_ENC_LDLP &&
+                           opc != TP_ENC_LDC && opc != TP_ENC_LDNL &&
+                           opc != TP_ENC_LDNLP && opc != TP_ENC_ADC &&
+                           opc != TP_ENC_EQC)
+                    ok = 0;
+                if (!ok)
+                    break;
+                if (an[q].reads > r)
+                    break;              /* reads below the run's start */
+                r += an[q].delta;
+                if (r > mr)
+                    mr = r;
+            }
+            if (!ok)
+                break;                  /* no longer run can be clean either */
+            if (q > j0 && r == 1) {
+                best = cand;
+                maxr = mr;
+                break;
+            }
+        }
+        if (best < 0 || an[best].depth < 0 || an[best].depth + 1 + maxr > 3)
+            continue;
+        /* A target on padding or a deleted instruction is still a way in. */
+        for (k = best + 1; k <= i; k++)
+            if (an[k].head)
+                break;
+        if (k <= i)
+            continue;
+
+        /* Rotate contents: the push to `best`, the run one place on. */
+        {
+            struct tp_relax_insn p = ins[jp];
+            struct tps_ann pa = an[jp];
+            for (m = jp; m > best; m--) {
+                ins[m].opcode = ins[m - 1].opcode;
+                ins[m].operand = ins[m - 1].operand;
+                ins[m].old_len = ins[m - 1].old_len;
+                ins[m].new_len = ins[m - 1].new_len;
+                an[m].use = an[m - 1].use;
+                an[m].def = an[m - 1].def;
+                an[m].uses = an[m - 1].uses;
+                an[m].reads = an[m - 1].reads;
+                an[m].delta = an[m - 1].delta;
+                an[m].known = an[m - 1].known;
+                an[m].dead = an[m - 1].dead;
+                an[m].liveout = an[m - 1].liveout;
+                if (an[m - 1].depth >= 0)
+                    an[m].depth = an[m - 1].depth + 1;
+            }
+            ins[best].opcode = p.opcode;
+            ins[best].operand = p.operand;
+            ins[best].old_len = p.old_len;
+            ins[best].new_len = p.new_len;
+            an[best].use = pa.use;
+            an[best].def = pa.def;
+            an[best].uses = pa.uses;
+            an[best].reads = pa.reads;
+            an[best].delta = pa.delta;
+            an[best].known = pa.known;
+            an[best].dead = 0;
+            an[best].liveout = an[best].liveout | pa.liveout;
         }
         an[i].dead = 1;
         removed += 1;
