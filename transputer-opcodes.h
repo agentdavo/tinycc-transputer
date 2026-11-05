@@ -498,7 +498,7 @@
 #define TP_OPR_F2UNPK        0xEF /* FA <- hi, push lo                      */
 #define TP_OPR_FPOLY3        0xF6 /* Horner, coeffs T[A&7..A&7+2]           */
 
-#define TP_OPR_START         0x201FF
-#define TP_OPR_LDDEVID       0x2017C
+#define TP_OPR_START         0x1FF
+#define TP_OPR_LDDEVID       0x17C
 
 #endif /* _TRANSPUTER_OPCODES_H */

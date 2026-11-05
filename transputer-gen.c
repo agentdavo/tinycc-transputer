@@ -4936,13 +4936,7 @@ void gen_builtin_bitrevnbits(void) {
 }
 
 void gen_builtin_lddevid(void) {
-    /* LDDEVID: Load device identification word.
-     * Executed as fpentry 0x17C: LDC 0x17C; OPR 0xAB.
-     * Returns product ID in AReg (T414=0, T800=5, T805=6, T806=0x806). */
-    /* LDDEVID is OPR 0x17C (NOT fpentry — it's a direct OPR instruction).
-     * It pushes the device identity onto the eval stack.
-     * Store to REG_IRET workspace slot for reliable return. */
-    emit_instr(TP_OP_OPR, 0x17C);
+    emit_instr(TP_OP_OPR, TP_OPR_LDDEVID);
     abcreg_push(1);
     Tp_STL(REG_IRET);
     vpushi(0);
@@ -9674,25 +9668,25 @@ static void tp_push_sym_addr(const SValue *sv)
         Tp_ADC((int)sv->c.i);
 }
 
-/* Bases additionally allow a symbol address, which tp_operand_is_simple
- * rejects. Global and static arrays are the overwhelmingly common subscript
- * base in kernel code, and excluding them kept WSUB down at 0.08% of emitted
- * instructions — leaving the index scaling on the contended ALU as
- * DUP/SUM/DUP/SUM instead of one address-stage WSUB. */
+/* A local array's address can be pushed after the index with LDLP, just
+ * as a global array's address can be pushed with a symbol relocation. */
 static int tp_ptradd_base_is_simple(const SValue *sv)
 {
     if (tp_operand_is_simple(sv))
         return 1;
     if (sv->r & (VT_LVAL | VT_MUSTCAST | VT_MUSTBOUND | VT_BOUNDED))
         return 0;
-    if ((sv->r & VT_VALMASK) != VT_CONST || !(sv->r & VT_SYM))
+    if ((sv->r & (VT_VALMASK | VT_SYM)) != VT_LOCAL &&
+        (sv->r & (VT_VALMASK | VT_SYM)) != (VT_CONST | VT_SYM))
         return 0;
     return get_primitive_type_size(sv->type.t & VT_BTYPE) == 4;
 }
 
 static void tp_push_base(const SValue *sv)
 {
-    if ((sv->r & VT_VALMASK) == VT_CONST && (sv->r & VT_SYM))
+    if ((sv->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_LOCAL)
+        emit_local_addr(sv->c.i);
+    else if ((sv->r & VT_VALMASK) == VT_CONST && (sv->r & VT_SYM))
         tp_push_sym_addr(sv);
     else
         tp_push_simple(sv);
@@ -9726,6 +9720,20 @@ static void tp_push_simple(const SValue *sv)
     }
 }
 
+/* Reserve the result before pushing either operand: get_reg can emit a
+ * spill. Reuse a consumed operand's slot only if no other value needs it. */
+static int tp_ptradd_result_reg(void)
+{
+    SValue *sv;
+    for (sv = vtop - 1; sv <= vtop; sv++) {
+        int r = sv->r & VT_VALMASK;
+        if (!(sv->r & VT_LVAL) && r >= TREG_W0 && r < NB_REGS &&
+            !tp_reg_live_on_vstack(r, sv))
+            return r;
+    }
+    return get_reg(RC_INT);
+}
+
 /* `base + constant` costs no code at all when the base is the address of a
  * local (a frame offset) or of a symbol (a link-time constant): the generic
  * lowering scales the index, and gen_opic folds it into the offset, so the
@@ -9756,12 +9764,9 @@ ST_FUNC int gen_ptradd_wsub(void) {
         tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
         SValue base = vtop[-1];
         SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
         int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
         int index_const = !(index.r & VT_LVAL) && iv == VT_CONST;
-        int dest;
+        int dest = tp_ptradd_result_reg();
 
         abcreg_stack_depth = 0;
         if (index_const) {
@@ -9781,7 +9786,6 @@ ST_FUNC int gen_ptradd_wsub(void) {
         }
 
         vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
         vtop->r = dest;
         Tp_STL(dest);
         return 1;
@@ -9837,23 +9841,20 @@ ST_FUNC int gen_ptradd_bsub(void) {
         tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
         SValue base = vtop[-1];
         SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
         int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
         int index_const = !(index.r & VT_LVAL) && iv == VT_CONST;
         int dest;
 
         if (index_const)
             return 0;           /* `adc n` is shorter; let the generic path run */
 
+        dest = tp_ptradd_result_reg();
         abcreg_stack_depth = 0;
         tp_push_simple(&index);
         tp_push_base(&base);
         Tp_BSUB();
 
         vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
         vtop->r = dest;
         Tp_STL(dest);
         return 1;
@@ -9890,12 +9891,9 @@ ST_FUNC int gen_ptradd_ssub(void) {
         tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
         SValue base = vtop[-1];
         SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
         int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
         int index_const = !(index.r & VT_LVAL) && iv == VT_CONST;
-        int dest;
+        int dest = tp_ptradd_result_reg();
 
         abcreg_stack_depth = 0;
         if (index_const) {
@@ -9911,7 +9909,6 @@ ST_FUNC int gen_ptradd_ssub(void) {
         }
 
         vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
         vtop->r = dest;
         Tp_STL(dest);
         return 1;
@@ -9933,11 +9930,7 @@ ST_FUNC int gen_ptradd_wsubdb(void) {
         tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
         SValue base = vtop[-1];
         SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
-        int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
-        int dest;
+        int dest = tp_ptradd_result_reg();
 
         abcreg_stack_depth = 0;
         tp_push_simple(&index);
@@ -9945,7 +9938,6 @@ ST_FUNC int gen_ptradd_wsubdb(void) {
         Tp_WSUBDB();
 
         vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
         vtop->r = dest;
         Tp_STL(dest);
         return 1;

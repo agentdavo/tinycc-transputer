@@ -37,6 +37,7 @@ ST_FUNC void asm_opcode(TCCState *s1, int t);
 # define USING_GLOBALS
 # include "tcc.h"
 # include "transputer-enc.h"  /* Unified prefix encoding */
+# include "transputer-opcodes.h"
 /* use tcc memory helpers when compiled as part of the compiler */
 # undef malloc
 # undef calloc
@@ -271,7 +272,7 @@ static const InstructionInfo instructions[] = {
     {"fpurn", 0x20022},
     {"fpuseterr", 0x20023},
     {"fpuclrerr", 0x2009C},
-    {"start", 0x201FF},
+    {"start", -TP_OPR_START},
     {"testhardchan", -0x2D},
     {"testldd", -0x25},
     {"teststd", -0x28},
@@ -339,7 +340,7 @@ static const InstructionInfo instructions[] = {
     {"timerenablel", -0x7D},
     {"ldmemstartval", -0x7E},
     {"pop", -0x79},
-    {"lddevid", 0x2017C},
+    {"lddevid", -TP_OPR_LDDEVID},
     /* T9000 protection / trap (ISM App.B nfix encodings → final OReg):
      *   selth −7, tret −5, goprot −6, syscall −8  →  60 F9 / FB / FA / F8
      * Raw nfix0;opr path via add_t9000_protect_opr (not tp_encode_instr). */
@@ -539,10 +540,6 @@ static void add_fpentry_sequence(AssemblerState *as, int op) {
     int imm = op & 0xFFFF;
     add_immediate_instruction(as, 0x4, imm); /* ldc imm */
     add_instruction_item(as, -0xAB, NULL);  /* fpentry */
-}
-
-static void add_extended_opr_sequence(AssemblerState *as, int op) {
-    add_instruction_item(as, -op, NULL);   /* opr op */
 }
 
 /* T9000 App.B negative secondaries (ISM gold OReg, not App.B hex as pfix value).
@@ -861,11 +858,7 @@ static void parse_line(AssemblerState *as) {
                     /* selth/tret/goprot/syscall — ISM nfix0;opr */
                     add_t9000_protect_opr(as, -(instructions[i].code & 0xFF));
                 } else if (instructions[i].code >= 0x20000) {
-                    if (strncmp(instructions[i].mnemonic, "fpu", 3) == 0) {
-                        add_fpentry_sequence(as, instructions[i].code);
-                    } else {
-                        add_extended_opr_sequence(as, instructions[i].code & 0xFFFF);
-                    }
+                    add_fpentry_sequence(as, instructions[i].code);
                 } else {
                     add_instruction_item(as, instructions[i].code, p);
                 }
@@ -1052,13 +1045,9 @@ ST_FUNC void asm_opcode(TCCState *s1, int t)
         return;
     }
 
-    /* Extended/FPU mnemonics (code >= 0x20000) need a multi-instruction
-     * (ldc; fpentry) or opr sequence; the standalone assembler handles them in
-     * parse_line(), but this inline-asm encoder does not — feeding the large
-     * code value in as an opcode nibble emits garbage. Fail loudly instead. */
+    /* FPENTRY mnemonics need an ldc; fpentry pair. */
     if (info->code >= 0x20000)
-        tcc_error("extended/FPU opcode '%s' not supported in inline asm; "
-                  "use a compiler builtin or a .S file", name);
+        tcc_error("FPENTRY mnemonic '%s' is unsupported; use a compiler builtin", name);
 
     opcode = info->code >= 0 ? info->code : 0xF;
     op = info->code >= 0 ? 0 : tp_asm_operation(info->code);
@@ -1080,6 +1069,10 @@ ST_FUNC void asm_opcode(TCCState *s1, int t)
     if (has_expr && expr.sym) {
         int reloc_type;
         int fixed_size = 0;
+        /* The linker replaces the entire instruction operand with the
+         * relocated value. It cannot recover a symbolic addend here. */
+        if (expr.v)
+            tcc_error("symbolic addend is unsupported for '%s'", name);
         if (opcode == 0x0 || opcode == 0x9 || opcode == 0xA) {
             reloc_type = R_TRANSPUTER_IPREL32;
             fixed_size = 9;

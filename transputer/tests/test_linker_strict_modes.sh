@@ -92,4 +92,22 @@ EOF
     grep -F "$point at " "$TMPDIR_LINKER/load.stderr" | grep -F 'eight-byte LDC'
 done
 
+echo "== symbolic instruction addends =="
+printf '.text\nldc target+0\ntarget:\n ret\n' > "$TMPDIR_LINKER/addend.S"
+"$ROOT_DIR/transputer-tcc" -c "$TMPDIR_LINKER/addend.S" -o "$TMPDIR_LINKER/addend.o"
+for insn in 'ldc target+4' 'j target-4'; do
+    printf '.text\n%s\ntarget:\n ret\n' "$insn" > "$TMPDIR_LINKER/addend.S"
+    if "$ROOT_DIR/transputer-tcc" -c "$TMPDIR_LINKER/addend.S" \
+        -o "$TMPDIR_LINKER/addend.o" 2>"$TMPDIR_LINKER/addend.stderr"; then
+        echo "FAIL: assembler accepted $insn" >&2
+        exit 1
+    fi
+    grep -F "symbolic addend is unsupported for '${insn%% *}'" "$TMPDIR_LINKER/addend.stderr"
+done
+
+echo "== extended secondary opcodes =="
+printf '.text\nlddevid\nstart\n' > "$TMPDIR_LINKER/secondary.S"
+"$ROOT_DIR/transputer-tcc" -c "$TMPDIR_LINKER/secondary.S" -o "$TMPDIR_LINKER/secondary.o"
+readelf -x .text "$TMPDIR_LINKER/secondary.o" | grep -F '2127fc21 2fff'
+
 echo "All strict linker mode tests passed."
