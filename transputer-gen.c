@@ -6652,6 +6652,8 @@ static int tp_relax_bail(const char *why)
  *   S6   LDL x / LDC k ; STL y          -> (nothing)    (y never read)
  *   S7   STL a ; STL b ; LDL a          -> REV ; STL b
  *   S9   CALL ; STL a                   -> CALL         (a never read)
+ *   S10  LDL x ; STL a ; LDLP a ; <FP load>  -> LDLP x ; <FP load>
+ *                                                        (a dead after)
  *
  * (S8 counts the REV deletions further down.)
  *
@@ -6774,18 +6776,18 @@ static int tps_effect(int opc, int opd, int *delta, int *reads)
 }
 
 /* Per-pattern hit counts, printed with TP_SCHED_STATS=1. */
-static int tps_stats[9];   /* S1..S9 hit counts */
+static int tps_stats[10];  /* S1..S10 hit counts */
 static int tps_stats_on = -1;
 
-/* Bitmask of enabled patterns (bit 0 = S1 ... bit 6 = S7, bit 8 = S9), for
- * bisecting a suspected miscompile: TP_SCHED_MASK=0x13f disables S7, and so
- * on.  S8 has no switch. */
+/* Bitmask of enabled patterns (bit 0 = S1 ... bit 6 = S7, bit 8 = S9,
+ * bit 9 = S10), for bisecting a suspected miscompile: TP_SCHED_MASK=0x33f
+ * disables S7, and so on.  S8 has no switch. */
 static int tps_mask = -1;
 static int tps_on(int which)
 {
     if (tps_mask < 0) {
         const char *e = getenv("TP_SCHED_MASK");
-        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x17f;
+        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x37f;
     }
     return (tps_mask >> which) & 1;
 }
@@ -6804,6 +6806,75 @@ static void tps_bail(const char *why)
         tps_stats_on = getenv("TP_SCHED_STATS") ? 1 : 0;
     if (tps_stats_on)
         fprintf(stderr, "[SCHEDBAIL] %s %s\n", why, funcname ? funcname : "?");
+}
+
+static int tpg_ldlp_extent(const struct tp_relax_insn *c, int *lo);
+
+/* Is workspace word s dead after instruction m, on every path?  For a word
+ * the liveness bitmask may not cover (one past the register file, such as
+ * the scratch word 15, when a local's address escapes into an FP access).
+ * A walk from m's successors: a path is settled by an STL of s and lost at
+ * any read of it - LDL s, an LDLP access that reaches s, a call when s
+ * holds a stacked argument - and at anything the walk cannot follow.  The
+ * caller has checked that no LDLP hands out a reserved word's address in
+ * a shape this cannot see.  The function's own end kills everything. */
+static int tps_dead_after(struct tp_relax_insn *ins, struct tps_ann *an,
+                          int n, int m, int s)
+{
+    int *stack = tcc_malloc(sizeof(int) * 2 * (n + 1));
+    char *seen = tcc_mallocz(n);
+    int sp = 0, k, dead = 1;
+
+    stack[sp++] = an[m].succ1;
+    stack[sp++] = an[m].succ2;
+    while (sp && dead) {
+        int opc, opd, j;
+        k = stack[--sp];
+        if (k < 0)
+            continue;
+        if (k >= n || seen[k])
+            continue;
+        seen[k] = 1;
+        opc = ins[k].opcode;
+        opd = ins[k].operand;
+        if (an[k].dead || opc == -1) {
+            /* deleted or padding: falls through */
+        } else if (opc == TP_ENC_STL && opd == s) {
+            continue;                       /* this path is settled */
+        } else if (opc == TP_ENC_LDL && opd == s) {
+            dead = 0;
+        } else if (opc == TP_ENC_LDLP) {
+            for (j = k + 1; j < n && ins[j].opcode == -1; j++)
+                ;
+            if (j < n && (ins[j].opcode == TP_ENC_LDNL ||
+                          ins[j].opcode == TP_ENC_STNL)) {
+                if (opd + ins[j].operand == s) {
+                    if (ins[j].opcode == TP_ENC_STNL)
+                        continue;
+                    dead = 0;
+                }
+            } else if (opd == s || opd == s - 1) {
+                dead = 0;                   /* an FP access, maybe double */
+            }
+        } else if ((opc == TP_ENC_CALL ||
+                    (opc == TP_ENC_OPR && opd == TP_OPR_GCALL)) &&
+                   s < func_max_stack_words) {
+            dead = 0;
+        } else if (opc == TP_ENC_OPR && opd == TP_OPR_RET) {
+            continue;                       /* the frame is gone */
+        }
+        if (!dead)
+            break;
+        if (an[k].succ1 < 0 && an[k].succ2 < 0) {
+            dead = 0;                       /* a jump this cannot follow */
+            break;
+        }
+        stack[sp++] = an[k].succ1;
+        stack[sp++] = an[k].succ2;
+    }
+    tcc_free(stack);
+    tcc_free(seen);
+    return dead;
 }
 
 /* Next instruction that still exists, skipping padding and deletions. */
@@ -6843,6 +6914,7 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
     struct tps_ann *an;
     int *idx;               /* byte offset -> instruction index */
     int i, pass, round, removed = 0;
+    int resv_escape;        /* a reserved word's address escapes (S10) */
     static int sched_off = -1;
     /* Slots this pass is allowed to treat as pseudo-registers.  The frame's
      * reserved region can now be smaller than NB_REGS, in which case locals
@@ -7310,6 +7382,19 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
         }
     }
 
+    /* For S10 beyond the liveness mask: is every LDLP of a reserved word
+     * one access tps_dead_after can see? */
+    resv_escape = 0;
+    for (i = 0; i < n && !resv_escape; i++) {
+        int j, lo, t = ins[i].operand;
+        if (ins[i].opcode != TP_ENC_LDLP || t < 0 || t >= func_frame_reserved)
+            continue;
+        for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+            ;
+        if (j == n || tpg_ldlp_extent(&ins[j], &lo) < 0)
+            resv_escape = 1;
+    }
+
     /* ---- 5. pattern matching, iterated ---- */
     for (round = 0; round < TPS_ROUNDS; round++) {
         int changed = 0;
@@ -7468,9 +7553,40 @@ try_copy:
             if (i1 < 0 || ins[i1].opcode != TP_ENC_STL)
                 continue;
             b = ins[i1].operand;
-            if (b < 0 || b >= nslot)
+            if (b < 0)
                 continue;
-            if (!tps_on(5))
+
+            /* S10: LDL x ; STL b ; LDLP b ; <FP load from A>  ->
+             *      LDLP x ; <FP load>
+             * A float copied to a scratch word only to give the FPU an
+             * address can be read where it is, if the scratch word is dead
+             * afterwards.  Nothing in between writes x.  That is how a float
+             * constant kept in a frame word by tp_gaddr_cache is loaded. */
+            if (tps_on(9) && ins[i].opcode == TP_ENC_LDL &&
+                ins[i].operand >= 0 &&
+                (i2 = tps_next(ins, an, n, i1)) >= 0 &&
+                ins[i2].opcode == TP_ENC_LDLP && ins[i2].operand == b &&
+                (i3 = tps_next(ins, an, n, i2)) >= 0 &&
+                ins[i3].opcode == TP_ENC_OPR &&
+                (ins[i3].operand == TP_FPU_LDNLSN ||
+                 ins[i3].operand == TP_FPU_LDNLADDSN ||
+                 ins[i3].operand == TP_FPU_LDNLMULSN) &&
+                tps_free(ins, an, i, i3) &&
+                (b < nslot ? !(an[i3].liveout & (1u << b))
+                           : b >= func_max_outgoing_words &&
+                             b < func_frame_reserved && !resv_escape &&
+                             tps_dead_after(ins, an, n, i3, b))) {
+                int x = ins[i].operand;
+                ins[i2].operand = x;
+                if (tp_encode_len(TP_ENC_LDLP, x) > ins[i2].new_len)
+                    ins[i2].new_len = tp_encode_len(TP_ENC_LDLP, x);
+                an[i2].use = x < nslot ? x : -1;
+                an[i].dead = an[i1].dead = 1;
+                removed += 2; changed = 1; tps_note(9);
+                i = i3;
+                continue;
+            }
+            if (b >= nslot || !tps_on(5))
                 continue;
             if (an[i1].liveout & (1u << b))
                 continue;
@@ -7633,10 +7749,11 @@ try_copy:
     }
     if (tps_stats_on > 0)
         fprintf(stderr, "[SCHED] cumulative S1=%d S2=%d S3=%d S4=%d S5=%d "
-                        "S6=%d S7=%d S8=%d S9=%d (last %s -%d)\n",
+                        "S6=%d S7=%d S8=%d S9=%d S10=%d (last %s -%d)\n",
                 tps_stats[0], tps_stats[1], tps_stats[2], tps_stats[3],
                 tps_stats[4], tps_stats[5], tps_stats[6], tps_stats[7],
-                tps_stats[8], funcname ? funcname : "?", removed);
+                tps_stats[8], tps_stats[9], funcname ? funcname : "?",
+                removed);
     tcc_free(idx);
     tcc_free(an);
     return removed;
@@ -7866,6 +7983,12 @@ bail:
  * symbol: an anonymous one (L.n) in a loop is usually a message string on
  * the loop's error path, as in sceneSect.
  *
+ * Constants of six bytes or more get the same treatment: a float's bits
+ * (coneSect loads 1.0 five times and 0.001 four, `ldc #3F800000; stl 15;
+ * ldlp 15; fpldnlsn`) or a wide mask.  The word then holds the constant
+ * itself, so the scheduler's S10 can load a float straight from it
+ * (`ldlp word; fpldnlsn`).
+ *
  * The words are new, on top of the frame: the locals keep their slots and
  * only what lies above them - the return address and the parameters, each
  * LDL/STL/LDLP from slot F up - moves, and the AJWs grow.  Inserting them
@@ -7939,13 +8062,18 @@ static int tpg_ldlp_above(const struct tp_relax_insn *ins, int n, int i,
     return s <= F ? 0 : -1;
 }
 
-/* Uses as {symbol, record, relocation, weight}, in symbol then code order. */
+/* Uses as {kind, key, record, relocation, weight}: kind 0 a symbol's
+ * address (key its symbol index), kind 1 a constant (key its value).
+ * Sorted by kind, key, then code order. */
+#define TPG_U 5
 static int tpg_use_cmp(const void *a, const void *b)
 {
     const int *x = a, *y = b;
-    if (x[0] != y[0])
-        return x[0] < y[0] ? -1 : 1;
-    return (x[1] > y[1]) - (x[1] < y[1]);
+    int k;
+    for (k = 0; k < 3; k++)
+        if (x[k] != y[k])
+            return x[k] < y[k] ? -1 : 1;
+    return 0;
 }
 
 /* Returns 1 if it rewrote anything; *pins may then have moved and *pn
@@ -7960,7 +8088,7 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
     int base = func_start_ind;
     int first, i, j, k, w = 0, nu = 0, nb = 0, nrel, at;
     int *u, *lp;
-    int pick[TPG_MAX], plen[TPG_MAX];
+    int pick[TPG_MAX], plen[TPG_MAX], key[TPG_MAX];
     ElfW_Rel *rel;
 
     tpg.n = 0;
@@ -8004,14 +8132,16 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
             return 0;
     }
 
-    /* The uses: each an LDC_ABS relocation on an untouched placeholder,
-     * seven PFIX 0 and `ldc 0`, which the pinning step decoded as eight
-     * records. */
+    /* The uses.  A symbol's: an LDC_ABS relocation on an untouched
+     * placeholder, seven PFIX 0 and `ldc 0`, which the pinning step decoded
+     * as eight records.  A constant's: an `ldc` of six bytes or more, a
+     * float's bits or a wide mask, but not an `ldc; ldpi` offset, which
+     * moves with the code. */
     rel = (ElfW_Rel *)sec->reloc->data;
     nrel = sec->reloc->data_offset / sizeof(*rel);
-    if (nrel <= func_start_nrel)
+    if (nrel < func_start_nrel)
         return 0;
-    u = tcc_malloc(sizeof(int) * 4 * (nrel - func_start_nrel));
+    u = tcc_malloc(sizeof(int) * TPG_U * (nrel - func_start_nrel + n));
     for (i = func_start_nrel; i < nrel; i++) {
         int ro = (int)rel[i].r_offset - base;
         if (ELFW(R_TYPE)(rel[i].r_info) != R_TRANSPUTER_LDC_ABS ||
@@ -8024,13 +8154,30 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
         if (j < 7 || ins[k + 7].opcode != TP_ENC_LDC ||
             ins[k + 7].operand != 0 || ins[k + 7].old_len != 1)
             continue;
-        u[4 * nu] = ELFW(R_SYM)(rel[i].r_info);
-        u[4 * nu + 1] = k;
-        u[4 * nu + 2] = i;
-        u[4 * nu + 3] = 1;
+        u[TPG_U * nu] = 0;
+        u[TPG_U * nu + 1] = ELFW(R_SYM)(rel[i].r_info);
+        u[TPG_U * nu + 2] = k;
+        u[TPG_U * nu + 3] = i;
+        u[TPG_U * nu + 4] = 1;
         nu++;
     }
-    if (nu < 2) {
+    for (i = 0; i < n; i++) {
+        if (ins[i].opcode != TP_ENC_LDC || ins[i].pinned ||
+            tp_encode_len(TP_ENC_LDC, ins[i].operand) < 6)
+            continue;
+        for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+            ;
+        if (j < n && ins[j].opcode == TP_ENC_OPR &&
+            ins[j].operand == TP_OPR_LDPI)
+            continue;
+        u[TPG_U * nu] = 1;
+        u[TPG_U * nu + 1] = ins[i].operand;
+        u[TPG_U * nu + 2] = i;
+        u[TPG_U * nu + 3] = -1;
+        u[TPG_U * nu + 4] = 1;
+        nu++;
+    }
+    if (nu < 1) {
         tcc_free(u);
         return 0;
     }
@@ -8044,29 +8191,34 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
             nb++;
         }
     for (i = 0; i < nu; i++) {
-        int o = ins[u[4 * i + 1]].old_off;
+        int o = ins[u[TPG_U * i + 2]].old_off;
         for (j = 0; j < nb; j++)
             if (lp[2 * j] <= o && o <= lp[2 * j + 1]) {
-                u[4 * i + 3] = 4;
+                u[TPG_U * i + 4] = 4;
                 break;
             }
     }
     tcc_free(lp);
 
-    /* The symbols worth a word, heaviest first. */
-    qsort(u, nu, sizeof(int) * 4, tpg_use_cmp);
+    /* The ones worth a word, heaviest first. */
+    qsort(u, nu, sizeof(int) * TPG_U, tpg_use_cmp);
     for (;;) {
         int best = -1, bestlen = 0, bestwt = 2;
         for (i = 0; i < nu; i += k) {
-            ElfW(Sym) *es = (ElfW(Sym) *)symtab_section->data + u[4 * i];
-            const char *nm = (char *)symtab_section->link->data + es->st_name;
             int wt = 0;
-            for (k = 0; i + k < nu && u[4 * (i + k)] == u[4 * i]; k++)
-                wt += u[4 * (i + k) + 3];
+            for (k = 0; i + k < nu && u[TPG_U * (i + k)] == u[TPG_U * i] &&
+                        u[TPG_U * (i + k) + 1] == u[TPG_U * i + 1]; k++)
+                wt += u[TPG_U * (i + k) + 4];
             for (j = 0; j < w && pick[j] != i; j++)
                 ;
-            if (k == 1 && nm[0] == 'L' && nm[1] == '.')
-                continue;
+            if (k == 1 && u[TPG_U * i] == 0) {
+                ElfW(Sym) *es = (ElfW(Sym) *)symtab_section->data +
+                                u[TPG_U * i + 1];
+                const char *nm = (char *)symtab_section->link->data +
+                                 es->st_name;
+                if (nm[0] == 'L' && nm[1] == '.')
+                    continue;
+            }
             if (j == w && wt > bestwt) {
                 best = i;
                 bestlen = k;
@@ -8098,44 +8250,59 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
             ins[i].new_len = tp_encode_len(opc, ins[i].operand);
     }
 
-    /* Every use becomes `ldl word`; the PFIX 0 in front of it go. */
+    /* Every use becomes `ldl word`; a placeholder's PFIX 0 go. */
     tpg.ndrop = 0;
     for (j = 0; j < w; j++) {
+        int sym = u[TPG_U * pick[j]] == 0;
+        key[j] = u[TPG_U * pick[j] + 1];
+        tpg.move_rel[j] = -1;
         for (i = pick[j]; i < pick[j] + plen[j]; i++) {
-            int r = u[4 * i + 1];
-            for (k = r; k < r + 7; k++)
-                ins[k].pinned = 0;
-            ins[r + 7].pinned = 0;
-            ins[r + 7].opcode = TP_ENC_LDL;
-            ins[r + 7].operand = F + j;
-            ins[r + 7].new_len = tp_encode_len(TP_ENC_LDL, F + j);
+            int r = u[TPG_U * i + 2];
+            if (sym) {
+                for (k = r; k < r + 7; k++)
+                    ins[k].pinned = 0;
+                r += 7;
+            }
+            ins[r].pinned = 0;
+            ins[r].opcode = TP_ENC_LDL;
+            ins[r].operand = F + j;
+            ins[r].new_len = tp_encode_len(TP_ENC_LDL, F + j);
+            if (!sym)
+                continue;
             if (i == pick[j]) {
-                tpg.move_rel[j] = u[4 * i + 2];
+                tpg.move_rel[j] = u[TPG_U * i + 3];
                 continue;
             }
             if (tpg.ndrop == tpg.cap) {
                 tpg.cap = tpg.cap ? 2 * tpg.cap : 64;
                 tpg.drop = tcc_realloc(tpg.drop, sizeof(int) * tpg.cap);
             }
-            tpg.drop[tpg.ndrop++] = u[4 * i + 2];
+            tpg.drop[tpg.ndrop++] = u[TPG_U * i + 3];
         }
         if (stats) {
-            ElfW(Sym) *es = (ElfW(Sym) *)symtab_section->data + u[4 * pick[j]];
             int wt = 0;
             for (i = pick[j]; i < pick[j] + plen[j]; i++)
-                wt += u[4 * i + 3];
-            fprintf(stderr, "[GADDR] %s: %s, %d uses, weight %d\n",
-                    funcname ? funcname : "?",
-                    (char *)symtab_section->link->data + es->st_name,
-                    plen[j], wt);
+                wt += u[TPG_U * i + 4];
+            if (sym) {
+                ElfW(Sym) *es = (ElfW(Sym) *)symtab_section->data + key[j];
+                fprintf(stderr, "[GADDR] %s: %s, %d uses, weight %d\n",
+                        funcname ? funcname : "?",
+                        (char *)symtab_section->link->data + es->st_name,
+                        plen[j], wt);
+            } else {
+                fprintf(stderr, "[GADDR] %s: #%08X, %d uses, weight %d\n",
+                        funcname ? funcname : "?", (unsigned)key[j],
+                        plen[j], wt);
+            }
         }
     }
     tcc_free(u);
 
-    /* After the prologue, `ldc sym; stl word` for each: placeholders the
-     * linker fills as it did the first use's.  They come before the
-     * instruction they are inserted in front of and share its old offset,
-     * so a branch to that instruction still lands on it. */
+    /* After the prologue, `ldc; stl word` for each: a symbol's a
+     * placeholder the linker fills as it did the first use's, a constant's
+     * the constant.  They come before the instruction they are inserted in
+     * front of and share its old offset, so a branch to that instruction
+     * still lands on it. */
     ins = tcc_realloc(ins, sizeof(*ins) * (n + 2 * w + 1));
     memmove(ins + first + 1 + 2 * w, ins + first + 1,
             sizeof(*ins) * (n - first - 1));
@@ -8145,8 +8312,13 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
         memset(a, 0, 2 * sizeof(*a));
         a->old_off = b->old_off = at;
         a->opcode = TP_ENC_LDC;
-        a->new_len = 8;
-        a->pinned = 1;
+        if (tpg.move_rel[j] >= 0) {
+            a->new_len = 8;
+            a->pinned = 1;
+        } else {
+            a->operand = key[j];
+            a->new_len = tp_encode_len(TP_ENC_LDC, key[j]);
+        }
         a->synth = 1;
         b->opcode = TP_ENC_STL;
         b->operand = F + j;
@@ -8178,8 +8350,9 @@ static void tp_gaddr_commit(Section *sec, const struct tp_relax_insn *ins)
     char *gone;
 
     for (j = 0; j < tpg.n; j++)
-        rel[tpg.move_rel[j]].r_offset = func_start_ind +
-                                        ins[tpg.load_rec[j]].new_off;
+        if (tpg.move_rel[j] >= 0)           /* not a constant */
+            rel[tpg.move_rel[j]].r_offset = func_start_ind +
+                                            ins[tpg.load_rec[j]].new_off;
     gone = tcc_mallocz(nrel - func_start_nrel);
     for (i = 0; i < tpg.ndrop; i++)
         gone[tpg.drop[i] - func_start_nrel] = 1;

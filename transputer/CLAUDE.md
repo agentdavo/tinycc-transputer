@@ -770,12 +770,21 @@ the occam compiler does, and what new codegen should be held to:
   same reason.  The first use's relocation moves to the entry load and the
   others are deleted, only once the rewrite is committed.  Functions with
   inline assembly, GAJW, another AJW, or an access through an LDLP that
-  crosses the frame top are left alone.  -45 M cycles on the ray tracer
-  (3,143 M -> 3,097 M; `sceneSect` 680 -> 625 a call, below occam's 707),
-  every picture unchanged; Doom's drawers (`tests/bench/doom.sh t800`)
-  -6% to -13%, `FixedMul`/`FixedDiv` over global arrays -53% to -59%.
-  `TCC_TRANSPUTER_GADDR=0` turns it off, `TP_GADDR_STATS=1` lists the
-  symbols kept; `test_gaddr_cache.c`.
+  crosses the frame top are left alone, and so are those with `startp`,
+  `endp` or `runp`, where a process can enter the body on another
+  workspace without the prologue (`test_process_builtins` caught it).
+  A constant of six bytes or more - a float's bits, a wide mask - is kept
+  the same way, and the scheduler's S10 then loads a float from its word
+  in place: `ldl x; stl b; ldlp b; fpldnlsn` -> `ldlp x; fpldnlsn` when b
+  is dead after (`tps_dead_after` walks the flow graph for a scratch word
+  outside the liveness mask).  -59 M cycles on the ray tracer (3,143 M ->
+  3,084 M, 4.6% over occam; `sceneSect` 680 -> 625 a call, below occam's
+  707; `coneSect` 1753 -> 1721), every picture unchanged.  Doom's drawers
+  (`tests/bench/doom.sh t800`) gained 6-13% before 4198801b hoisted their
+  globals by hand; on the hoisted sources 0.1-0.5%, and the benchmark's
+  FixedMul/FixedDiv loops over global arrays 6-7%.
+  `TCC_TRANSPUTER_GADDR=0` turns it off (`TP_SCHED_MASK=0x17f` S10),
+  `TP_GADDR_STATS=1` lists what is kept; `test_gaddr_cache.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`
@@ -814,14 +823,17 @@ extra instructions are one- and two-cycle loads and stores)
   forgetting it) saved only 2.5 M and hung model 1, so it was dropped;
   the function-wide one (`tp_gaddr_cache`, under "What TinyCC does now")
   cut the `ldc` excess to 69 M, 45 M net of the `ldl`s that replace the
-  loads.  What is left: the entry loads themselves (8 cycles
-  each, `shadeNode` has three), globals used once, and float constants
-  (below).  Several statics of one section could share one entry load
-  (`ldl base; ldnlp k`), but `ldnlp` with a 0x8000-byte offset costs
+  loads.  What is left: the entry loads themselves (8 cycles each,
+  `shadeNode` has three), globals used once, and float constants used
+  once (below).  Several statics of one section could share one entry
+  load (`ldl base; ldnlp k`), but `ldnlp` with a 0x8000-byte offset costs
   nearly what the `ldc` does.
 - FP constants as eight-nibble `ldc` literals parked in a slot (1.0,
-  0.001, 512.0, 4.0: about 25 M cycles after `x * 2.0`): load them from a
-  constant table instead.
+  0.001, 512.0, 4.0: about 25 M cycles after `x * 2.0`).  A constant a
+  function uses repeatedly now lives in a frame word and loads in place
+  (`ldlp word; fpldnlsn`, 13 M of it, `coneSect`'s 1.0 and 0.001); one
+  used once still costs `ldc; stl; ldlp`.  A table in the code reached
+  by `ldc off; ldpi`, as occam does, would cover those.
 - `fpordered` before every T800 relation (C's NaN rule): 19 M.
 - Loop and condition code: TinyCC's `cj`, `gt`, `adc` and `eqc` cost
   +200 M against occam's `lend` (-174 M); a counted `for` could be `lend`.
