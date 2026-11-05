@@ -6564,6 +6564,8 @@ struct tp_relax_insn {
     int target_old;   /* branch target, as an old offset */
     int ext;          /* target is before the function and does not move */
     int pinned;       /* relocation points into this instruction */
+    int synth;        /* inserted by tp_gaddr_cache: no bytes in the old code;
+                         old_off is that of the instruction it precedes */
 };
 
 /* A branch's target after relaxation, as a new offset. */
@@ -7661,7 +7663,9 @@ try_copy:
  * What stays put:
  *   - slot 0, which outbyte/outword and the ALT instructions use implicitly,
  *     and the outgoing-argument words, which the callee reads in place;
- *   - everything at and above the frame top: return address and parameters;
+ *   - everything at and above the frame top: return address and parameters,
+ *     and the `top` words tp_gaddr_cache put just under them, which this
+ *     pass takes to be above the frame;
  *   - the shape around an LDLP naming the first slot of a unit, which may be
  *     `&arr[N]` for the unit below: the two are merged.  One naming the frame
  *     top pins the unit beneath it.
@@ -7673,10 +7677,10 @@ try_copy:
  * Returns 1 if it rewrote anything; new_len then holds each rewritten
  * instruction's width, which may have grown.
  */
-static int tp_slot_remap(struct tp_relax_insn *ins, int n)
+static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
 {
     static int off = -1, stats = -1;
-    int F = func_frame_words, R = func_frame_reserved;
+    int F = func_frame_words - top, R = func_frame_reserved;
     int P = func_max_outgoing_words > 1 ? func_max_outgoing_words : 1;
     int pin_top = 0, nu = 0, lo, hi, first, i, j, s, pos;
     int old_bytes = 0, new_bytes = 0;
@@ -7842,6 +7846,351 @@ bail:
     return 0;
 }
 
+/*
+ * Global addresses kept in the frame.
+ *
+ * A global's address is the 8-byte `ldc` placeholder the linker fills in
+ * (tp_push_sym_addr), and RAM starts at MinInt, so an address such as
+ * #800469B4 needs all eight nibbles: 8 cycles a use, where occam reaches
+ * its globals through the static link for 2 or 3.  In the ray tracer that
+ * was 133 M T800 cycles more than occam, most of it in loops: sceneSect
+ * reads worldModel three times for every object in the scene.
+ *
+ * When a function uses one symbol's address often enough, load it once,
+ * right after the prologue, into a frame word of its own and make every
+ * use an `ldl` of that word.  The address never changes, so the load can
+ * sit at the entry whatever the control flow.  It costs 10 cycles even on
+ * a path that never uses it and saves 5 or 6 a use, so a symbol needs a
+ * weight of three, a use inside a loop (under a backward branch) weighing
+ * four.  A single use qualifies only in a loop and only for a named
+ * symbol: an anonymous one (L.n) in a loop is usually a message string on
+ * the loop's error path, as in sceneSect.
+ *
+ * The words are new, on top of the frame: the locals keep their slots and
+ * only what lies above them - the return address and the parameters, each
+ * LDL/STL/LDLP from slot F up - moves, and the AJWs grow.  Inserting them
+ * lower would push the locals up: Doom's R_DrawColumn had its loop's locals
+ * pushed past slot 15, a prefix byte and a cycle more on every access.  An
+ * LDLP of slot F is one past the topmost local (an array's end) and stays,
+ * unless what it feeds reads above it.  The slot remap leaves the new words
+ * where they are, for the same reason.  Only those instructions may name a
+ * frame word, so functions with inline assembly, GAJW, an AJW other than
+ * the prologue's and the epilogues' `ajw N; ret`, or an access through an
+ * LDLP that crosses the frame's top are left alone.  So are those with
+ * startp, endp or runp: a process can enter the body there on another
+ * workspace, skipping the loads (test_process_builtins).
+ *
+ * The relocations change only when the rewrite is committed
+ * (tp_gaddr_commit): the first use's moves to the new load, whose bytes
+ * repeat the placeholder, and the others are deleted.
+ * TCC_TRANSPUTER_GADDR=0 turns it off; TP_GADDR_STATS=1 lists what it
+ * keeps.
+ */
+#define TPG_MAX 4
+
+static struct {
+    int n;                  /* symbols kept; 0 means nothing to commit */
+    int move_rel[TPG_MAX];  /* relocation that moves to the entry load */
+    int load_rec[TPG_MAX];  /* the entry load */
+    int *drop;              /* relocations of the uses that became LDLs */
+    int ndrop, cap;
+} tpg;
+
+/* The frame words an LDLP's consumer touches, from `*lo` words above the
+ * LDLP's slot; -1 when it is not an access this pass can follow. */
+static int tpg_ldlp_extent(const struct tp_relax_insn *c, int *lo)
+{
+    *lo = 0;
+    if (c->opcode == TP_ENC_LDNL || c->opcode == TP_ENC_STNL) {
+        *lo = c->operand;
+        return 1;
+    }
+    if (c->opcode != TP_ENC_OPR)
+        return -1;
+    switch (c->operand) {
+    case TP_FPU_LDNLSN: case TP_FPU_STNLSN:
+    case TP_FPU_LDNLADDSN: case TP_FPU_LDNLMULSN:
+    case TP_OPR_FPI32TOR32: case TP_OPR_FPI32TOR64:
+    case TP_OPR_FPB32TOR64: case TP_OPR_FPSTNLI32:
+        return 1;
+    case TP_FPU_LDNLDB: case TP_FPU_STNLDB:
+    case TP_FPU_LDNLADDDB: case TP_FPU_LDNLMULDB:
+        return 2;
+    }
+    return -1;
+}
+
+/* Does LDLP i name a word above a frame of F words, which moves when the
+ * frame grows?  -1 when the access it feeds crosses the frame's top. */
+static int tpg_ldlp_above(const struct tp_relax_insn *ins, int n, int i,
+                          int F)
+{
+    int j, lo, ext, s = ins[i].operand;
+
+    for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+        ;
+    ext = j < n ? tpg_ldlp_extent(&ins[j], &lo) : -1;
+    if (ext < 0)
+        return s > F;           /* an address handed on: F is a local's end */
+    if ((s + lo >= F) != (s + lo + ext - 1 >= F))
+        return -1;
+    if (s + lo >= F)
+        return s >= F ? 1 : -1;
+    return s <= F ? 0 : -1;
+}
+
+/* Uses as {symbol, record, relocation, weight}, in symbol then code order. */
+static int tpg_use_cmp(const void *a, const void *b)
+{
+    const int *x = a, *y = b;
+    if (x[0] != y[0])
+        return x[0] < y[0] ? -1 : 1;
+    return (x[1] > y[1]) - (x[1] < y[1]);
+}
+
+/* Returns 1 if it rewrote anything; *pins may then have moved and *pn
+ * grown, and tidx is rebuilt. */
+static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
+                          int size)
+{
+    static int off = -1, stats = -1;
+    Section *sec = cur_text_section;
+    struct tp_relax_insn *ins = *pins;
+    int n = *pn, F = func_frame_words;
+    int base = func_start_ind;
+    int first, i, j, k, w = 0, nu = 0, nb = 0, nrel, at;
+    int *u, *lp;
+    int pick[TPG_MAX], plen[TPG_MAX];
+    ElfW_Rel *rel;
+
+    tpg.n = 0;
+    if (off < 0) {
+        const char *e = getenv("TCC_TRANSPUTER_GADDR");
+        off = (e && *e == '0') ? 1 : 0;
+        stats = getenv("TP_GADDR_STATS") ? 1 : 0;
+    }
+    if (off || func_uses_inline_asm || !sec->reloc || F <= 0)
+        return 0;
+
+    /* The frame's shape: `ajw -F` first, `ajw F; ret` to leave, and every
+     * other access to a frame word an LDL, STL or LDLP. */
+    for (first = 0; first < n && ins[first].opcode == -1; first++)
+        ;
+    if (first + 1 >= n || ins[first].opcode != TP_ENC_AJW ||
+        ins[first].operand != -F)
+        return 0;
+    for (i = 0; i < n; i++) {
+        int opc = ins[i].opcode;
+        /* A process started here (startp at the next instruction, the
+         * `__startp(ws, 0)` idiom), resumed here by endp, or made runnable
+         * by runp may run this body on another workspace, without the
+         * prologue that fills the new words. */
+        if (opc == TP_ENC_OPR && (ins[i].operand == TP_OPR_GAJW ||
+                                  ins[i].operand == TP_OPR_STARTP ||
+                                  ins[i].operand == TP_OPR_ENDP ||
+                                  ins[i].operand == TP_OPR_RUNP))
+            return 0;
+        if (ins[i].pinned && (opc == TP_ENC_LDL || opc == TP_ENC_STL ||
+                              opc == TP_ENC_LDLP || opc == TP_ENC_AJW))
+            return 0;
+        if (opc == TP_ENC_AJW && i != first) {
+            for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+                ;
+            if (ins[i].operand != F || j == n || ins[j].opcode != TP_ENC_OPR
+                || ins[j].operand != TP_OPR_RET)
+                return 0;
+        }
+        if (opc == TP_ENC_LDLP && tpg_ldlp_above(ins, n, i, F) < 0)
+            return 0;
+    }
+
+    /* The uses: each an LDC_ABS relocation on an untouched placeholder,
+     * seven PFIX 0 and `ldc 0`, which the pinning step decoded as eight
+     * records. */
+    rel = (ElfW_Rel *)sec->reloc->data;
+    nrel = sec->reloc->data_offset / sizeof(*rel);
+    if (nrel <= func_start_nrel)
+        return 0;
+    u = tcc_malloc(sizeof(int) * 4 * (nrel - func_start_nrel));
+    for (i = func_start_nrel; i < nrel; i++) {
+        int ro = (int)rel[i].r_offset - base;
+        if (ELFW(R_TYPE)(rel[i].r_info) != R_TRANSPUTER_LDC_ABS ||
+            ro < 0 || ro + 8 > size || (k = tidx[ro]) < 0 || k + 8 > n)
+            continue;
+        for (j = 0; j < 7; j++)
+            if (ins[k + j].opcode != -1 || ins[k + j].old_len != 1 ||
+                ins[k + j].old_off != ro + j)
+                break;
+        if (j < 7 || ins[k + 7].opcode != TP_ENC_LDC ||
+            ins[k + 7].operand != 0 || ins[k + 7].old_len != 1)
+            continue;
+        u[4 * nu] = ELFW(R_SYM)(rel[i].r_info);
+        u[4 * nu + 1] = k;
+        u[4 * nu + 2] = i;
+        u[4 * nu + 3] = 1;
+        nu++;
+    }
+    if (nu < 2) {
+        tcc_free(u);
+        return 0;
+    }
+
+    /* A use under a backward branch is in a loop. */
+    lp = tcc_malloc(sizeof(int) * 2 * n);
+    for (i = 0; i < n; i++)
+        if (ins[i].is_branch && ins[i].target_old <= ins[i].old_off) {
+            lp[2 * nb] = ins[i].target_old;
+            lp[2 * nb + 1] = ins[i].old_off;
+            nb++;
+        }
+    for (i = 0; i < nu; i++) {
+        int o = ins[u[4 * i + 1]].old_off;
+        for (j = 0; j < nb; j++)
+            if (lp[2 * j] <= o && o <= lp[2 * j + 1]) {
+                u[4 * i + 3] = 4;
+                break;
+            }
+    }
+    tcc_free(lp);
+
+    /* The symbols worth a word, heaviest first. */
+    qsort(u, nu, sizeof(int) * 4, tpg_use_cmp);
+    for (;;) {
+        int best = -1, bestlen = 0, bestwt = 2;
+        for (i = 0; i < nu; i += k) {
+            ElfW(Sym) *es = (ElfW(Sym) *)symtab_section->data + u[4 * i];
+            const char *nm = (char *)symtab_section->link->data + es->st_name;
+            int wt = 0;
+            for (k = 0; i + k < nu && u[4 * (i + k)] == u[4 * i]; k++)
+                wt += u[4 * (i + k) + 3];
+            for (j = 0; j < w && pick[j] != i; j++)
+                ;
+            if (k == 1 && nm[0] == 'L' && nm[1] == '.')
+                continue;
+            if (j == w && wt > bestwt) {
+                best = i;
+                bestlen = k;
+                bestwt = wt;
+            }
+        }
+        if (best < 0 || w == TPG_MAX)
+            break;
+        pick[w] = best;
+        plen[w++] = bestlen;
+    }
+    if (!w) {
+        tcc_free(u);
+        return 0;
+    }
+
+    /* Make room: the new words are F .. F+w-1. */
+    for (i = 0; i < n; i++) {
+        int opc = ins[i].opcode;
+        if ((opc == TP_ENC_LDL || opc == TP_ENC_STL) && ins[i].operand >= F)
+            ins[i].operand += w;
+        else if (opc == TP_ENC_LDLP && tpg_ldlp_above(ins, n, i, F) > 0)
+            ins[i].operand += w;
+        else if (opc == TP_ENC_AJW)
+            ins[i].operand += ins[i].operand < 0 ? -w : w;
+        else
+            continue;
+        if (tp_encode_len(opc, ins[i].operand) > ins[i].new_len)
+            ins[i].new_len = tp_encode_len(opc, ins[i].operand);
+    }
+
+    /* Every use becomes `ldl word`; the PFIX 0 in front of it go. */
+    tpg.ndrop = 0;
+    for (j = 0; j < w; j++) {
+        for (i = pick[j]; i < pick[j] + plen[j]; i++) {
+            int r = u[4 * i + 1];
+            for (k = r; k < r + 7; k++)
+                ins[k].pinned = 0;
+            ins[r + 7].pinned = 0;
+            ins[r + 7].opcode = TP_ENC_LDL;
+            ins[r + 7].operand = F + j;
+            ins[r + 7].new_len = tp_encode_len(TP_ENC_LDL, F + j);
+            if (i == pick[j]) {
+                tpg.move_rel[j] = u[4 * i + 2];
+                continue;
+            }
+            if (tpg.ndrop == tpg.cap) {
+                tpg.cap = tpg.cap ? 2 * tpg.cap : 64;
+                tpg.drop = tcc_realloc(tpg.drop, sizeof(int) * tpg.cap);
+            }
+            tpg.drop[tpg.ndrop++] = u[4 * i + 2];
+        }
+        if (stats) {
+            ElfW(Sym) *es = (ElfW(Sym) *)symtab_section->data + u[4 * pick[j]];
+            int wt = 0;
+            for (i = pick[j]; i < pick[j] + plen[j]; i++)
+                wt += u[4 * i + 3];
+            fprintf(stderr, "[GADDR] %s: %s, %d uses, weight %d\n",
+                    funcname ? funcname : "?",
+                    (char *)symtab_section->link->data + es->st_name,
+                    plen[j], wt);
+        }
+    }
+    tcc_free(u);
+
+    /* After the prologue, `ldc sym; stl word` for each: placeholders the
+     * linker fills as it did the first use's.  They come before the
+     * instruction they are inserted in front of and share its old offset,
+     * so a branch to that instruction still lands on it. */
+    ins = tcc_realloc(ins, sizeof(*ins) * (n + 2 * w + 1));
+    memmove(ins + first + 1 + 2 * w, ins + first + 1,
+            sizeof(*ins) * (n - first - 1));
+    at = ins[first + 1 + 2 * w].old_off;
+    for (j = 0; j < w; j++) {
+        struct tp_relax_insn *a = &ins[first + 1 + 2 * j], *b = a + 1;
+        memset(a, 0, 2 * sizeof(*a));
+        a->old_off = b->old_off = at;
+        a->opcode = TP_ENC_LDC;
+        a->new_len = 8;
+        a->pinned = 1;
+        a->synth = 1;
+        b->opcode = TP_ENC_STL;
+        b->operand = F + j;
+        b->new_len = tp_encode_len(TP_ENC_STL, F + j);
+        b->synth = 1;
+        tpg.load_rec[j] = first + 1 + 2 * j;
+    }
+    n += 2 * w;
+    for (i = 0; i <= size; i++)
+        tidx[i] = -1;
+    for (i = 0; i < n; i++)
+        if (!ins[i].synth)
+            tidx[ins[i].old_off] = i;
+
+    func_frame_words = F + w;
+    tpg.n = w;
+    *pins = ins;
+    *pn = n;
+    return 1;
+}
+
+/* Once the rewrite is in place: each kept symbol's relocation moves to its
+ * entry load, and the other uses' relocations are deleted. */
+static void tp_gaddr_commit(Section *sec, const struct tp_relax_insn *ins)
+{
+    ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
+    int nrel = sec->reloc->data_offset / sizeof(*rel);
+    int i, j, k;
+    char *gone;
+
+    for (j = 0; j < tpg.n; j++)
+        rel[tpg.move_rel[j]].r_offset = func_start_ind +
+                                        ins[tpg.load_rec[j]].new_off;
+    gone = tcc_mallocz(nrel - func_start_nrel);
+    for (i = 0; i < tpg.ndrop; i++)
+        gone[tpg.drop[i] - func_start_nrel] = 1;
+    for (i = k = func_start_nrel; i < nrel; i++)
+        if (!gone[i - func_start_nrel])
+            rel[k++] = rel[i];
+    sec->reloc->data_offset = k * sizeof(*rel);
+    tcc_free(gone);
+    tpg.n = 0;
+}
+
 /* Returns 1 if the function was rewritten. */
 static int tp_relax_function(void)
 {
@@ -7904,6 +8253,7 @@ static int tp_relax_function(void)
             ins[n].is_branch = 0;
             ins[n].target_old = 0;
             ins[n].ext = 0;
+            ins[n].synth = 0;
             n++;
             p++;
             continue;
@@ -7923,6 +8273,7 @@ static int tp_relax_function(void)
         ins[n].is_branch = (opc == TP_ENC_J || opc == TP_ENC_CJ);
         ins[n].target_old = ins[n].is_branch ? (p + len + opd) : 0;
         ins[n].ext = 0;
+        ins[n].synth = 0;
         n++;
         p += len;
     }
@@ -7999,6 +8350,12 @@ static int tp_relax_function(void)
         grown = 1;
     }
 
+    /* 2a'. Keep the addresses of busy globals in frame words of their own.
+     * This renumbers the frame, so it comes before the passes that reason
+     * about frame words. */
+    if (tp_gaddr_cache(&ins, &n, tidx, size))
+        grown = 1;
+
     /* 2b. Evaluation-stack scheduling: delete the workspace round trips the
      * always-STL register model leaves behind. Deleted instructions become
      * zero-length no-ops, which the shrink pass below already knows how to
@@ -8008,7 +8365,7 @@ static int tp_relax_function(void)
 
     /* 2b'. Renumber the frame by use.  Moving a cold unit up can widen an
      * access, which the growth pass below then makes room for. */
-    if (tp_slot_remap(ins, n))
+    if (tp_slot_remap(ins, n, tpg.n))
         grown = 1;
 
     /* 2b''. Narrowed direct calls (near_call_log) stayed pinned through the
@@ -8139,7 +8496,14 @@ static int tp_relax_function(void)
     for (i = 0; i < n; i++) {
         uint8_t buf[16];
         int len;
-        map[ins[i].old_off] = ins[i].new_off;
+        if (ins[i].synth && ins[i].pinned) {
+            /* tp_gaddr_cache's entry load: a fresh LDC_ABS placeholder */
+            memset(out + ins[i].new_off, (TP_ENC_PFIX << 4), 7);
+            out[ins[i].new_off + 7] = TP_ENC_LDC << 4;
+            continue;
+        }
+        if (!ins[i].synth)
+            map[ins[i].old_off] = ins[i].new_off;
         if (ins[i].pinned) {
             int k;
             /* A pinned instruction keeps its exact width, so every byte inside
@@ -8230,6 +8594,8 @@ static int tp_relax_function(void)
                 continue;
             rel[i].r_offset = base + map[ro];
         }
+        if (tpg.n)
+            tp_gaddr_commit(sec, ins);
     }
 
     /* 6. Move the symbols that name code in this function.  A label whose

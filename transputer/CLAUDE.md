@@ -755,6 +755,27 @@ the occam compiler does, and what new codegen should be held to:
   5,268,802 `fpdup`s exactly, where it had none: -12 M cycles (3,277 M ->
   3,266 M).  `TCC_TRANSPUTER_FPSTACK=0` turns it off too;
   `test_fpu_square.c`.
+- A global whose address a function loads with a weight of three (a use
+  under a backward branch weighs four; a lone use of an anonymous `L.n`,
+  usually a message string, does not count) has it loaded once after the
+  prologue into a frame word of its own, and each use is an `ldl` of that
+  word (`tp_gaddr_cache`, in the relaxation pass, up to four symbols a
+  function).  RAM starts at MinInt, so a global's address is eight
+  nibbles: `ldc` costs 8 cycles where `ldl` costs 2 or 3.  The new words
+  go on top of the frame, so only the return address and the parameters
+  move and the AJWs grow; an LDLP of the old frame top is a local array's
+  end and stays.  Putting them lower, at the reserved region's end, pushed
+  Doom's column loop's locals past slot 15 (a prefix byte on every access)
+  and cost 3% there; the slot remap leaves the new words alone for the
+  same reason.  The first use's relocation moves to the entry load and the
+  others are deleted, only once the rewrite is committed.  Functions with
+  inline assembly, GAJW, another AJW, or an access through an LDLP that
+  crosses the frame top are left alone.  -45 M cycles on the ray tracer
+  (3,143 M -> 3,097 M; `sceneSect` 680 -> 625 a call, below occam's 707),
+  every picture unchanged; Doom's drawers (`tests/bench/doom.sh t800`)
+  -6% to -13%, `FixedMul`/`FixedDiv` over global arrays -53% to -59%.
+  `TCC_TRANSPUTER_GADDR=0` turns it off, `TP_GADDR_STATS=1` lists the
+  symbols kept; `test_gaddr_cache.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`
@@ -787,14 +808,17 @@ extra instructions are one- and two-cycle loads and stores)
 - Parking through workspace: `ldl`/`stl`/`ldlp` +187 M cycles of the
   318 M gap.  What is left is integer: values parked between operations
   (`ldl a; adc 1; stl 9; ldl 9`), which the FPU-stack work does not reach.
-- Global addresses: `tree`, `worldModel`, ... are 7-cycle `ldc`s, 106 M
-  cycles in 15 M loads, where occam pays 2-3 through its static link.
-  Keeping a global's address in a frame word from its second use in a
-  basic block, labels forgetting it, saved only 2.5 M (blocks seldom use
-  a global three times) and hung model 1 on one node, so it was not kept.
-  What would pay is a function-wide base: hoisting across loop
-  iterations needs dominance, or occam's static-link scheme (an ABI
-  change).
+- Global addresses: `tree`, `worldModel`, ... were 8-cycle `ldc`s, 133 M
+  cycles over occam's, which pays 2-3 through its static link.  A
+  block-local cache (from a global's second use in a basic block, labels
+  forgetting it) saved only 2.5 M and hung model 1, so it was dropped;
+  the function-wide one (`tp_gaddr_cache`, under "What TinyCC does now")
+  cut the `ldc` excess to 69 M, 45 M net of the `ldl`s that replace the
+  loads.  What is left: the entry loads themselves (8 cycles
+  each, `shadeNode` has three), globals used once, and float constants
+  (below).  Several statics of one section could share one entry load
+  (`ldl base; ldnlp k`), but `ldnlp` with a 0x8000-byte offset costs
+  nearly what the `ldc` does.
 - FP constants as eight-nibble `ldc` literals parked in a slot (1.0,
   0.001, 512.0, 4.0: about 25 M cycles after `x * 2.0`): load them from a
   constant table instead.
