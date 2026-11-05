@@ -1726,10 +1726,8 @@ ST_FUNC void relocate_sections(TCCState *s1);
 ST_FUNC ssize_t full_read(int fd, void *buf, size_t count);
 ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size);
 ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h);
-ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset);
-#ifdef TCC_TARGET_TRANSPUTER
-ST_FUNC void tcc_clear_archive_context(void);
-#endif
+ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset,
+                                const char *member_name);
 ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte);
 ST_FUNC void add_array(TCCState *s1, const char *sec, int c);
 

@@ -1091,10 +1091,7 @@ static int tcc_add_binary(TCCState *s1, int flags, const char *filename, int fd)
     switch (obj_type) {
 
     case AFF_BINTYPE_REL:
-#ifdef TCC_TARGET_TRANSPUTER
-        tcc_clear_archive_context();
-#endif
-        ret = tcc_load_object_file(s1, fd, 0);
+        ret = tcc_load_object_file(s1, fd, 0, NULL);
         break;
 
     case AFF_BINTYPE_AR:

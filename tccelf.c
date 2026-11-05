@@ -3339,20 +3339,8 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
 
 /* load an object file and merge it with current files */
 /* XXX: handle correctly stab (debug) info */
-#ifdef TCC_TARGET_TRANSPUTER
-static char archive_member_name[32];
-static const char *archive_member_name_ptr;
-
-/* Clear archive context — must be called before loading direct .o files
-   so they don't get incorrectly tagged as archive members. */
-ST_FUNC void tcc_clear_archive_context(void)
-{
-    archive_member_name_ptr = NULL;
-}
-#endif
-
-ST_FUNC int tcc_load_object_file(TCCState *s1,
-                                int fd, unsigned long file_offset)
+ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset,
+                                const char *member_name)
 {
 #ifdef TCC_TARGET_TRANSPUTER
     static int reloc_log = -1;
@@ -3415,7 +3403,7 @@ invalid:
     }
 #ifdef TCC_TARGET_TRANSPUTER
     /* compiled for a part this link's -m target is not? */
-    if (tp_check_object_flags(s1, ehdr.e_flags, archive_member_name_ptr) < 0)
+    if (tp_check_object_flags(s1, ehdr.e_flags, member_name) < 0)
         return -1;
 #endif
     /* read sections */
@@ -3639,7 +3627,7 @@ invalid:
         {
             int other = sym->st_other;
             /* Tag symbols from archive members so direct .o files can override */
-            if (archive_member_name_ptr)
+            if (member_name)
                 other |= ST_FROM_ARCHIVE;
             sym_index = set_elf_sym(symtab_section, sym->st_value, sym->st_size,
                                     sym->st_info, other,
@@ -3726,7 +3714,7 @@ invalid:
                         fprintf(stderr,
                                 "RELOC_LOAD: file=%s member=%s section=%s r_offset=0x%lx type=%d sym=%s\n",
                                 s1->current_filename ? s1->current_filename : "<unknown>",
-                                archive_member_name_ptr ? archive_member_name_ptr : "<none>",
+                                member_name ? member_name : "<none>",
                                 sec_name, (unsigned long)rel->r_offset, type, sym_name);
                         if (reloc_load_dump && type == R_TRANSPUTER_IPREL32) {
                             Section *ts = sm_table[sh->sh_info].s;
@@ -3787,7 +3775,7 @@ invalid:
                                 fprintf(stderr,
                                         "RELOC_LDC_MISMATCH: file=%s member=%s section=%s r_offset=0x%lx sym=%s scan=%d\n",
                                         s1->current_filename ? s1->current_filename : "<unknown>",
-                                        archive_member_name_ptr ? archive_member_name_ptr : "<none>",
+                                        member_name ? member_name : "<none>",
                                         sec_name, (unsigned long)rel->r_offset, sym_name, scan);
                             }
                         }
@@ -3869,7 +3857,7 @@ invalid:
         int si;
         fprintf(stderr, "RELOC_SUMMARY: file=%s member=%s iprel32=%d\n",
                 s1->current_filename ? s1->current_filename : "<unknown>",
-                archive_member_name_ptr ? archive_member_name_ptr : "<none>",
+                member_name ? member_name : "<none>",
                 iprel_count);
         for (si = 0; si < iprel_count; si++) {
             fprintf(stderr, "RELOC_SUMMARY_ITEM: sym=%s count=%d\n",
@@ -3911,9 +3899,9 @@ static unsigned long long get_be(const uint8_t *b, int n)
     return ret;
 }
 
-static int read_ar_header(int fd, int offset, ArchiveHeader *hdr)
+static int read_ar_header(int fd, int offset, ArchiveHeader *hdr, char *name)
 {
-    char *p, *e;
+    int n;
     int len;
     lseek(fd, offset, SEEK_SET);
     len = full_read(fd, hdr, sizeof(ArchiveHeader));
@@ -3921,10 +3909,11 @@ static int read_ar_header(int fd, int offset, ArchiveHeader *hdr)
         return len ? -1 : 0;
     if (memcmp(hdr->ar_fmag, ARFMAG, sizeof hdr->ar_fmag))
         return -1;
-    p = hdr->ar_name;
-    for (e = p + sizeof hdr->ar_name; e > p && e[-1] == ' ';)
-        --e;
-    *e = '\0';
+    n = sizeof hdr->ar_name;
+    while (n && hdr->ar_name[n - 1] == ' ')
+        --n;
+    memcpy(name, hdr->ar_name, n);
+    name[n] = '\0';
     hdr->ar_size[sizeof hdr->ar_size-1] = 0;
     return len;
 }
@@ -3939,6 +3928,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
     const uint8_t *ar_index;
     ElfW(Sym) *sym;
     ArchiveHeader hdr;
+    char name[sizeof hdr.ar_name + 1];
 
     data = tcc_malloc(size);
     if (full_read(fd, data, size) != size)
@@ -3958,7 +3948,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             if(sym->st_shndx != SHN_UNDEF)
                 continue;
             off = get_be(ar_index + i * entrysize, entrysize);
-            len = read_ar_header(fd, off, &hdr);
+            len = read_ar_header(fd, off, &hdr, name);
             if (len <= 0 || memcmp(hdr.ar_fmag, ARFMAG, 2)) {
         invalid:
                 tcc_error_noabort("invalid archive");
@@ -3966,22 +3956,8 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             }
             off += len;
             if (s1->verbose == 2)
-                printf("   -> %s\n", hdr.ar_name);
-#ifdef TCC_TARGET_TRANSPUTER
-            archive_member_name_ptr = NULL;
-            if (hdr.ar_name[0]) {
-                int n = (int)sizeof(archive_member_name) - 1;
-                memcpy(archive_member_name, hdr.ar_name, n);
-                archive_member_name[n] = '\0';
-                for (n = (int)strlen(archive_member_name); n > 0; n--) {
-                    if (archive_member_name[n - 1] != ' ')
-                        break;
-                    archive_member_name[n - 1] = '\0';
-                }
-                archive_member_name_ptr = archive_member_name;
-            }
-#endif
-            if (tcc_load_object_file(s1, fd, off) < 0)
+                printf("   -> %s\n", name);
+            if (tcc_load_object_file(s1, fd, off, name) < 0)
                 goto the_end;
             ++bound;
         }
@@ -3996,6 +3972,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
 {
     ArchiveHeader hdr;
+    char name[sizeof hdr.ar_name + 1];
     /* char magic[8]; */
     int size, len;
     unsigned long file_offset;
@@ -4006,7 +3983,7 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
     file_offset = sizeof ARMAG - 1;
 
     for(;;) {
-        len = read_ar_header(fd, file_offset, &hdr);
+        len = read_ar_header(fd, file_offset, &hdr, name);
         if (len == 0)
             return 0;
         if (len < 0)
@@ -4015,28 +3992,14 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
         size = strtol(hdr.ar_size, NULL, 0);
         if (alacarte) {
             /* coff symbol table : we handle it */
-            if (!strcmp(hdr.ar_name, "/"))
+            if (!strcmp(name, "/"))
                 return tcc_load_alacarte(s1, fd, size, 4);
-            if (!strcmp(hdr.ar_name, "/SYM64/"))
+            if (!strcmp(name, "/SYM64/"))
                 return tcc_load_alacarte(s1, fd, size, 8);
         } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
             if (s1->verbose == 2)
-                printf("   -> %s\n", hdr.ar_name);
-#ifdef TCC_TARGET_TRANSPUTER
-            archive_member_name_ptr = NULL;
-            if (hdr.ar_name[0]) {
-                int n = (int)sizeof(archive_member_name) - 1;
-                memcpy(archive_member_name, hdr.ar_name, n);
-                archive_member_name[n] = '\0';
-                for (n = (int)strlen(archive_member_name); n > 0; n--) {
-                    if (archive_member_name[n - 1] != ' ')
-                        break;
-                    archive_member_name[n - 1] = '\0';
-                }
-                archive_member_name_ptr = archive_member_name;
-            }
-#endif
-            if (tcc_load_object_file(s1, fd, file_offset) < 0)
+                printf("   -> %s\n", name);
+            if (tcc_load_object_file(s1, fd, file_offset, name) < 0)
                 return -1;
         }
         /* align to even */
