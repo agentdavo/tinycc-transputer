@@ -38,8 +38,9 @@ printf 'extern int main(void);\nvoid test_main(void) { (void)main(); }\n' > wrap
     -I"$R/include" -I"$U/include" -I"$U/libc/sysdeps/linux/transputer" \
     -I"$U/libc/sysdeps/linux/common" -I"$T/linux-2.6.39/include" -I"$DS" \
     -c -o bench.o "$HERE/bench_doom.c" &&
+"$R/transputer-tcc" -m$CPU -c -o m_fixed_tp.o "$DS/m_fixed_tp.S" &&
 "$R/transputer-tcc" -m$CPU -static -nostdlib -o bench.elf "$T/tests/test_boot.S" \
-    bench.o wrap.c "$R/$LIB" &&
+    bench.o m_fixed_tp.o wrap.c "$R/$LIB" &&
 "$R/transputer-netload" bench.elf bench.btl >/dev/null 2>&1 || { echo "build failed"; exit 1; }
 for m in 1 2; do
     env -u DISPLAY T4_EST_CYCLES=$m T4_UART_CONSOLE=0 T4_UART_LOG=bench$m.uart \
@@ -50,7 +51,7 @@ grep -q "T800 cycle estimate enabled" t4-1.log ||
 printf '%-9s %12s %12s  %s\n' "$CPU" cycles instructions hash
 tr -d 'SH' < bench2.uart > i.txt
 tr -d 'SH' < bench1.uart | while read -r name c h; do
-    [ "$name" = done ] && { echo done; continue; }
+    case $name in done|check) echo "$name $c $h"; continue ;; esac
     i=$(awk -v n="$name" '$1 == n { print $2 }' i.txt)
     printf '%-9s %12s %12s  %s\n' "$name" "$c" "$i" "$h"
 done

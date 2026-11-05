@@ -12,13 +12,25 @@
 #   - uClibc-ng must be built (cd transputer/uClibc-ng && make)
 #   - transputer-elf2flt must be built (for bFLT conversion)
 #
+# CPU=t805 (or t800, t425, t414) builds for that part into build-tp-$CPU
+# and links its libtcc1 (the soft-float helpers on the T425/T414).  The
+# default is the T9000, into build-tp.  uClibc-ng's libc.a is built for
+# the T9000 (it has gtu), so an image for another part still needs a libc
+# built for it before it can run there.
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOOM_SRC="$SCRIPT_DIR/linuxdoom-1.10"
 TRANS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$TRANS_DIR/.." && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build-tp"
+CPU="${CPU:-t9000}"
+case "$CPU" in
+    t9000) BUILD_DIR="$SCRIPT_DIR/build-tp"; LIBTCC1=transputer-libtcc1.a ;;
+    t805|t800) BUILD_DIR="$SCRIPT_DIR/build-tp-$CPU"; LIBTCC1=transputer-libtcc1-t800.a ;;
+    t425|t414) BUILD_DIR="$SCRIPT_DIR/build-tp-$CPU"; LIBTCC1=transputer-libtcc1-$CPU.a ;;
+    *) echo "ERROR: unknown CPU=$CPU (t9000, t805, t800, t425, t414)"; exit 1 ;;
+esac
 UCLIBC="$TRANS_DIR/uClibc-ng"
 INITRAMFS="$TRANS_DIR/initramfs"
 
@@ -26,7 +38,7 @@ TCC="$ROOT_DIR/transputer-tcc"
 ELF2FLT="$ROOT_DIR/transputer-elf2flt"
 
 # Compiler flags
-CFLAGS="-mt9000 -w"
+CFLAGS="-m$CPU -w"
 CFLAGS="$CFLAGS -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0"
 CFLAGS="$CFLAGS -DNORMALUNIX -DTRANSPUTER"
 CFLAGS="$CFLAGS -include $DOOM_SRC/doom_tp_config.h"
@@ -121,11 +133,19 @@ do_compile() {
         echo "    FAILED: fbwm_shm.c (see $BUILD_DIR/compile.log)"
         failed=$((failed + 1))
     fi
+
+    # FixedMul/FixedDiv (m_fixed.c leaves them to this under TRANSPUTER)
+    printf "  [++] m_fixed_tp.S\n"
+    if ! $TCC -m$CPU -c -o "$BUILD_DIR/m_fixed_tp.o" \
+            "$DOOM_SRC/m_fixed_tp.S" 2>>"$BUILD_DIR/compile.log"; then
+        echo "    FAILED: m_fixed_tp.S (see $BUILD_DIR/compile.log)"
+        failed=$((failed + 1))
+    fi
     if [ "$failed" -gt 0 ]; then
         echo "=== Compilation: $failed files FAILED ==="
         return 1
     else
-        echo "=== Compilation: $total files + fbwm_shm OK ==="
+        echo "=== Compilation: $total files + fbwm_shm + m_fixed_tp OK ==="
     fi
 }
 
@@ -135,7 +155,7 @@ do_link() {
     # Build CRT objects
     local crt1="$BUILD_DIR/crt1.o"
     if [ -f "$INITRAMFS/crt1.S" ]; then
-        $TCC -nostdlib -nostdinc -c -o "$crt1" "$INITRAMFS/crt1.S"
+        $TCC -m$CPU -nostdlib -nostdinc -c -o "$crt1" "$INITRAMFS/crt1.S"
     elif [ -f "$UCLIBC/lib/crt1.o" ]; then
         cp "$UCLIBC/lib/crt1.o" "$crt1"
     else
@@ -146,7 +166,7 @@ do_link() {
     # Build syscall stub
     local syscall_stub="$BUILD_DIR/syscall_stub.o"
     if [ -f "$TRANS_DIR/tests/syscall_stub.c" ]; then
-        $TCC -nostdlib -nostdinc \
+        $TCC -m$CPU -nostdlib -nostdinc \
             -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
             -I"$UCLIBC/include" \
             -I"$UCLIBC/libc/sysdeps/linux/transputer" \
@@ -160,7 +180,7 @@ do_link() {
     # CRT bridge (if available)
     local crt_bridge=""
     if [ -f "$INITRAMFS/crt_bridge.c" ]; then
-        $TCC -nostdlib -nostdinc \
+        $TCC -m$CPU -nostdlib -nostdinc \
             -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
             -I"$UCLIBC/include" \
             -I"$UCLIBC/libc/sysdeps/linux/transputer" \
@@ -180,14 +200,16 @@ do_link() {
     done
 
     # Link: CRT → CRT_BRIDGE → DOOM objects → SHM compositor → SYSCALL → LIBC
-    $TCC -nostdlib -nostdinc \
+    $TCC -m$CPU -nostdlib -nostdinc \
         -o "$BUILD_DIR/doom.elf" \
         "$crt1" \
         $crt_bridge \
         $objs \
+        "$BUILD_DIR/m_fixed_tp.o" \
         "$BUILD_DIR/fbwm_shm.o" \
         "$syscall_stub" \
-        "$UCLIBC/lib/libc.a"
+        "$UCLIBC/lib/libc.a" \
+        "$ROOT_DIR/$LIBTCC1"
 
     local size=$(stat -c%s "$BUILD_DIR/doom.elf" 2>/dev/null || echo "?")
     echo "=== Linked: doom.elf ($size bytes) ==="

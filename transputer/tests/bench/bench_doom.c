@@ -11,6 +11,11 @@
  * The frame is DOOM's 320x168 view: every column drawn once with
  * R_DrawColumn and every row once with R_DrawSpan, which is roughly the
  * pixel count of one rendered frame of walls plus floors.
+ *
+ * With TRANSPUTER defined (as the Doom build does) FixedMul and FixedDiv
+ * are m_fixed_tp.S's, which doom.sh links; the "check" line counts their
+ * results that differ from exact references in C (64-bit arithmetic, DOS
+ * DOOM's truncating FixedDiv), and must say 0 0.
  */
 #define rcsid rcsid_m_fixed
 #include "m_fixed.c"
@@ -186,6 +191,38 @@ static u32 fixedmul(void)
     return s;
 }
 
+static fixed_t ref_mul(fixed_t a, fixed_t b)
+{
+    return ((long long)a * b) >> FRACBITS;
+}
+
+static fixed_t ref_div(fixed_t a, fixed_t b)
+{
+    if ((abs(a) >> 14) >= abs(b))
+        return (a ^ b) < 0 ? MININT : MAXINT;
+    return ((long long)a << FRACBITS) / b;
+}
+
+static void check(void)
+{
+    u32 bm = 0, bd = 0;
+    int i;
+
+    for (i = 0; i < NMUL; i++) {
+        bm += FixedMul(ma[i], mb[i]) != ref_mul(ma[i], mb[i]);
+        bm += FixedMul(mb[i], ma[i]) != ref_mul(mb[i], ma[i]);
+        bm += FixedMul(-ma[i], mb[i] << 8) != ref_mul(-ma[i], mb[i] << 8);
+        bd += FixedDiv(ma[i], mb[i]) != ref_div(ma[i], mb[i]);
+        bd += FixedDiv(mb[i], ma[i] | 1) != ref_div(mb[i], ma[i] | 1);
+        bd += FixedDiv(-ma[i] >> 4, mb[i]) != ref_div(-ma[i] >> 4, mb[i]);
+    }
+    us("check ");
+    ud(bm);
+    us(" ");
+    ud(bd);
+    us("\n");
+}
+
 static u32 fixeddiv(void)
 {
     u32 s = 0;
@@ -264,6 +301,7 @@ int main(void)
     report("palblit", fnv(surface, sizeof surface, 2166136261u));
     start(); blit_rows(fbrows, surface); stop();
     report("rowcopy", fnv(fbrows, sizeof fbrows, 2166136261u));
+    check();
     us("done\n");
     return 0;
 }
