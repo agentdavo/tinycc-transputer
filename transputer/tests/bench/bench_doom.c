@@ -23,6 +23,12 @@
 #define rcsid rcsid_r_draw
 #include "r_draw.c"
 #undef rcsid
+#define rcsid rcsid_r_segs
+#include "r_segs.c"
+#undef rcsid
+#define rcsid rcsid_tables
+#include "tables.c"
+#undef rcsid
 
 typedef unsigned int u32;
 
@@ -50,10 +56,16 @@ static void uh(u32 v)
 
 unsigned int __ldtimer(void);
 
-/* What r_draw.c and m_fixed.c take from the rest of Doom. */
+/* What r_draw.c, r_segs.c and m_fixed.c take from the rest of Doom
+ * (R_RenderSegLoop's; R_StoreWallRange and R_RenderMaskedSegRange are
+ * compiled but never called, and their other references stay undefined). */
 int centery;
 lighttable_t *colormaps;
 byte *screens[5];
+short floorclip[SCREENWIDTH], ceilingclip[SCREENWIDTH];
+visplane_t *floorplane, *ceilingplane;
+angle_t xtoviewangle[SCREENWIDTH + 1];
+void (*colfunc)(void);
 
 void I_Error(char *error, ...)
 {
@@ -175,6 +187,56 @@ static void spans(void)
         ds_source = flat;
         ds_colormap = cmaps + (y & 31) * 256;
         R_DrawSpan();
+    }
+}
+
+/* r_data.c's R_GetColumn: a 128-texel column of the test texture. */
+byte *R_GetColumn(int tex, int col)
+{
+    (void)tex;
+    return texture + (col & 63) * 128;
+}
+
+/* R_RenderSegLoop for four single-sided walls across the view, 80 columns
+ * each, marking ceiling and floor, drawing through R_DrawColumn: the wall
+ * pass of a frame without its BSP walk. */
+static visplane_t planes[2];
+static lighttable_t *lights[MAXLIGHTSCALE];
+
+static void segloop(void)
+{
+    int w, x;
+
+    for (x = 0; x < SCREENWIDTH; x++) {
+        ceilingclip[x] = -1;
+        floorclip[x] = VIEWH;
+        xtoviewangle[x] = (angle_t)((SCREENWIDTH / 2 - x) * 0x40000);
+    }
+    for (x = 0; x < MAXLIGHTSCALE; x++)
+        lights[x] = cmaps + (x & 31) * 256;
+    ceilingplane = &planes[0];
+    floorplane = &planes[1];
+    colfunc = R_DrawColumn;
+    for (w = 0; w < 4; w++) {
+        rw_x = w * 80;
+        rw_stopx = rw_x + 80;
+        midtexture = 1;
+        toptexture = bottomtexture = 0;
+        maskedtexture = 0;
+        segtextured = 1;
+        markceiling = markfloor = 1;
+        walllights = lights;
+        rw_centerangle = ANG90 + w * 0x1000000;
+        rw_offset = w << 20;
+        rw_distance = (64 + w * 32) << FRACBITS;
+        rw_scale = 0x8000 + w * 0x3000;
+        rw_scalestep = 0x40 + w * 9;
+        rw_midtexturemid = (w * 17) << FRACBITS;
+        topfrac = (20 + w * 5) << HEIGHTBITS;
+        topstep = (w & 1) ? 0x300 : -0x200;
+        bottomfrac = (VIEWH - 25 - w * 7) << HEIGHTBITS;
+        bottomstep = (w & 1) ? -0x280 : 0x180;
+        R_RenderSegLoop();
     }
 }
 
@@ -339,6 +401,11 @@ int main(void)
     report("tcolumn", fnv(screen0, sizeof screen0, 2166136261u));
     start(); spans(); stop();
     report("span", fnv(screen0, sizeof screen0, 2166136261u));
+    start(); segloop(); stop();
+    report("segloop", fnv(planes, sizeof planes,
+                          fnv(ceilingclip, sizeof ceilingclip,
+                              fnv(floorclip, sizeof floorclip,
+                                  fnv(screen0, sizeof screen0, 2166136261u)))));
     start(); i = fixedmul(); stop();
     report("fixedmul", i);
     start(); i = fixeddiv(); stop();
