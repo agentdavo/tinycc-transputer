@@ -673,7 +673,14 @@ the occam compiler does, and what new codegen should be held to:
 - T800 rounding modes (`fpurp`/`fpurm`/`fpurz` through `fpentry`) govern
   the next FP instruction only - every FP instruction sets the mode back
   to nearest (TCWG: `Round_Mode' = ToNearest`).  The T9000's `fprX` are
-  sticky until `fprn`.
+  sticky until `fprn`, so every `fprX` the code generator emits is
+  followed by `fprn` once the operation that wanted it is done.  Until
+  2026-11-05 `gen_cvt_ftoi` did not, and every FP operation after an
+  `(int)`, `(unsigned)` or `(long long)` conversion rounded toward zero
+  at -mt9000.  t4 reset the mode after the next FP instruction on both
+  parts, which hid it; since t4 7e53395 it keeps a T9000 mode
+  (`RoundingSticky`), and the old code fails `test_float_int_cvt`,
+  `test_softfloat` and `test_ftoi_rounding` there.
 - Conversions go through memory by design: `fpi32tor32`/`fpi32tor64`/
   `fpb32tor64` load an integer from the address in A, `fpstnli32` stores
   one.  The workspace word an int<->float conversion uses is not waste.

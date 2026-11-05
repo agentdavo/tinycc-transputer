@@ -4058,6 +4058,11 @@ ST_FUNC void gen_cvt_ftoi(int t) {
             abcreg_pop(1);
         }
         emit_instr(TP_OP_OPR, TP_OPR_FPINT);
+        /* The T9000's fprz holds until fprn (the T800's fpurz governs the
+         * next FP instruction only): put round-to-nearest back for the
+         * code after the conversion. */
+        if (tp_have_t9000_feat(TP_T9K_FPU))
+            emit_instr(TP_OP_OPR, TP_OPR_FPRN);
         if (is_ll) {
             emit_instr(TP_OP_OPR, TP_OPR_FPDUP);
             fpureg_push(1);
@@ -4112,13 +4117,16 @@ ST_FUNC void gen_cvt_ftoi(int t) {
         abcreg_pop(1);
     }
     emit_instr(TP_OP_OPR, TP_OPR_FPRTOI32); /* round and convert to int32 */
+    /* The T800's fpurz applies to fprtoi32 alone, but the T9000's fprz
+     * holds until fprn: without this every FP operation after an (int)
+     * conversion rounded toward zero. */
+    if (tp_have_t9000_feat(TP_T9K_FPU))
+        emit_instr(TP_OP_OPR, TP_OPR_FPRN);
     Tp_LDLP(FRAME_SLOT_SCRATCH);
     emit_instr(TP_OP_OPR, TP_OPR_FPSTNLI32);
     abcreg_pop(1);
     fpureg_pop(1);
     Tp_LDL(FRAME_SLOT_SCRATCH);
-    /* fpurz applied to fprtoi32 alone: the mode is back to round-to-nearest
-     * after any FP instruction (ISM 11.6), so nothing to restore. */
     Tp_STL(REG_IRET);
     vtop->r = REG_IRET;
     vtop->r2 = VT_CONST;
