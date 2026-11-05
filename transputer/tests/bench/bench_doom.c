@@ -233,18 +233,38 @@ static u32 fixeddiv(void)
     return s;
 }
 
-/* i_video_tp.c doom_scale_to_surface: 320x200 -> 320x240 through the
- * palette.  Keep in step with that file. */
+/* i_video_tp.c pal_row and doom_scale_to_surface: 320x200 -> 320x240
+ * through the palette.  Keep in step with that file. */
+static void pal_row(unsigned int *d, const unsigned char *s, int n)
+{
+    const unsigned int *pal = palette_argb;
+    unsigned int *e = d + n;
+
+    while (d != e) {
+        d[0] = pal[s[0]];
+        d[1] = pal[s[1]];
+        d[2] = pal[s[2]];
+        d[3] = pal[s[3]];
+        d += 4;
+        s += 4;
+    }
+}
+
 static void scale_to_surface(unsigned int *dst, int dst_stride)
 {
-    unsigned char *src = screens[0];
-    int x, y;
+    const unsigned char *src = screens[0];
+    int y, sy, prev = -1;
 
     for (y = 0; y < SURF_H; y++) {
-        int src_off = (y * SCREENHEIGHT / SURF_H) * SCREENWIDTH;
         unsigned int *row = dst + y * dst_stride;
-        for (x = 0; x < SCREENWIDTH; x++)
-            row[x] = palette_argb[src[src_off + x]];
+
+        sy = y * SCREENHEIGHT / SURF_H;
+        if (sy == prev) {
+            unsigned int *above = row - dst_stride;
+            memcpy(row, above, SCREENWIDTH * sizeof *row);
+        } else
+            pal_row(row, src + sy * SCREENWIDTH, SCREENWIDTH);
+        prev = sy;
     }
 }
 
@@ -252,13 +272,39 @@ static void scale_to_surface(unsigned int *dst, int dst_stride)
  * the framebuffer.  Keep in step with that file. */
 static void blit_rows(volatile unsigned int *fb, const unsigned int *src)
 {
-    int row, col;
+    int row, bytes;
 
+    bytes = SURF_W * 4;
     for (row = 0; row < SURF_H; row++) {
         const unsigned int *s = src + row * SURF_W;
-        volatile unsigned int *d = fb + row * SURF_W;
-        for (col = 0; col < SURF_W; col++)
-            d[col] = s[col];
+        unsigned int *d = (unsigned int *)fb + row * SURF_W;
+        memcpy(d, s, bytes);
+    }
+}
+
+/* fbwm_shm.c shm_fill over the whole 800x600 framebuffer, as compose
+ * clears it every frame when there is no underlay.  Keep in step. */
+#define FB_W 800
+#define FB_H 600
+static unsigned int fbfull[FB_W * FB_H];
+
+static void fill(volatile unsigned int *fb, int x, int y, int w, int h,
+                 unsigned int color)
+{
+    unsigned int *first, *p;
+    int row, n, bytes;
+
+    first = (unsigned int *)fb + y * FB_W + x;
+    first[0] = color;
+    for (n = 1; n < w; n += n) {
+        p = first + n;
+        bytes = (n < w - n ? n : w - n) * 4;
+        memcpy(p, first, bytes);
+    }
+    bytes = w * 4;
+    for (row = 1; row < h; row++) {
+        p = first + row * FB_W;
+        memcpy(p, first, bytes);
     }
 }
 
@@ -301,6 +347,8 @@ int main(void)
     report("palblit", fnv(surface, sizeof surface, 2166136261u));
     start(); blit_rows(fbrows, surface); stop();
     report("rowcopy", fnv(fbrows, sizeof fbrows, 2166136261u));
+    start(); fill(fbfull, 0, 0, FB_W, FB_H, 0xff204060u); stop();
+    report("fill", fnv(fbfull, sizeof fbfull, 2166136261u));
     check();
     us("done\n");
     return 0;

@@ -486,17 +486,62 @@ void I_SetPalette(byte *palette)
 }
 
 
+/* n 8-bit pixels (a multiple of 4) through the palette.  Unrolled with
+ * constant subscripts and the palette in a local, each pixel is lb, wsub,
+ * ldnl, stnl with no index arithmetic: 2.6x faster than indexing a row
+ * (transputer/tests/bench/bench_doom.c). */
+static void pal_row(unsigned int *d, const unsigned char *s, int n)
+{
+    const unsigned int *pal = palette_argb;
+    unsigned int *e = d + n;
+
+    while (d != e) {
+        d[0] = pal[s[0]];
+        d[1] = pal[s[1]];
+        d[2] = pal[s[2]];
+        d[3] = pal[s[3]];
+        d += 4;
+        s += 4;
+    }
+}
+
+/* The same with each pixel twice, for the 2x simplefb scale. */
+static void pal_row2(unsigned int *d, const unsigned char *s, int n)
+{
+    const unsigned int *pal = palette_argb;
+    unsigned int *e = d + 2 * n;
+    unsigned int c;
+
+    while (d != e) {
+        c = pal[s[0]];
+        d[0] = c;
+        d[1] = c;
+        c = pal[s[1]];
+        d[2] = c;
+        d[3] = c;
+        d += 4;
+        s += 2;
+    }
+}
+
+/* Aspect-correct 320x200 -> 320x240, output rows dst_stride words apart.
+ * Every sixth row repeats the one above it and is copied with memcpy (one
+ * move) instead of being looked up again. */
 static void doom_scale_to_surface(unsigned int *dst, int dst_stride)
 {
-    unsigned char *src = screens[0];
-    int x, y;
+    const unsigned char *src = screens[0];
+    int y, sy, prev = -1;
 
-    /* Aspect-correct 320x200 → 320x240 into the retained client surface. */
     for (y = 0; y < CLIENT_H; y++) {
-        int src_off = (y * SCREENHEIGHT / CLIENT_H) * SCREENWIDTH;
         unsigned int *row = dst + y * dst_stride;
-        for (x = 0; x < SCREENWIDTH; x++)
-            row[x] = palette_argb[src[src_off + x]];
+
+        sy = y * SCREENHEIGHT / CLIENT_H;
+        if (sy == prev) {
+            unsigned int *above = row - dst_stride;
+            memcpy(row, above, SCREENWIDTH * sizeof *row);
+        } else
+            pal_row(row, src + sy * SCREENWIDTH, SCREENWIDTH);
+        prev = sy;
     }
 }
 
@@ -549,24 +594,28 @@ void I_FinishUpdate(void)
 
     if (!simplefb) {
         /* Fallback path: direct client blit + local chrome. */
-        for (y = 0; y < CLIENT_H; y++) {
-            int fb_off = (blit_y + y) * FB_WIDTH + blit_x;
-            int src_off = (y * SCREENHEIGHT / CLIENT_H) * SCREENWIDTH;
-            for (x = 0; x < SCREENWIDTH; x++)
-                fb[fb_off + x] = palette_argb[src[src_off + x]];
-        }
+        doom_scale_to_surface(fb + blit_y * FB_WIDTH + blit_x, FB_WIDTH);
     } else {
-        /* Nearest-neighbor scale (default 2x for simple framebuffer play) */
+        /* Nearest-neighbor scale (default 2x for simple framebuffer play):
+         * one row through the palette, its copies below it by memcpy. */
         for (y = 0; y < SCREENHEIGHT; y++) {
-            int src_off = y * SCREENWIDTH;
-            for (sy = 0; sy < blit_scale; sy++) {
-                int fb_row = (blit_y + y * blit_scale + sy) * FB_WIDTH + blit_x;
+            unsigned int *row = fb + (blit_y + y * blit_scale) * FB_WIDTH + blit_x;
+            const unsigned char *s = src + y * SCREENWIDTH;
+            int bytes = SCREENWIDTH * blit_scale * sizeof *row;
+
+            if (blit_scale == 1)
+                pal_row(row, s, SCREENWIDTH);
+            else if (blit_scale == 2)
+                pal_row2(row, s, SCREENWIDTH);
+            else
                 for (x = 0; x < SCREENWIDTH; x++) {
-                    unsigned int c = palette_argb[src[src_off + x]];
-                    int dst = fb_row + x * blit_scale;
+                    unsigned int c = palette_argb[s[x]];
                     for (sx = 0; sx < blit_scale; sx++)
-                        fb[dst + sx] = c;
+                        row[x * blit_scale + sx] = c;
                 }
+            for (sy = 1; sy < blit_scale; sy++) {
+                unsigned int *next = row + sy * FB_WIDTH;
+                memcpy(next, row, bytes);
             }
         }
     }

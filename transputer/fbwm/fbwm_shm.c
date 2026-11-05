@@ -3,8 +3,14 @@
  *
  * Standalone: no dependency on FBWM window-manager state.  Linked into
  * both fbwm and DOOM so a guest can present without exclusive FB ownership.
+ *
+ * Fills and copies go through memcpy, which TinyCC compiles to one move
+ * when its arguments are plain locals: about 2 T800 cycles a word, where
+ * a word loop costs 30 (transputer/tests/bench/bench_doom.c).  A full
+ * frame is 480000 words, so this is most of a present.
  */
 
+#include <string.h>
 #include "fbwm_shm.h"
 
 /* Minimal 8x16 glyphs for titles (subset reused from the VGA set). */
@@ -59,16 +65,26 @@ static void shm_puts(volatile unsigned int *fb, int x, int y, const char *s,
 static void shm_fill(volatile unsigned int *fb, int x, int y, int w, int h,
                      unsigned int color)
 {
-    int row, col;
+    unsigned int *first, *p;
+    int row, n, bytes;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > TPOS_FB_WIDTH) w = TPOS_FB_WIDTH - x;
     if (y + h > TPOS_FB_HEIGHT) h = TPOS_FB_HEIGHT - y;
     if (w <= 0 || h <= 0) return;
-    for (row = 0; row < h; row++) {
-        volatile unsigned int *p = fb + (y + row) * TPOS_FB_WIDTH + x;
-        for (col = 0; col < w; col++)
-            p[col] = color;
+    /* The first row by doubling (one store, then copies of 1, 2, 4 ...
+     * words), every other row a copy of it. */
+    first = (unsigned int *)fb + y * TPOS_FB_WIDTH + x;
+    first[0] = color;
+    for (n = 1; n < w; n += n) {
+        p = first + n;
+        bytes = (n < w - n ? n : w - n) * 4;
+        memcpy(p, first, bytes);
+    }
+    bytes = w * 4;
+    for (row = 1; row < h; row++) {
+        p = first + row * TPOS_FB_WIDTH;
+        memcpy(p, first, bytes);
     }
 }
 
@@ -343,7 +359,7 @@ void tpos_shm_blit_to_slot(int slot, const unsigned int *src,
                            int src_stride, int w, int h)
 {
     unsigned int *dst = tpos_shm_slot_pixels(slot);
-    int cw, ch, row, col;
+    int cw, ch, row, bytes;
     int dst_stride;
 
     if (!dst || !src || w <= 0 || h <= 0) return;
@@ -351,11 +367,11 @@ void tpos_shm_blit_to_slot(int slot, const unsigned int *src,
     cw = w < slot_cap_w[slot] ? w : slot_cap_w[slot];
     ch = h < slot_cap_h[slot] ? h : slot_cap_h[slot];
     dst_stride = slot_cap_w[slot];
+    bytes = cw * 4;
     for (row = 0; row < ch; row++) {
         const unsigned int *s = src + row * src_stride;
         unsigned int *d = dst + row * dst_stride;
-        for (col = 0; col < cw; col++)
-            d[col] = s[col];
+        memcpy(d, s, bytes);
     }
 }
 
@@ -363,7 +379,7 @@ static void blit_surface(volatile unsigned int *fb, const tpos_shm_win_t *win,
                          int client_x, int client_y, int client_w, int client_h)
 {
     unsigned int *src;
-    int copy_w, copy_h, row, col;
+    int copy_w, copy_h, row, bytes;
     int sx0 = 0, sy0 = 0, dx, dy;
 
     if (win->slot < 0) return;
@@ -380,12 +396,12 @@ static void blit_surface(volatile unsigned int *fb, const tpos_shm_win_t *win,
     if (dy + copy_h > TPOS_FB_HEIGHT) copy_h = TPOS_FB_HEIGHT - dy;
     if (copy_w <= 0 || copy_h <= 0) return;
 
+    bytes = copy_w * 4;
     for (row = 0; row < copy_h; row++) {
         const unsigned int *s =
             src + (sy0 + row) * win->surf_stride + sx0;
-        volatile unsigned int *d = fb + (dy + row) * TPOS_FB_WIDTH + dx;
-        for (col = 0; col < copy_w; col++)
-            d[col] = s[col];
+        unsigned int *d = (unsigned int *)fb + (dy + row) * TPOS_FB_WIDTH + dx;
+        memcpy(d, s, bytes);
     }
 }
 
@@ -487,17 +503,13 @@ static void draw_taskbar(volatile unsigned int *fb, tpos_shm_hdr_t *hdr)
 
 void tpos_shm_capture_underlay_from_fb(void)
 {
-    volatile unsigned int *src =
-        (volatile unsigned int *)(unsigned long)TPOS_FB_BASE;
-    volatile unsigned int *dst =
-        (volatile unsigned int *)(unsigned long)TPOS_SHM_UNDERLAY_BASE;
+    unsigned int *src = (unsigned int *)(unsigned long)TPOS_FB_BASE;
+    unsigned int *dst = (unsigned int *)(unsigned long)TPOS_SHM_UNDERLAY_BASE;
     tpos_shm_hdr_t *hdr = tpos_shm_hdr();
-    int n = TPOS_SHM_UNDERLAY_PIXELS;
-    int i;
+    int bytes = TPOS_SHM_UNDERLAY_PIXELS * 4;
 
     tpos_shm_init();
-    for (i = 0; i < n; i++)
-        dst[i] = src[i];
+    memcpy(dst, src, bytes);
     hdr->underlay = 1;
     hdr->generation++;
 }
@@ -526,11 +538,10 @@ void tpos_shm_compose(void)
     tpos_shm_init();
 
     if (hdr->underlay) {
-        volatile unsigned int *ul =
-            (volatile unsigned int *)(unsigned long)TPOS_SHM_UNDERLAY_BASE;
-        int n = TPOS_SHM_UNDERLAY_PIXELS;
-        for (i = 0; i < n; i++)
-            fb[i] = ul[i];
+        unsigned int *ul = (unsigned int *)(unsigned long)TPOS_SHM_UNDERLAY_BASE;
+        unsigned int *dst = (unsigned int *)fb;
+        int bytes = TPOS_SHM_UNDERLAY_PIXELS * 4;
+        memcpy(dst, ul, bytes);
     } else {
         shm_fill(fb, 0, 0, TPOS_FB_WIDTH, TPOS_FB_HEIGHT, hdr->desktop_color);
     }
