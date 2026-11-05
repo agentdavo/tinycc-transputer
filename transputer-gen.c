@@ -6635,10 +6635,8 @@ static int tp_relax_bail(const char *why)
  * Functions the pass declines to touch: anything with a mid-function AJW or
  * a GAJW (the indirect-call and computed-goto trampolines build a temporary
  * frame, which renumbers every workspace slot, and a VLA moves Wptr), and
- * anything that takes the address of a pseudo-register slot in a shape other
- * than the outgoing-argument LDLP/STNL pair (the FPU paths do this).  Over
- * 200 kernel translation units that is 382 functions, essentially all of
- * them indirect callers.
+ * anything that takes the address of a pseudo-register slot for an access
+ * whose target word the pass cannot determine.
  */
 
 /* Upper bound on the pseudo-register slots; the actual count for a function is
@@ -6693,6 +6691,17 @@ static int tps_effect(int opc, int opd, int *delta, int *reads)
         *reads = 2; *delta = -2; return 1;
     case TP_ENC_OPR:
         switch (opd) {
+        /* Only the integer stack matters here. Indexed FP loads pop both
+         * the base and the index, so a third word survives in A. */
+        case TP_OPR_FPLDNLSNI: case TP_OPR_FPLDNLDBI:
+            *reads = 2; *delta = -2; return 1;
+        case TP_FPU_LDNLSN: case TP_FPU_LDNLDB:
+        case TP_FPU_LDNLADDSN: case TP_FPU_LDNLADDDB:
+        case TP_FPU_LDNLMULSN: case TP_FPU_LDNLMULDB:
+        case TP_FPU_STNLSN: case TP_FPU_STNLDB:
+            *reads = 1; *delta = -1; return 1;
+        case TP_FPU_ADD: case TP_FPU_SUB: case TP_FPU_MUL: case TP_FPU_DIV:
+            *reads = 0; *delta = 0; return 1;
         case TP_OPR_MINT:
             *reads = 0; *delta = 1;  return 1;
         case TP_OPR_DUP:
@@ -6903,12 +6912,9 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
         } else if (opc == TP_ENC_STL && opd >= 0 && opd < nslot) {
             an[i].def = opd;
         } else if (opc == TP_ENC_LDLP) {
-            /* Taking the address of a workspace word escapes it.  For a
-             * pseudo-register slot the back end only ever emits LDLP with an
-             * immediately following STNL (staging outgoing call arguments) or
-             * LDNL; anything else - the FPU paths do LDLP slot; fpldnlsn -
-             * could reach a slot in a way this pass cannot see, so the whole
-             * function is left alone. */
+            /* Recognise consumers that access one known workspace word.
+             * Other uses of a pseudo-register's address can alias a slot
+             * beyond the liveness model. */
             int j, indirect = 0;
             for (j = i + 1; j < n; j++)
                 if (ins[j].opcode != -1)
@@ -6926,6 +6932,19 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
                     else
                         an[i].use = t;
                 }
+            }
+            /* A single-precision access consumes this exact word's address.
+             * Treat even stores as uses: this keeps earlier writes live and
+             * stops a carry across the access. Leave double accesses to the
+             * existing escape check because they also touch the next word. */
+            if (!func_uses_inline_asm && j < n && ins[j].opcode == TP_ENC_OPR &&
+                (ins[j].operand == TP_FPU_LDNLSN ||
+                 ins[j].operand == TP_FPU_LDNLADDSN ||
+                 ins[j].operand == TP_FPU_LDNLMULSN ||
+                 ins[j].operand == TP_FPU_STNLSN)) {
+                indirect = 1;
+                if (opd >= 0 && opd < nslot)
+                    an[i].use = opd;
             }
             /* Only a pseudo-register escaping is fatal.  A local escaping has
              * already been handled: the pre-scan shrank nslot back to nreg, so
@@ -7800,12 +7819,14 @@ static int tp_relax_function(void)
 
     /* An assembler addend can name an interior byte by its distance from a
      * label. Preserve that layout, including for backward references. */
-    if (func_uses_inline_asm && sec->reloc) {
+    if (sec->reloc) {
         ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
         int end = sec->reloc->data_offset / sizeof(*rel);
-        for (i = func_start_nrel; i < end; i++)
-            if (ELFW(R_TYPE)(rel[i].r_info) == R_TRANSPUTER_INSN)
+        for (i = func_start_nrel; i < end; i++) {
+            int type = ELFW(R_TYPE)(rel[i].r_info);
+            if (type == R_TRANSPUTER_INSN || tp_narrow_reloc(type))
                 return tp_relax_bail("asm-addend");
+        }
     }
 
     code = sec->data + base;

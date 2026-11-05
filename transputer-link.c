@@ -17,6 +17,8 @@
 #define PCRELATIVE_DLLPLT 1
 #define RELOCATE_DLLPLT 1
 ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
+ST_FUNC int tp_reloc_width(int type, int executable);
+ST_FUNC int tp_narrow_reloc(int type);
 #else /* !TARGET_DEFS_ONLY */
 #include "tcc.h"
 #include "transputer-enc.h"  /* Unified prefix encoding */
@@ -25,10 +27,8 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
 /* Forward declaration */
 static int tp_env_enabled(const char *name);
 static const char *tp_reloc_symbol_name(Section *symtab_sec, ElfW(Sym) *sym);
-static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_addr,
-                            uint32_t addr, uint32_t val);
-static int tp_patch_iprel(uint8_t *image, size_t total_size, uint32_t base_addr,
-                          uint32_t addr, uint32_t val);
+static int tp_patch_ldc_abs(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val);
+static int tp_patch_iprel(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val);
 
 /*
  * Which part code is for.  Every object records, in its ELF e_flags, what
@@ -1563,31 +1563,67 @@ static const char *tp_reloc_symbol_name(Section *symtab_sec, ElfW(Sym) *sym)
     return (const char *)strsec->data + sym->st_name;
 }
 
-/* Returns -1 for a branch whose target is out of its slot's reach. */
+/* Required bytes at the relocation site. Old instruction slots are
+ * variable-width and their decoders must also check the end of the section. */
+ST_FUNC int tp_reloc_width(int type, int executable)
+{
+    switch (type) {
+    case R_TRANSPUTER_NONE: return 0;
+    case R_TRANSPUTER_8: case R_TRANSPUTER_IPREL8: return 1;
+    case R_TRANSPUTER_16: case R_TRANSPUTER_IPREL16: return 2;
+    case R_TRANSPUTER_32: return 4;
+    case R_TRANSPUTER_IPREL32: case R_TRANSPUTER_LDC_ABS:
+        return executable ? 1 : 4;
+    case R_TRANSPUTER_INSN: return TP_ASM_SLOT;
+    default: return -1;
+    }
+}
+
+ST_FUNC int tp_narrow_reloc(int type)
+{
+    return type == R_TRANSPUTER_8 || type == R_TRANSPUTER_16
+        || type == R_TRANSPUTER_IPREL8 || type == R_TRANSPUTER_IPREL16;
+}
+
 static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
-                                      ElfW(Sym) *sym, uint8_t *image,
-                                      size_t total_size, uint32_t base_addr,
-                                      addr_t addr, addr_t val, int type,
-                                      int iprel_patch_trace, int iprel_patch_debug,
-                                      uint8_t *ptr)
+                                      ElfW(Sym) *sym, uint8_t *ptr,
+                                      size_t available, addr_t addr, addr_t val,
+                                      int type, int width, int iprel_patch_trace,
+                                      int iprel_patch_debug)
 {
     TCCState *s1 = s->s1;
+    unsigned long pos = addr - s->sh_addr;
+    int patched;
+
     switch (type) {
     case R_TRANSPUTER_INSN: {
         int op, addend;
-        size_t off = (size_t)(addr - base_addr);
-        unsigned long pos = addr - s->sh_addr;
         uint32_t operand;
 
-        if (off > total_size || total_size - off < TP_ASM_SLOT
-            || pos > s->data_offset || s->data_offset - pos < TP_ASM_SLOT
-            || tp_decode_instr_at(ptr, TP_ASM_SLOT, 0, &op, &addend) != TP_ASM_SLOT
+        if (tp_decode_instr_at(ptr, TP_ASM_SLOT, 0, &op, &addend) != TP_ASM_SLOT
             || op == TP_ENC_OPR)
             return tcc_error_noabort("invalid instruction relocation at %s+0x%lx", s->name, pos);
         operand = (uint32_t)val + (uint32_t)addend;
         if (op == TP_ENC_J || op == TP_ENC_CALL || op == TP_ENC_CJ)
             operand -= (uint32_t)addr + TP_ASM_SLOT;
         tp_encode_asm_slot(ptr, op, (int32_t)operand);
+        break;
+    }
+    case R_TRANSPUTER_8: case R_TRANSPUTER_16:
+    case R_TRANSPUTER_IPREL8: case R_TRANSPUTER_IPREL16: {
+        int relative = type == R_TRANSPUTER_IPREL8 || type == R_TRANSPUTER_IPREL16;
+        int addend = width == 1 ? (int8_t)*ptr : (int16_t)read16le(ptr);
+        int32_t value = (uint32_t)val + (uint32_t)addend - (relative ? (uint32_t)addr : 0);
+        int high = 1 << (width * 8 - 1);
+
+        if (value < -high || value >= (relative ? high : 2 * high))
+            return tcc_error_noabort("%d-bit relocation overflow for '%s' at %s+0x%lx",
+                                     width * 8, tp_reloc_symbol_name(symtab_sec, sym),
+                                     s->name, pos);
+        if (width == 1)
+            *ptr = (uint8_t)value;
+        else
+            write16le(ptr, (uint16_t)value);
         break;
     }
     case R_TRANSPUTER_32: {
@@ -1606,214 +1642,75 @@ static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
     }
 
     case R_TRANSPUTER_IPREL32:
-        if (iprel_patch_trace) {
-            fprintf(stderr, "IPREL32_RELOC: addr=0x%lx val=0x%lx sh_flags=0x%x\n",
-                    (unsigned long)addr, (unsigned long)val, s->sh_flags);
-        }
-        if (iprel_patch_trace &&
-            addr >= base_addr + 0x1dc1d0 && addr <= base_addr + 0x1dc2c0) {
-            size_t off = (size_t)(addr - base_addr);
-            fprintf(stderr, "IPREL_RANGE: addr=0x%08x sym=%s val=0x%08x\n",
-                    (unsigned int)addr, tp_reloc_symbol_name(symtab_sec, sym),
-                    (unsigned int)val);
-            if (addr >= base_addr + 4 && off + 4 < total_size) {
-                fprintf(stderr,
-                        "IPREL_RANGE_BYTES: %02x %02x %02x %02x | %02x %02x %02x %02x\n",
-                        image[off - 4], image[off - 3], image[off - 2], image[off - 1],
-                        image[off], image[off + 1], image[off + 2], image[off + 3]);
-            }
-        }
-        if (s->sh_flags & SHF_EXECINSTR) {
-            int patched = tp_patch_iprel(image, total_size, base_addr, addr, val);
-            if (iprel_patch_debug) {
-                fprintf(stderr, "IPREL_PATCH_RESULT: addr=0x%lx patched=%d\n",
-                        (unsigned long)addr, patched);
-            }
-            if (patched < 0) {
-                fprintf(stderr, "error: '%s' (0x%08x) is out of reach of the "
-                        "branch at 0x%08x\n", tp_reloc_symbol_name(symtab_sec, sym),
-                        (unsigned int)val, (unsigned int)addr);
-                return -1;
-            }
-            if (!patched) {
-                static int fail_warned = 0;
-                static int fail_limit = -1;
-
-                if (fail_limit < 0) {
-                    const char *env = getenv("T4_IPREL_FAIL_LIMIT");
-                    fail_limit = env && *env ? atoi(env) : 16;
-                }
-                if (fail_warned < fail_limit) {
-                    fprintf(stderr,
-                            "IPREL_RELOC_FAIL: addr=0x%08x sym=%s val=0x%08x op=0x%02x section=%s\n",
-                            (unsigned int)addr, tp_reloc_symbol_name(symtab_sec, sym),
-                            (unsigned int)val,
-                            image[addr - base_addr], s->name);
-                    if (tp_env("T4_IPREL_FAIL_DUMP")) {
-                        size_t dump_off = (addr - base_addr);
-                        size_t dump_start = dump_off >= 8 ? dump_off - 8 : 0;
-                        size_t dump_end = dump_off + 8;
-                        if (dump_end >= total_size)
-                            dump_end = total_size - 1;
-                        fprintf(stderr, "IPREL_RELOC_BYTES:");
-                        for (size_t di = dump_start; di <= dump_end; di++)
-                            fprintf(stderr, " %02x", image[di]);
-                        fprintf(stderr, "\n");
-                    }
-                    fail_warned++;
-                }
-                if (tp_iprel_fallback_enabled())
-                    write32le(ptr, read32le(ptr) + (val - addr));
-            }
-        } else if (tp_iprel_fallback_enabled()) {
-            write32le(ptr, read32le(ptr) + (val - addr));
-        }
-        break;
-
     case R_TRANSPUTER_LDC_ABS:
         if (s->sh_flags & SHF_EXECINSTR) {
-            int patched = tp_patch_ldc_abs(image, total_size, base_addr, addr, val);
-            if (!patched && tp_ldc_abs_fallback_enabled())
-                write32le(ptr, read32le(ptr) + val);
-        } else if (tp_ldc_abs_fallback_enabled()) {
+            int op, placeholder;
+            int len = tp_decode_instr_at(ptr, available < 16 ? available : 16,
+                                         0, &op, &placeholder);
+            if (!len)
+                patched = 0;
+            else if (type == R_TRANSPUTER_IPREL32 && op != TP_ENC_LDC)
+                patched = tp_patch_iprel(ptr, len, op, addr, val);
+            else
+                patched = tp_patch_ldc_abs(ptr, len, op, addr, val);
+            if (type == R_TRANSPUTER_IPREL32 && (iprel_patch_trace || iprel_patch_debug))
+                fprintf(stderr, "IPREL_PATCH_RESULT: addr=0x%08x target=0x%08x width=%d patched=%d\n",
+                        (unsigned)addr, (unsigned)val, len, patched);
+            if (patched < 0)
+                return tcc_error_noabort("relocation overflow for '%s' in %d-byte slot at %s+0x%lx",
+                                         tp_reloc_symbol_name(symtab_sec, sym), len, s->name, pos);
+            if (!patched)
+                return tcc_error_noabort("cannot encode relocation %d for '%s' at %s+0x%lx",
+                                         type, tp_reloc_symbol_name(symtab_sec, sym), s->name, pos);
+        } else {
+            if (type == R_TRANSPUTER_IPREL32) {
+                if (!tp_iprel_fallback_enabled())
+                    return tcc_error_noabort("IP-relative data relocation at %s+0x%lx in strict mode",
+                                             s->name, pos);
+                val -= addr;
+            } else if (!tp_ldc_abs_fallback_enabled()) {
+                return tcc_error_noabort("LDC data relocation at %s+0x%lx in strict mode",
+                                         s->name, pos);
+            }
             write32le(ptr, read32le(ptr) + val);
         }
         break;
-
     default:
-        break;
+        return tcc_error_noabort("unsupported Transputer relocation %d at %s+0x%lx", type,
+                                 s->name, pos);
     }
     return 0;
 }
 
-static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_addr,
-                            uint32_t addr, uint32_t val);
-
-static int tp_patch_iprel(uint8_t *image, size_t total_size, uint32_t base_addr,
-                          uint32_t addr, uint32_t val)
+static int tp_patch_iprel(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val)
 {
-    static int warned = 0;
-    static int warn_limit = -1;
-    size_t off = (size_t)(addr - base_addr);
-    size_t op_off;
-    size_t start;
-    int nibbles;
-    int32_t imm;
-    int32_t base_pc;
-    uint8_t opcode;
-    const char *debug = tp_env("T4_IPREL_PATCH_DEBUG");
-    uint8_t new_insn[16];
-    int new_len;
+    uint8_t insn[16];
+    int len;
 
-    if (off >= total_size)
+    if (op != TP_ENC_J && op != TP_ENC_CALL && op != TP_ENC_CJ)
         return 0;
-
-    if (warn_limit < 0) {
-        const char *env = getenv("T4_IPREL_WARN_LIMIT");
-        warn_limit = env && *env ? atoi(env) : 32;
-    }
-
-    /* Scan forward past prefixes to find opcode byte */
-    op_off = off;
-    while (op_off < total_size && tp_is_prefix_byte(image[op_off]))
-        op_off++;
-    if (op_off >= total_size)
-        return 0;
-
-    opcode = image[op_off];
-    start = off;
-    nibbles = (int)(op_off - start) + 1;
-    if (nibbles <= 0 || nibbles > 16)
-        return 0;
-
-    /* LDC opcode: fall through to absolute patching */
-    if ((opcode & 0xF0) == 0x40) {
-        if (debug && *debug)
-            fprintf(stderr, "IPREL_LDC_ABS_FALLBACK: addr=0x%08x val=0x%08x\n", addr, val);
-        return tp_patch_ldc_abs(image, total_size, base_addr, addr, val);
-    }
-
-    /* Compute IP-relative offset */
-    base_pc = (int32_t)(base_addr + op_off);
-    switch (opcode & 0xF0) {
-    case 0x00: /* J */
-    case 0x90: /* CALL */
-    case 0xA0: /* CJ */
-        imm = (int32_t)val - (base_pc + 1);
-        break;
-    default:
-        imm = (int32_t)val - base_pc;
-        break;
-    }
-
-    if (debug && *debug)
-        fprintf(stderr, "IPREL_PATCH: addr=0x%08x val=0x%08x base_pc=0x%08x imm=%d nibbles=%d\n",
-                addr, val, base_pc, imm, nibbles);
-
-    /* Use unified encoder */
-    new_len = tp_encode_instr(new_insn, (opcode >> 4) & 0xF, imm);
-
-    if (new_len <= nibbles) {
-        /* Pad unused prefix slots with PFIX 0 (safe NOP, no timeslice) */
-        if (new_len < nibbles)
-            memset(&image[start], 0x20, nibbles - new_len);
-        /* Copy encoded instruction after padding */
-        memcpy(&image[start + nibbles - new_len], new_insn, new_len);
-    } else if ((opcode & 0xF0) == 0x90 && val == 0 && nibbles >= 2) {
-        /* A call to an unresolved symbol, which the kernel link tolerates
-         * (tp_apply_relocations).  Address 0 is out of reach of a 6-byte
-         * call slot, so go there with `ldc 0; gcall` instead: control lands
-         * at 0 just as the call would have sent it. */
-        memset(&image[start], 0x20, nibbles - 2);
-        image[start + nibbles - 2] = 0x40;          /* ldc 0 */
-        image[start + nibbles - 1] = 0xF6;          /* gcall */
+    len = tp_encode_instr(insn, op, (int32_t)(val - (addr + width)));
+    if (len <= width) {
+        memset(slot, 0x20, width - len);
+        memcpy(slot + width - len, insn, len);
+    } else if (op == TP_ENC_CALL && val == 0 && width >= 2) {
+        /* The default kernel link tolerates unresolved calls. Address zero
+         * is beyond the short slot's branch range but reachable by gcall. */
+        memset(slot, 0x20, width - 2);
+        slot[width - 2] = 0x40;
+        slot[width - 1] = 0xF6;
     } else {
-        if (warned < warn_limit) {
-            fprintf(stderr,
-                    "IPREL_PATCH_FAIL: addr=0x%08x val=0x%08x nibbles=%d needed=%d imm=0x%08x\n",
-                    addr, val, nibbles, new_len, (unsigned int)imm);
-            warned++;
-        }
-        /* Out of reach: an unpatched branch goes somewhere else at run time,
-         * so this must fail the link rather than fall back. */
         return -1;
-    }
-
-    if (debug && *debug) {
-        int j;
-        fprintf(stderr, "IPREL_PATCH_AFTER:");
-        for (j = 0; j < nibbles; j++)
-            fprintf(stderr, " %02x", image[start + j]);
-        fprintf(stderr, "\n");
     }
     return 1;
 }
 
-static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_addr,
-                            uint32_t addr, uint32_t val)
+static int tp_patch_ldc_abs(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val)
 {
-    size_t off = (size_t)(addr - base_addr);
-    size_t op_off;
-    size_t start;
-    int nibbles;
-    uint8_t opcode;
     uint8_t new_insn[16];
     int new_len;
 
-    if (off >= total_size)
-        return 0;
-
-    /* Scan forward past prefixes to find opcode byte */
-    op_off = off;
-    while (op_off < total_size && tp_is_prefix_byte(image[op_off]))
-        op_off++;
-    if (op_off >= total_size)
-        return 0;
-
-    opcode = image[op_off];
-    start = off;
-    nibbles = (int)(op_off - start) + 1;
-    if (nibbles <= 0 || nibbles > 16)
+    if (op == TP_ENC_OPR || op == TP_ENC_J || op == TP_ENC_CALL || op == TP_ENC_CJ)
         return 0;
 
     /* LDPI optimization: replace LDC(absolute) with LDC(relative); LDPI
@@ -1822,10 +1719,10 @@ static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_add
      * Only for LDC opcodes, and only when savings are guaranteed.
      * Restricted to small relative offsets (±32KB) to avoid edge cases
      * with kernel high addresses (0x80000000+). */
-    if ((opcode & 0xF0) == 0x40) {
-        uint32_t pc_after_ldpi = base_addr + (uint32_t)start + (uint32_t)nibbles;
+    if (op == TP_ENC_LDC) {
+        uint32_t pc_after_ldpi = addr + width;
         int32_t rel_offset = (int32_t)(val - pc_after_ldpi);
-        int ldc_space = nibbles - 2;  /* bytes available for LDC (2 reserved for LDPI) */
+        int ldc_space = width - 2;  /* bytes available for LDC (2 reserved for LDPI) */
 
         /* Only attempt for small relative offsets (±32KB) */
         if (ldc_space >= 1 && rel_offset > -32768 && rel_offset < 32768) {
@@ -1834,37 +1731,24 @@ static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_add
             int ldpi_total = ldc_len + 2;  /* LDC bytes + 2 for LDPI */
 
             /* Only use LDPI if it's strictly shorter than absolute encoding */
-            int abs_len = tp_encode_instr(new_insn, (opcode >> 4) & 0xF, (int32_t)val);
-            if (ldpi_total < abs_len && ldpi_total <= nibbles) {
-                memset(&image[start], 0x20, nibbles);
-                memcpy(&image[start + ldc_space - ldc_len], ldpi_insn, ldc_len);
-                image[start + nibbles - 2] = 0x21;  /* PFIX 1 */
-                image[start + nibbles - 1] = 0xFB;  /* OPR B (LDPI) */
+            int abs_len = tp_encode_instr(new_insn, op, (int32_t)val);
+            if (ldpi_total < abs_len && ldpi_total <= width) {
+                memset(slot, 0x20, width);
+                memcpy(slot + ldc_space - ldc_len, ldpi_insn, ldc_len);
+                slot[width - 2] = 0x21;  /* PFIX 1 */
+                slot[width - 1] = 0xFB;  /* OPR B (LDPI) */
                 return 1;
             }
         }
     }
 
     /* Fallback: absolute LDC encoding */
-    new_len = tp_encode_instr(new_insn, (opcode >> 4) & 0xF, (int32_t)val);
+    new_len = tp_encode_instr(new_insn, op, (int32_t)val);
 
-    if (new_len <= nibbles) {
-        if (new_len < nibbles)
-            memset(&image[start], 0x20, nibbles - new_len);
-        memcpy(&image[start + nibbles - new_len], new_insn, new_len);
-    } else {
-        /* Placeholder too small for the patched value: leaving it unpatched
-         * silently corrupts the loaded address (a layout-sensitive
-         * miscompilation, since `val` shifts between builds). Make it LOUD. */
-        static int warned_ldc = 0;
-        if (warned_ldc < 32) {
-            fprintf(stderr,
-                    "LDC_ABS_PATCH_FAIL: addr=0x%08x val=0x%08x nibbles=%d needed=%d\n",
-                    addr, val, nibbles, new_len);
-            warned_ldc++;
-        }
-        return 0;
-    }
+    if (new_len > width)
+        return -1;
+    memset(slot, 0x20, width - new_len);
+    memcpy(slot + width - new_len, new_insn, new_len);
     return 1;
 }
 /* Returns 1 for a code relocation, 0 for a data relocation. For unknown
@@ -1877,6 +1761,7 @@ int code_reloc (int reloc_type)
          case R_TRANSPUTER_IPREL8:
          case R_TRANSPUTER_INSN:
          case R_TRANSPUTER_LDC_ABS:
+         case R_TRANSPUTER_8:
          case R_TRANSPUTER_16:
          case R_TRANSPUTER_32:
          case R_TRANSPUTER_GOTPC32:
@@ -2430,10 +2315,15 @@ static uint8_t *tp_fixed_layout_sections(TCCState *s1)
             continue;
         for_each_elem(sr, 0, r, ElfW_Rel) {
             int si = ELFW(R_SYM)(r->r_info);
+            int type = ELFW(R_TYPE)(r->r_info);
+            /* A narrow field embedded in text is data. For a PC-relative
+             * field its addend may also measure back to an earlier label. */
+            if (tp_narrow_reloc(type))
+                fixed[i] = 1;
             if (si <= 0 || si >= nsym || syms[si].st_shndx >= s1->nb_sections)
                 continue;
             if (ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION
-                || ELFW(R_TYPE)(r->r_info) == R_TRANSPUTER_INSN)
+                || type == R_TRANSPUTER_INSN || tp_narrow_reloc(type))
                 fixed[syms[si].st_shndx] = 1;
         }
     }
@@ -3464,7 +3354,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
     ElfW_Rel *rel, *rel_end;
     int i, sym_index, reloc_count, type;
     int unresolved_calls = 0;
-    int unreachable = 0;
+    int failed = 0;
     addr_t val, addr;
     uint8_t *ptr;
 
@@ -3484,14 +3374,34 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                 int reloc_in_range = 0;
                 size_t reloc_dump_start = 0;
                 size_t reloc_dump_end = 0;
+                size_t off, available;
+                int width;
 
                 type = ELFW(R_TYPE)(rel->r_info);
+                width = tp_reloc_width(type, s->sh_flags & SHF_EXECINSTR);
+                if (width < 0)
+                    return tcc_error_noabort("unsupported Transputer relocation %d at %s+0x%lx",
+                                             type, s->name, (unsigned long)rel->r_offset);
+                if (!width)
+                    continue;
                 sym_index = ELFW(R_SYM)(rel->r_info);
+                if ((unsigned)sym_index >= symtab_sec->data_offset / sizeof(*sym))
+                    return tcc_error_noabort("invalid symbol index %d at %s+0x%lx",
+                                             sym_index, s->name, (unsigned long)rel->r_offset);
+                addr = s->sh_addr + rel->r_offset;
+                off = (uint32_t)(addr - base_addr);
+                if (s->sh_type == SHT_NOBITS || rel->r_offset > s->data_offset
+                    || s->data_offset - rel->r_offset < (size_t)width
+                    || off > total_size || total_size - off < (size_t)width)
+                    return tcc_error_noabort("relocation %d outside %s at offset 0x%lx",
+                                             type, s->name, (unsigned long)rel->r_offset);
+                available = s->data_offset - rel->r_offset;
+                if (available > total_size - off)
+                    available = total_size - off;
                 sym = &((ElfW(Sym) *)symtab_sec->data)[sym_index];
                 val = sym->st_value;
                 if (sym->st_shndx > 0 && sym->st_shndx < s1->nb_sections)
                     val += s1->sections[sym->st_shndx]->sh_addr;
-                addr = s->sh_addr + rel->r_offset;
                 tp_resolve_reloc_symbol(s1, symtab_sec, type, &sym, &sym_index,
                                         &val, addr, reloc_fix_debug);
                 if (sym->st_shndx == SHN_UNDEF)
@@ -3516,11 +3426,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                  * references; T4_STRICT_UNRESOLVED_CALLS still makes it
                  * fatal.  Weak symbols are silent, as they must be. */
                 if (sym->st_shndx == SHN_UNDEF &&
-                    ELFW(ST_BIND)(sym->st_info) != STB_WEAK &&
-                    (type == R_TRANSPUTER_IPREL32 ||
-                     type == R_TRANSPUTER_INSN ||
-                     type == R_TRANSPUTER_LDC_ABS ||
-                     type == R_TRANSPUTER_32)) {
+                    ELFW(ST_BIND)(sym->st_info) != STB_WEAK) {
                     const char *un = tp_reloc_symbol_name(symtab_sec, sym);
                     if (tp_report_undefined_symbol(un)) {
                         fprintf(stderr,
@@ -3545,25 +3451,25 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                             (unsigned long)sym->st_value, sym->st_shndx,
                             ELFW(ST_BIND)(sym->st_info), ELFW(ST_TYPE)(sym->st_info));
                 }
-                ptr = image + (addr - base_addr);
+                ptr = image + off;
                 tp_trace_reloc_window(symtab_sec, sym, image, total_size,
                                       base_addr, addr, type, val, s->name,
                                       link_trace, &reloc_in_range,
                                       &reloc_dump_start, &reloc_dump_end);
-                tp_debug_reloc_near_start_kernel(symtab_sec, sym, start_kernel_addr,
-                                                 addr, type, val, ptr, link_debug);
-                if (tp_apply_single_relocation(s, symtab_sec, sym, image, total_size,
-                                               base_addr, addr, val, type,
-                                               iprel_patch_trace, iprel_patch_debug,
-                                               ptr) < 0)
-                    unreachable++;
+                if (available >= 4)
+                    tp_debug_reloc_near_start_kernel(symtab_sec, sym, start_kernel_addr,
+                                                    addr, type, val, ptr, link_debug);
+                if (tp_apply_single_relocation(s, symtab_sec, sym, ptr, available,
+                                               addr, val, type, width, iprel_patch_trace,
+                                               iprel_patch_debug) < 0)
+                    failed++;
                 if (reloc_in_range && link_trace) {
                     fprintf(stderr, "RELOC_RANGE_AFTER:");
                     for (size_t di = reloc_dump_start; di <= reloc_dump_end; di++)
                         fprintf(stderr, " %02x", image[di]);
                     fprintf(stderr, "\n");
                 }
-                if (start_kernel_addr > 0 &&
+                if (available >= 4 && start_kernel_addr > 0 &&
                     addr >= start_kernel_addr && addr < start_kernel_addr + 64) {
                     if (link_debug)
                         fprintf(stderr, ", After: %08x\n", read32le(ptr));
@@ -3578,7 +3484,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                 unresolved_calls);
         return -1;
     }
-    if (unreachable)
+    if (failed)
         return -1;
     return 0;
 }
@@ -3956,13 +3862,8 @@ void relocate_init(Section *sr)
 }
 void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr, addr_t addr, addr_t val)
 {
-    /* This function is called by tccelf.c's standard relocation path.
-     * For transputer targets, transputer_simple_link() handles all
-     * relocations directly and this code path should never be reached.
-     * If it IS reached, emit an error so we know something is wrong. */
-    fprintf(stderr,
-            "ERROR: relocate() called for transputer target (should use transputer_simple_link)\n"
-            "  type=%d addr=0x%lx val=0x%lx\n",
-            type, (unsigned long)addr, (unsigned long)val);
+    if (type != R_TRANSPUTER_NONE)
+        tcc_error_noabort("Transputer relocation %d at 0x%lx requires the executable linker",
+                          type, (unsigned long)addr);
 }
 #endif

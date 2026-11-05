@@ -3676,6 +3676,18 @@ invalid:
                 type = ELFW(R_TYPE)(rel->r_info);
                 sym_index = ELFW(R_SYM)(rel->r_info);
 #ifdef TCC_TARGET_TRANSPUTER
+                /* Check the original input extent before merging sections:
+                 * the next object's data must never complete this field. */
+                if (shdr[sh->sh_info].sh_flags & SHF_ALLOC) {
+                    ElfW(Shdr) *target = &shdr[sh->sh_info];
+                    int width = tp_reloc_width(type, target->sh_flags & SHF_EXECINSTR);
+                    if (width > 0 && (rel->r_offset > target->sh_size
+                        || target->sh_size - rel->r_offset < (unsigned)width)) {
+                        tcc_error_noabort("relocation %d outside %s at offset 0x%lx",
+                                          type, strsec + target->sh_name, (unsigned long)rel->r_offset);
+                        goto the_end;
+                    }
+                }
                 if (reloc_summary && type == R_TRANSPUTER_IPREL32 &&
                     sym_index < (unsigned)nb_syms) {
                     const char *sum_name = "<unknown>";
@@ -3818,7 +3830,9 @@ invalid:
 #endif
                 /* ignore link_once in rel section. */
                 if (!sym_index && !sm_table[sh->sh_info].link_once
-#ifdef TCC_TARGET_ARM
+#ifdef TCC_TARGET_TRANSPUTER
+                    && type != R_TRANSPUTER_NONE
+#elif defined TCC_TARGET_ARM
                     && type != R_ARM_V4BX
 #elif defined TCC_TARGET_RISCV64
                     && type != R_RISCV_ALIGN
