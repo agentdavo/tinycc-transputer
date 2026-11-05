@@ -785,6 +785,19 @@ the occam compiler does, and what new codegen should be held to:
   FixedMul/FixedDiv loops over global arrays 6-7%.
   `TCC_TRANSPUTER_GADDR=0` turns it off (`TP_SCHED_MASK=0x17f` S10),
   `TP_GADDR_STATS=1` lists what is kept; `test_gaddr_cache.c`.
+- `(x >> K) & m`, where the mask keeps only bits the shift brings down
+  from x (m < 2^(32-K)), is the same after an arithmetic or a logical
+  shift, so a signed one is `ldc K; shr`, not `xdble; ldc K; lshr`
+  (`tp_shift_mask_fold`, at the `and`).  On the T800, T805, T425 and
+  T414, whose shifts cost a cycle a place, K of 8, 16 or 24 with a byte
+  mask on a word just loaded by `ldl` reads that byte instead: `ldlp x;
+  adc K/8; lb`, 7 cycles for the 21 of `ldl x; ldc 16; shr`, and the
+  `and` goes when m is 255.  The post-pass knows `ldlp s; [adc k;] lb` as
+  a read of word s (`tp_relax_byte_read`): before it did, the unknown
+  LDLP made `tp_sched_function` and `tp_slot_remap` give up on the
+  function and the code grew 17%.  Doom's texture lookups, `(frac >> 16)
+  & 127`: R_DrawColumn -27%, R_DrawSpan -26% T800 cycles.
+  `TCC_TRANSPUTER_SHIFT_MASK=0` turns it off; `test_shift_mask_fold.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`
@@ -877,9 +890,15 @@ extra instructions are one- and two-cycle loads and stores)
   third slot).  Tests: `tests/test_pair_move.c`, c-testsuite `09116`.
 
 **Writing C for it** (programming, not the compiler)
-- Copy arrays and structs with `memcpy` (inlined as `move`): a word loop
-  cost the ray tracer 10.5% of its run.  Fill an array by doubling
-  `memcpy`s.
+- Copy arrays and structs with `memcpy` (inlined as `move`, about 2 T800
+  cycles a word where a word loop costs 30): a word loop cost the ray
+  tracer 10.5% of its run.  Fill an array by doubling `memcpy`s (one
+  word, then copies of 1, 2, 4 ... words; fbwm_shm.c `shm_fill`, an
+  800x600 clear 14.4 M -> 1.0 M cycles).  The arguments must be plain
+  locals or constants, or the call goes to libc.
+- A store through a `char *` may alias any global, so a loop that names a
+  global reads it again every pass.  Copy what a hot loop reads into
+  locals first (Doom's drawers, 4198801b: -15% to -24%).
 - `__fpsqrt`/`__fpabs`, not wrappers round them.
 - ALTs of two or three channels: `ChanAlt2`, `ChanAlt3`,
   `ChanAltGuarded3` (`conc.h`, straight-line, about 30 instructions)
@@ -892,7 +911,12 @@ does not depend on the host's load; t4's clock is the host's, so times do.
 `ldlp; fpldnlsn`, ...) into one, so it understates both compilers by
 about 28%; for real instruction counts and T800 cycles use the counting
 t4 and `oph.py` in `t4/examples/transputer-raytracer/c` (`CODEGEN.md`
-there, "Every instruction, in T800 cycles").
+there, "Every instruction, in T800 cycles").  Any t4 from daa9efa has
+`T4_EST_CYCLES=1`: fusion off, and `ldtimer` returns the estimated T800
+cycles of what has run (`=2` the instruction count), so a program's own
+timer deltas are deterministic (`t4/t800_cycles.h`).
+`tests/bench/doom.sh <cpu>` uses it for Doom's drawers, FixedMul/FixedDiv
+and the present path, each with a hash of its result.
 `T4_IPTR_SAMPLE=N` samples IPtr for a profile against the `.elf.tccsym`
 map; `T4_DUMP_WORDS=addr:n,...` dumps memory (which is how the occam code
 was read).  A bit-exact reference output is the best oracle for an FP
