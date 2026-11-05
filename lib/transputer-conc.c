@@ -372,6 +372,19 @@ void __tp_proc_stop(void)
     __stopp();
 }
 
+/* Use only whole words inside the supplied buffer. The descriptor's low
+ * bit carries priority, so the initial Wptr must be word aligned. */
+static int *initial_wptr(void *ws, int wsize)
+{
+    int skip = -(unsigned)ws & (sizeof(int) - 1);
+    int *base;
+
+    if (!ws || wsize < skip + 8 * (int)sizeof(int))
+        return 0;
+    base = (int *)((char *)ws + skip);
+    return base + (wsize - skip) / (int)sizeof(int) - 6;
+}
+
 /*
  * Build a runnable process for `func` in the caller-supplied workspace and
  * return its descriptor.  PRun schedules it.
@@ -406,21 +419,14 @@ void __tp_proc_stop(void)
  */
 PDes PSetup(void *ws, int wsize, void (*func)(void))
 {
-    int *base = (int *)ws;
-    int *wptr;
-    int words = wsize / (int)sizeof(int);
+    int *wptr = initial_wptr(ws, wsize);
 
-    if (!ws || !func || words < 8)
+    if (!wptr || !func)
         return 0;
-
-    /* Wptr sits below the top of the buffer: the scheduler's slots are at
-     * negative offsets from it, the process's frames grow downward from
-     * there, so leave the top few words for Iptr/Link/State/TLink/Time. */
-    wptr = base + words - 6;
 
     wptr[-1] = (int)__tp_proc_start;   /* Iptr_s: where the process starts */
     wptr[1] = (int)func;               /* __tp_proc_start's parameters */
-    wptr[2] = (int)base;
+    wptr[2] = (int)ws;
 
     /* Descriptor: workspace pointer, priority in bit 0 (0 = high). */
     return (PDes)(int)wptr;
@@ -481,20 +487,17 @@ static void xfail_proc(struct xfail *x)
 
 static int xfail(struct xfail *x, int time, Channel *kill, void *ws, int wsize)
 {
-    int *base = (int *)(((int)ws + 3) & ~3);
-    int words = (wsize - (int)((char *)base - (char *)ws)) / (int)sizeof(int);
-    int *wptr;
+    int *wptr = initial_wptr(ws, wsize);
     Channel *g[2];
     int sel, v;
 
-    if (!ws || wsize < PROC_WS_MIN)
+    if (!wptr || wsize < PROC_WS_MIN)
         return -1;
     x->cancel = 0;
     x->started = 0;
     x->done = NOPROCESS;
 
     /* As PSetup lays a workspace out, entering xfail_proc(x). */
-    wptr = base + words - 6;
     wptr[-1] = (int)xfail_proc;
     wptr[1] = (int)x;
     __runp((int)wptr);                  /* high priority */
