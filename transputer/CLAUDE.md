@@ -839,6 +839,23 @@ the occam compiler does, and what new codegen should be held to:
   a statement kept the load (+0.7% Doom code until globals were left
   out; size-neutral now).  Doom's drawers -3% to -5% T800 cycles;
   `test_post_inc.c`.
+- Unsigned compares on the parts without `gtu`: when both operands were
+  pushed by runs the history window can replay (a load and up to two
+  `ldnl`/`ldnlp`/`adc`, `tp_hist_value_run`), `tp_emit_gtu` pushes a zero
+  under them and takes `ldiff`'s borrow: `ldc 0; X; Y; ldiff; rev` is
+  X <u Y, 5 T800 cycles beside the pushes where the two sign flips
+  (`mint; xor` each) and `gt` cost 11.  Other operands keep the flips.
+  Flipping a literal's sign at compile time instead does not pay: a small
+  K becomes an eight-byte `ldc`.  Doom's `mint` count 220 -> 73 at
+  -mt800; `TCC_TRANSPUTER_LDIFF_CMP=0` turns it off;
+  `test_unsigned_cmp_ldiff.c`.
+- Halfword loads without `ls` (T800, T805, T425, T414): a local at an
+  even frame offset is half of its workspace word, `ldl w; ldc #ffff;
+  and` or `ldl w; ldc 16; shr` (8 and 21 cycles for the 27 or more of two
+  `lb` and a shift, and no `ldlp` for the post-pass to see escape); a
+  packed odd one and one through a pointer take the high byte first, so
+  only the address is parked (9 instructions, was 11:
+  `tp_load_half_bytes`, `tp_load_local_half`).  `test_half_load.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`

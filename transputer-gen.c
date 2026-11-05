@@ -2366,6 +2366,60 @@ static void tp_sign_extend(int bits, int narrow) {
 static void tp_sign_extend_16_in_areg(void) { tp_sign_extend(16, 0); }
 static void tp_sign_extend_8_in_areg(void) { tp_sign_extend(8, 0); }
 
+/* A halfword from the byte address in A on a part without ls (T800, T805,
+ * T425, T414): the high byte first and shifted up, then the low byte ORed
+ * in, so only the address is parked (in `slot`): 9 instructions where
+ * parking the low byte too took 11.  The stack never holds more than the
+ * old sequence held, one word above whatever was under the address. */
+static void tp_load_half_bytes(int slot)
+{
+    Tp_STL(slot);
+    Tp_LDL(slot);
+    Tp_ADC(1);
+    Tp_LB();
+    Tp_LDC(8);
+    Tp_SHL();                   /* A = high byte << 8 */
+    Tp_LDL(slot);
+    Tp_LB();
+    Tp_OR();
+}
+
+/* A halfword local at frame byte offset `off`, the same parts.  At an even
+ * offset it is one half of a workspace word, so the word is read and the
+ * half taken out: ldl w; ldc #ffff; and for the low one, ldl w; ldc 16;
+ * shr for the high one (8 and 21 T800 cycles where two lb and a shift cost
+ * 27 or more, and no ldlp the post-pass must treat as an escaping address).
+ * The bytes of an odd (packed) one are read high first, nothing parked. */
+static void tp_load_local_half(int off, int is_unsigned)
+{
+    int rem = off & 3;
+
+    if (rem == 0 || rem == 2) {
+        emit_local_op(TP_OP_LDL, off - rem);
+        abcreg_push(1);
+        if (rem == 2) {
+            Tp_LDC(16);
+            Tp_SHR();
+            if (!is_unsigned)
+                tp_sign_extend(16, 1);
+        } else if (is_unsigned) {
+            Tp_LDC(0xffff);
+            Tp_AND();
+        } else
+            tp_sign_extend(16, 0);
+        return;
+    }
+    emit_local_addr(off + 1);
+    Tp_LB();
+    Tp_LDC(8);
+    Tp_SHL();
+    emit_local_addr(off);
+    Tp_LB();
+    Tp_OR();
+    if (!is_unsigned)
+        tp_sign_extend(16, 1);
+}
+
 /* Push a floating-point SValue onto the T800 FPU stack (FA/FB/FC). */
 /*
  * Words at an address that may not be word aligned.
@@ -2636,20 +2690,7 @@ ST_FUNC void load(int r, SValue *sv) {
                 Tp_STL(r);
                 return;
             } else if (size == 2) {
-                emit_local_addr(byte_off);
-                Tp_LB();
-                Tp_STL(FRAME_SLOT_SCRATCH);  /* low byte */
-
-                emit_local_addr(byte_off + 1);
-                Tp_LB();
-                Tp_LDC(8);
-                Tp_SHL();
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_OR();
-
-                /* two zero-extended bytes: already 0..0xFFFF */
-                if (!is_unsigned)
-                    tp_sign_extend(16, 1);
+                tp_load_local_half(byte_off, is_unsigned);
                 Tp_STL(r);
                 return;
             } else if (byte_off & 3) {
@@ -2764,19 +2805,7 @@ ST_FUNC void load(int r, SValue *sv) {
                  * arbitrary byte offset within a word (for example the kernel's
                  * struct printf_spec.s16 precision at offset 6). Rebuild the
                  * halfword from two byte loads instead of using LDNL 0. */
-                Tp_STL(FRAME_SLOT_SCRATCH);  /* save base address */
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_LB();
-                Tp_STL(FRAME_SLOT_SCRATCH + 1);  /* low byte */
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_ADC(1);
-                Tp_LB();
-                Tp_LDC(8);
-                Tp_SHL();
-                Tp_LDL(FRAME_SLOT_SCRATCH + 1);
-                Tp_OR();
+                tp_load_half_bytes(FRAME_SLOT_SCRATCH);
 
                 /* two zero-extended bytes: already 0..0xFFFF */
                 if (!is_unsigned)
@@ -10653,27 +10682,8 @@ static void tp_push_sv(SValue *sv) {
                 abcreg_push(1);
                 if (is_unsigned) Tp_LS(); else Tp_LSX();
             } else if (size == 2) {
-                /* Halfword load: use two byte loads to handle
-                 * arbitrary byte alignment within a word. */
-                emit_local_addr(sv->c.i);
-                abcreg_push(1);
-                Tp_STL(FRAME_SLOT_SCRATCH);
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_LB();
-                Tp_STL(FRAME_SLOT_SCRATCH + 1);  /* low byte */
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_ADC(1);
-                Tp_LB();
-                Tp_LDC(8);
-                Tp_SHL();
-                Tp_LDL(FRAME_SLOT_SCRATCH + 1);
-                Tp_OR();
-
-                /* two zero-extended bytes: already 0..0xFFFF */
-                if (!is_unsigned)
-                    tp_sign_extend(16, 1);
+                tp_load_local_half((int)sv->c.i, is_unsigned);
+                abcreg_push(1);         /* as the byte path above counts */
             } else if (sv->c.i & 3) {
                 /* a word of a packed local (tp_word_unaligned) */
                 int t = tp_park_new(4);
@@ -10736,19 +10746,7 @@ static void tp_push_sv(SValue *sv) {
                      * A/B registers while a call's arguments are being
                      * staged — and staging arguments is exactly when this
                      * path runs. Use the dedicated 64-bit temp pair. */
-                    Tp_STL(FRAME_SLOT_DBL_TMP);          /* address */
-
-                    Tp_LDL(FRAME_SLOT_DBL_TMP);
-                    Tp_LB();
-                    Tp_STL(FRAME_SLOT_DBL_TMP + 1);      /* low byte */
-
-                    Tp_LDL(FRAME_SLOT_DBL_TMP);
-                    Tp_ADC(1);
-                    Tp_LB();
-                    Tp_LDC(8);
-                    Tp_SHL();
-                    Tp_LDL(FRAME_SLOT_DBL_TMP + 1);
-                    Tp_OR();
+                    tp_load_half_bytes(FRAME_SLOT_DBL_TMP);
 
                     /* two zero-extended bytes: already 0..0xFFFF */
                     if (!is_unsigned)
@@ -11287,19 +11285,92 @@ static int tp_cmp_complement_vs_literal(int *op)
     }
 }
 
+/* Take back the code from `off` (the start of an entry still in the
+ * history window) so it can be emitted again differently.  The caller
+ * adjusts the eval-stack model for what it removed. */
+static void tp_roll_back_to(int off)
+{
+    ind = off;
+    cur_text_section->data_offset = ind;
+    tp_drop_local_patches_from(ind);
+    tp_hist_rollback(ind);
+    tp_stl_track_clear();
+    tp_areg_invalidate();
+    tp_last_opc = tp_prev_opc = -1;
+    tp_last_off = tp_last_end = tp_prev_off = tp_prev_end = -1;
+}
+
 /* gtu (opr 0x5F) arrived with the T9000: the T414/T425/T800/T805
  * instruction sets have none (t4 accepts it in T800 mode regardless), so
  * for -mt800 and -mt425 flip the sign bit of both operands and let the
  * signed gt order them as unsigned values.  Entry AReg = R, BReg = L;
  * leaves AReg = (L >u R), or (R >u L) - what `rev; gtu` gives - when
  * `swapped`.  The extra mint pushes a third word: CReg is dead here, as the
- * operands are the only values gen_opi keeps on the stack. */
+ * operands are the only values gen_opi keeps on the stack.
+ *
+ * Better, when both operands were pushed by short runs the history window
+ * can replay (a load and up to two ldnl/ldnlp/adc on it, tp_hist_value_run):
+ * ldiff subtracts with a borrow, so with 0 pushed under them `ldc 0; X; Y;
+ * ldiff` leaves the borrow of X - Y, X <u Y, in B, and `rev` brings it up.
+ * 5 T800 cycles beside the pushes, where the sign flips cost 11, and every
+ * part from the T414 has ldiff.  (Flipping a literal's sign at compile time
+ * does not pay: a small K becomes an eight-byte constant.)
+ * TCC_TRANSPUTER_LDIFF_CMP=0 keeps the sign flips. */
+static int tp_hist_value_run(int i)
+{
+    int j;
+
+    for (j = i; j < tp_hist_n && j < i + 3; j++) {
+        if (j > i && tp_hist[j].end != tp_hist[j - 1].off)
+            return -1;
+        if (tp_hist_is_pure_push(&tp_hist[j]))
+            return j;
+        if (tp_hist[j].kind != TP_HIST_INSTR ||
+            (tp_hist[j].opc != TP_OP_LDNL && tp_hist[j].opc != TP_OP_LDNLP &&
+             tp_hist[j].opc != TP_OP_ADC))
+            return -1;
+    }
+    return -1;
+}
+
 static void tp_emit_gtu(int swapped)
 {
+    static int ldiff_cmp = -1;
+    int r_end, l_end;
+
     if (tp_have_t9000_feat(TP_T9K_GTU)) {
         if (swapped)
             Tp_REV();
         Tp_OPR(TP_OPR_GTU);
+        return;
+    }
+    if (ldiff_cmp < 0) {
+        const char *e = getenv("TCC_TRANSPUTER_LDIFF_CMP");
+        ldiff_cmp = !(e && *e == '0');
+    }
+    /* R's run is hist[0..r_end], L's the one under it, ending at l_end. */
+    if (ldiff_cmp && !nocode_wanted && tp_hist_n >= 2 && tp_hist[0].end == ind &&
+        (r_end = tp_hist_value_run(0)) >= 0 && r_end + 1 < tp_hist_n &&
+        tp_hist[r_end + 1].end == tp_hist[r_end].off &&
+        (l_end = tp_hist_value_run(r_end + 1)) >= 0) {
+        struct tp_hist_ent rr[3], ll[3];
+        int nr = r_end + 1, nl = l_end - r_end, k;
+
+        for (k = 0; k < nr; k++)
+            rr[k] = tp_hist[r_end - k];         /* oldest first */
+        for (k = 0; k < nl; k++)
+            ll[k] = tp_hist[l_end - k];
+        tp_roll_back_to(tp_hist[l_end].off);
+        abcreg_pop(2);
+        Tp_LDC(0);                              /* no borrow in */
+        /* (L >u R) is R <u L: X = R, Y = L; swapped wants L <u R */
+        for (k = 0; k < (swapped ? nl : nr); k++)
+            tp_hist_replay(swapped ? &ll[k] : &rr[k]);
+        for (k = 0; k < (swapped ? nr : nl); k++)
+            tp_hist_replay(swapped ? &rr[k] : &ll[k]);
+        Tp_OPR(TP_OPR_LDIFF);                   /* A = X - Y, B = X <u Y */
+        Tp_REV();
+        abcreg_pop(2);                          /* the 0 and one operand */
         return;
     }
     Tp_LDC(-0x7fffffff - 1);                    /* mint */
@@ -11384,14 +11455,7 @@ static int tp_shift_mask_fold(void)
     } else
         return 0;
 
-    ind = roll;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_last_opc = tp_prev_opc = -1;
-    tp_last_off = tp_last_end = tp_prev_off = tp_prev_end = -1;
+    tp_roll_back_to(roll);
 
     if (x.kind >= 0) {
         x.opc = TP_OP_LDLP;
