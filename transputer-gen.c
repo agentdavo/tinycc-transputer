@@ -1288,7 +1288,6 @@ struct jump_patch_meta {
     int instr_len;                    /* encoded instruction length (set by gsym_addr) */
     unsigned char is_conditional;     /* 1 for CJ placeholder, 0 for J */
     unsigned char patched;            /* 1 once gsym_addr patched it */
-    struct jump_patch_meta *next;
 };
 
 struct switch_slot_meta {
@@ -1305,7 +1304,12 @@ static struct local_patch *local_patches = NULL;
  * appended, not prepended: tp_drop_local_patches_from scans the leading run
  * and relies on it holding the most recently emitted offsets. */
 static struct local_patch *local_patches_tail = NULL;
-static struct jump_patch_meta *jump_patches = NULL;
+/* The function's jump placeholders, sorted by instr_offset so that
+ * jump_patch_find can binary-search them: a linear list made every gjmp and
+ * every chain link a scan, quadratic in a function's jumps.  Code is emitted
+ * forwards, so a new placeholder nearly always goes on the end. */
+static struct jump_patch_meta *jump_patches;
+static int jump_patch_count, jump_patch_cap;
 static struct switch_slot_meta *switch_slots = NULL;
 
 static int func_prologue_ajw_offset = -1;  /* -1 = not set, >=0 = valid offset */
@@ -1388,25 +1392,45 @@ static void wide_log_add(int offset, int opcode, int operand) {
     wide_log_count++;
 }
 
+/* Index of the first placeholder at or after instr_offset. */
+static int jump_patch_index(int instr_offset)
+{
+    int lo = 0, hi = jump_patch_count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (jump_patches[mid].instr_offset < instr_offset)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
 static struct jump_patch_meta *jump_patch_find(int instr_offset)
 {
-    struct jump_patch_meta *p;
-    for (p = jump_patches; p; p = p->next) {
-        if (p->instr_offset == instr_offset)
-            return p;
-    }
+    int i = jump_patch_index(instr_offset);
+    if (i < jump_patch_count && jump_patches[i].instr_offset == instr_offset)
+        return &jump_patches[i];
     return NULL;
 }
 
 static struct jump_patch_meta *jump_patch_upsert(int instr_offset, int is_conditional)
 {
-    struct jump_patch_meta *p = jump_patch_find(instr_offset);
-    if (!p) {
-        p = tcc_malloc(sizeof(*p));
-        p->instr_offset = instr_offset;
-        p->next = jump_patches;
-        jump_patches = p;
+    int i = jump_patch_index(instr_offset);
+    struct jump_patch_meta *p;
+    if (i == jump_patch_count || jump_patches[i].instr_offset != instr_offset) {
+        if (jump_patch_count == jump_patch_cap) {
+            jump_patch_cap = jump_patch_cap ? jump_patch_cap * 2 : 64;
+            jump_patches = tcc_realloc(jump_patches,
+                                       jump_patch_cap * sizeof(*jump_patches));
+        }
+        /* Only a placeholder re-emitted after a rollback lands mid-array. */
+        memmove(jump_patches + i + 1, jump_patches + i,
+                (jump_patch_count - i) * sizeof(*jump_patches));
+        jump_patch_count++;
+        jump_patches[i].instr_offset = instr_offset;
     }
+    p = &jump_patches[i];
     p->is_conditional = is_conditional ? 1 : 0;
     return p;
 }
@@ -1435,18 +1459,12 @@ static void switch_slot_add(int instr_offset, int slot_size, int opcode,
 /* Reset per function */
 static void transputer_func_reset(void) {
     struct local_patch *p = local_patches;
-    struct jump_patch_meta *j = jump_patches;
     struct switch_slot_meta *s = switch_slots;
 
     while(p) {
         struct local_patch *next = p->next;
         tcc_free(p);
         p = next;
-    }
-    while (j) {
-        struct jump_patch_meta *next = j->next;
-        tcc_free(j);
-        j = next;
     }
     while (s) {
         struct switch_slot_meta *next = s->next;
@@ -1455,7 +1473,7 @@ static void transputer_func_reset(void) {
     }
     local_patches = NULL;
     local_patches_tail = NULL;
-    jump_patches = NULL;
+    jump_patch_count = 0;
     switch_slots = NULL;
     tp_hist_clear();
     tp_fpr_reg = -1;
@@ -3645,8 +3663,10 @@ ST_FUNC void gsym_addr(int t, int a)
         ind = saved_ind;  /* Restore ind */
         nocode_wanted = saved_nocode;  /* Restore nocode_wanted */
 
-        /* Move to next jump in chain */
+        /* Move to next jump in chain.  Look the entry up again rather than
+         * trust `meta` across the emission: the array moves when it grows. */
         if (meta) {
+            meta = jump_patch_find(t);
             meta->patched = 1;
             meta->target_addr = a;
             meta->instr_len = instr_len;
