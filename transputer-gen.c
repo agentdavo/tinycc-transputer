@@ -6780,15 +6780,15 @@ static int tps_stats[10];  /* S1..S10 hit counts */
 static int tps_stats_on = -1;
 
 /* Bitmask of enabled patterns (bit 0 = S1 ... bit 6 = S7, bit 8 = S9,
- * bit 9 = S10, bit 10 = 5a' push hoisting), for bisecting a suspected
- * miscompile: TP_SCHED_MASK=0x73f disables S7, and so on.  S8 has no
- * switch. */
+ * bit 9 = S10, bit 10 = 5a' push hoisting, bit 11 = 5a'' CJ over J), for
+ * bisecting a suspected miscompile: TP_SCHED_MASK=0xf3f disables S7, and so
+ * on.  S8 has no switch. */
 static int tps_mask = -1;
 static int tps_on(int which)
 {
     if (tps_mask < 0) {
         const char *e = getenv("TP_SCHED_MASK");
-        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x77f;
+        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0xf7f;
     }
     return (tps_mask >> which) & 1;
 }
@@ -7805,6 +7805,52 @@ try_copy:
         an[i].dead = 1;
         removed += 1;
         tps_note(7);
+    }
+
+    /* ---- 5a''. a CJ that only skips a forward J ----
+     *
+     *     cj L1 ; j L2 ; L1:      ->      eqc 0 ; cj L2 ; L1:
+     *
+     * TCC's `c ? a : b` leaves this whenever the first arm needs no code of
+     * its own (a constant or a variable): the CJ to the second arm jumps over
+     * nothing but the J to where the first arm's value is loaded.  EQC 0
+     * inverts the test, so the CJ goes where the J went and the fall-through
+     * is the old target.  Only the stack junk at the two targets differs
+     * (a taken CJ leaves its zero in AReg), and nothing is live at a label.
+     * The J must not be a branch target itself, and must go forwards: a
+     * backward J may be a loop's only timeslice point. */
+    for (i = 0; i < n && tps_on(11); i++) {
+        int jj, t1, k, nx;
+        if (an[i].dead || ins[i].pinned || ins[i].opcode != TP_ENC_CJ ||
+            !ins[i].is_branch || ins[i].ext)
+            continue;
+        jj = tps_next(ins, an, n, i);
+        if (jj < 0 || ins[jj].opcode != TP_ENC_J || !ins[jj].is_branch ||
+            ins[jj].pinned || ins[jj].ext ||
+            ins[jj].target_old <= ins[jj].old_off)
+            continue;
+        for (k = i + 1; k <= jj; k++)
+            if (an[k].head)
+                break;
+        if (k <= jj)
+            continue;
+        t1 = ins[i].target_old;
+        if (t1 < 0 || t1 >= size || idx[t1] < 0)
+            continue;
+        for (k = idx[t1]; k < n && (ins[k].opcode == -1 || an[k].dead); k++)
+            ;
+        nx = tps_next(ins, an, n, jj);
+        if (nx < 0 || k != nx)
+            continue;
+        ins[i].opcode = TP_ENC_EQC;
+        ins[i].operand = 0;
+        ins[i].is_branch = 0;
+        an[i].known = tps_effect(TP_ENC_EQC, 0, &an[i].delta, &an[i].reads);
+        an[i].succ2 = -1;
+        ins[jj].opcode = TP_ENC_CJ;
+        an[jj].known = tps_effect(TP_ENC_CJ, 0, &an[jj].delta, &an[jj].reads);
+        an[jj].succ2 = an[jj].succ1;
+        an[jj].succ1 = jj + 1 < n ? jj + 1 : -1;
     }
 
     /* ---- 5b. drop REVs whose consumer does not care about operand order ----
