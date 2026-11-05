@@ -1935,10 +1935,6 @@ void gen_builtin_tin(void);
 void gen_builtin_resetch(void);
 /* Memory operations */
 void gen_builtin_move(void);
-void gen_builtin_move2dinit(void);
-void gen_builtin_move2dall(void);
-void gen_builtin_move2dnonzero(void);
-void gen_builtin_move2dzero(void);
 /* T805 CRC */
 void gen_builtin_crcbyte(void);
 void gen_builtin_crcword(void);

@@ -139,6 +139,7 @@ struct tp_builtin_desc {
     const char *args;
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
+    unsigned char move2d_op; /* T425+ instruction with arguments in A, B, C */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -617,10 +618,10 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___tin,         "e",   gen_builtin_tin,         1 },
         { TOK___resetch,     "e",   gen_builtin_resetch,     0 },
         { TOK___move,        "eee", gen_builtin_move,        1 },
-        { TOK___move2dinit,  "eee", gen_builtin_move2dinit,  1 },
-        { TOK___move2dall,   "eee", gen_builtin_move2dall,   1 },
-        { TOK___move2dnonzero,"eee",gen_builtin_move2dnonzero,1 },
-        { TOK___move2dzero,  "eee", gen_builtin_move2dzero,  1 },
+        { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT },
+        { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL },
+        { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO },
+        { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO },
         { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0 },
         { TOK___crcword,     "eee", gen_builtin_crcword,     0 },
         { TOK___ldtimer,     "",    gen_builtin_ldtimer,     0 },
@@ -1039,16 +1040,11 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
                       get_tok_str(tok, NULL), tp_target_name(tcc_state));
         }
     }
-    if (tp_t414()) {
-        switch (tok) {          /* instructions the T425 added */
-        case TOK___move2dinit: case TOK___move2dall:
-        case TOK___move2dnonzero: case TOK___move2dzero:
-        case TOK___crcbyte: case TOK___crcword:
-        case TOK___bitrevword: case TOK___bitrevnbits: case TOK___lddevid:
-            tcc_error("%s is a T425 instruction, not available with -mt414",
-                      get_tok_str(tok, NULL));
-        }
-    }
+    if (tp_t414() && (desc->move2d_op || tok == TOK___crcbyte ||
+                      tok == TOK___crcword || tok == TOK___bitrevword ||
+                      tok == TOK___bitrevnbits || tok == TOK___lddevid))
+        tcc_error("%s is a T425 instruction, not available with -mt414",
+                  get_tok_str(tok, NULL));
     if (tcc_state->tp_t800 && tok == TOK___lddevid)
         tcc_error("%s is a T805 instruction, not available with -mt800",
                   get_tok_str(tok, NULL));
@@ -1059,7 +1055,10 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
      * both operands would name the builtin's result.  Spilling after the
      * arguments are parsed also covers an argument that is that result. */
     save_reg(REG_IRET);
-    desc->gen();
+    if (desc->move2d_op)
+        tp_emit_3op(desc->move2d_op, 2, 1, 0);
+    else
+        desc->gen();
     if (desc->returns_void)
         tp_builtin_return_void();
     return 1;
@@ -4683,31 +4682,6 @@ void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
 
     tp_emit_opr(opcode);
     abcreg_pop(3);
-}
-
-/* 2D Block move operations (T800/T805) */
-void gen_builtin_move2dinit(void) {
-    /* MOVE2DINIT: __move2dinit(length, dest_stride, src_stride)
-     * vstack: vtop[0]=src_stride, vtop[-1]=dest_stride, vtop[-2]=length
-     * Eval stack: C=src_stride, B=dest_stride, A=length (rows) */
-    tp_emit_3op(TP_OPR_MOVE2DINIT, 2, 1, 0);
-}
-
-void gen_builtin_move2dall(void) {
-    /* MOVE2DALL: __move2dall(width, dest, src)
-     * vstack: vtop[0]=src, vtop[-1]=dest, vtop[-2]=width
-     * Eval stack: C=src, B=dest, A=width (bytes per row) */
-    tp_emit_3op(TP_OPR_MOVE2DALL, 2, 1, 0);
-}
-
-void gen_builtin_move2dnonzero(void) {
-    /* MOVE2DNONZERO: __move2dnonzero(length, dest, src) */
-    tp_emit_3op(TP_OPR_MOVE2DNONZERO, 2, 1, 0);
-}
-
-void gen_builtin_move2dzero(void) {
-    /* MOVE2DZERO: __move2dzero(length, dest, src) */
-    tp_emit_3op(TP_OPR_MOVE2DZERO, 2, 1, 0);
 }
 
 /* T805 CRC operations */
