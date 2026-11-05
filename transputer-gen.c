@@ -6579,6 +6579,24 @@ static int tp_relax_newt(const struct tp_relax_insn *ins, int i,
     return outlen;
 }
 
+/* LDLP s; [ADC k;] LB with 0 <= k <= 3 reads byte k of workspace word s
+ * (tp_shift_mask_fold's byte form of (x >> 8K) & m): the address goes
+ * nowhere, so it is a plain read of word s, as LDLP s; LDNL 0 is. */
+static int tp_relax_byte_read(const struct tp_relax_insn *ins, int n, int i)
+{
+    int j = i + 1;
+
+    if (ins[i].opcode != TP_ENC_LDLP)
+        return 0;
+    while (j < n && ins[j].opcode == -1)
+        j++;
+    if (j < n && ins[j].opcode == TP_ENC_ADC &&
+        ins[j].operand >= 0 && ins[j].operand <= 3)
+        for (j++; j < n && ins[j].opcode == -1; j++)
+            ;
+    return j < n && ins[j].opcode == TP_ENC_OPR && ins[j].operand == TP_OPR_LB;
+}
+
 /* Why the last function could not be relaxed, for the frame-size error. */
 static const char *tp_relax_why;
 
@@ -6895,6 +6913,8 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
             if (j < n && (ins[j].opcode == TP_ENC_STNL ||
                           ins[j].opcode == TP_ENC_LDNL))
                 continue;                   /* recognised staging form */
+            if (tp_relax_byte_read(ins, n, i))
+                continue;                   /* a byte of the word, read */
             /* Nothing may hold the address of *any* workspace word for copy
              * propagation to re-materialise a value from a slot the def/use
              * annotations do not cover - an incoming argument, mainly. */
@@ -6962,6 +6982,11 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
                  ins[j].operand == TP_FPU_LDNLADDSN ||
                  ins[j].operand == TP_FPU_LDNLMULSN ||
                  ins[j].operand == TP_FPU_STNLSN)) {
+                indirect = 1;
+                if (opd >= 0 && opd < nslot)
+                    an[i].use = opd;
+            }
+            if (tp_relax_byte_read(ins, n, i)) {
                 indirect = 1;
                 if (opd >= 0 && opd < nslot)
                     an[i].use = opd;
@@ -7256,6 +7281,10 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
                         if (t == x || t == y)
                             ok = 0;
                     }
+                    /* A byte read of y would not be redirected to x below,
+                     * and the copy that wrote y goes. */
+                    if (ins[k].operand == y && tp_relax_byte_read(ins, n, k))
+                        ok = 0;
                 } else if (ins[k].pinned && ins[k].opcode == TP_ENC_LDL &&
                            ins[k].operand == y) {
                     ok = 0;                 /* a reader that cannot be rewritten */
@@ -7693,6 +7722,8 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n)
         int t, recognised;
         if (ins[i].opcode != TP_ENC_LDLP)
             continue;
+        if (tp_relax_byte_read(ins, n, i))
+            continue;                       /* reads its own word in place */
         s = ins[i].operand;
         for (j = i + 1; j < n && ins[j].opcode == -1; j++)
             ;
@@ -10144,6 +10175,103 @@ static void tp_emit_gtu(int swapped)
     Tp_GT();
 }
 
+/* (x >> K) & m with a mask that keeps only bits the shift brings down from
+ * x itself (m < 2^(32 - K)) is the same for an arithmetic and a logical
+ * shift.  A signed >> K is xdble; ldc K; lshr (there is no sign-filling
+ * shift), so for these masks it becomes ldc K; shr: one instruction and a
+ * long shift fewer.  Doom's texture lookups, (frac >> 16) & 127, do this
+ * every pixel.
+ *
+ * Better still on the T800, T805, T425 and T414, whose shifts take a cycle
+ * a place (shr 16 is 18 cycles): when K is 8, 16 or 24, m fits in a byte
+ * and x came straight from a workspace word, the answer is byte K / 8 of
+ * that word, so ldlp x; adc K/8; lb (7 cycles) replaces ldl x ... shr (21),
+ * and the and goes too when m is 255.  The T9000 shifts in a cycle and
+ * keeps the shift.
+ *
+ * Called with `ldc m` just emitted for the `and` that follows.  Returns 0
+ * to leave the code alone, 1 with the code rewritten and the and still
+ * wanted, 2 when the and is not.  TCC_TRANSPUTER_SHIFT_MASK=0 turns it
+ * off for an A/B run. */
+static int tp_shift_mask_fold(void)
+{
+    static int enabled = -1;
+    struct tp_hist_ent x;
+    unsigned int m, k;
+    int i, sar, nwin, roll;
+
+    if (enabled < 0) {
+        const char *e = getenv("TCC_TRANSPUTER_SHIFT_MASK");
+        enabled = !(e && *e == '0');
+    }
+    if (!enabled || nocode_wanted || tp_hist_n < 3)
+        return 0;
+    if (tp_hist[0].kind != TP_HIST_INSTR || tp_hist[0].opc != TP_OP_LDC ||
+        tp_hist[0].end != ind)
+        return 0;
+    m = (unsigned int)tp_hist[0].val;
+    if (tp_hist[1].kind == TP_HIST_INSTR && tp_hist[1].opc == TP_OP_OPR &&
+        tp_hist[1].val == TP_OPR_LSHR && tp_hist_n >= 4 &&
+        tp_hist[3].kind == TP_HIST_INSTR && tp_hist[3].opc == TP_OP_OPR &&
+        tp_hist[3].val == TP_OPR_XDBLE)
+        sar = 1;
+    else if (tp_hist[1].kind == TP_HIST_INSTR && tp_hist[1].opc == TP_OP_OPR &&
+             tp_hist[1].val == TP_OPR_SHR)
+        sar = 0;
+    else
+        return 0;
+    if (tp_hist[2].kind != TP_HIST_INSTR || tp_hist[2].opc != TP_OP_LDC)
+        return 0;
+    k = (unsigned int)tp_hist[2].val;
+    if (k < 1 || k > 31 || (m >> (32 - k)) != 0)
+        return 0;
+    nwin = sar ? 4 : 3;                 /* ldc m back to the shift's start */
+    for (i = 0; i + 1 < nwin; i++)
+        if (tp_hist[i].off != tp_hist[i + 1].end)
+            return 0;
+
+    /* The byte form needs x's own load just before the shift. */
+    if (!(tcc_state && tcc_state->tp_t9000) &&
+        (k == 8 || k == 16 || k == 24) && m <= 0xff &&
+        tp_hist_n > nwin && tp_hist[nwin].end == tp_hist[nwin - 1].off &&
+        tp_hist[nwin].opc == TP_OP_LDL &&
+        (tp_hist[nwin].kind == TP_HIST_LOCAL ||
+         tp_hist[nwin].kind == TP_HIST_INSTR)) {
+        x = tp_hist[nwin];
+        roll = x.off;
+        abcreg_pop(2);                  /* x and m are rolled back */
+    } else if (sar) {
+        x.kind = -1;
+        roll = tp_hist[3].off;
+        abcreg_pop(1);                  /* m is; the value x stays in A */
+    } else
+        return 0;
+
+    ind = roll;
+    cur_text_section->data_offset = ind;
+    tp_drop_local_patches_from(ind);
+    tp_hist_rollback(ind);
+    tp_stl_track_clear();
+    tp_areg_invalidate();
+    tp_last_opc = tp_prev_opc = -1;
+    tp_last_off = tp_last_end = tp_prev_off = tp_prev_end = -1;
+
+    if (x.kind >= 0) {
+        x.opc = TP_OP_LDLP;
+        tp_hist_replay(&x);
+        Tp_ADC(k / 8);
+        Tp_LB();
+        tp_areg_invalidate();
+        if (m == 0xff)
+            return 2;
+    } else {
+        Tp_LDC(k);
+        Tp_SHR();
+    }
+    Tp_LDC(m);
+    return 1;
+}
+
 ST_FUNC void gen_opi(int op) {
     int cmp_zero_true;
     int shl_add_opt = 0;
@@ -10697,7 +10825,12 @@ direct_ready:
         Tp_REV();                      /* AReg=remainder */
         abcreg_pop(1); vtop--; break;
     case TOK_A_AND:  /* &= compound assignment */
-    case '&': Tp_AND(); vtop--; break;
+    case '&':
+        if (tp_shift_mask_fold() == 2) {
+            vtop--;
+            break;
+        }
+        Tp_AND(); vtop--; break;
     case TOK_A_OR:   /* |= compound assignment */
     case '|': Tp_OR(); vtop--; break;
     case TOK_A_XOR:  /* ^= compound assignment */
