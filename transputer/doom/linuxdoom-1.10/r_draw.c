@@ -102,14 +102,20 @@ int			dccount;
 // Thus a special case loop for very fast rendering can
 //  be used. It has also been used with Wolfenstein 3D.
 // 
-void R_DrawColumn (void) 
-{ 
-    int			count; 
-    byte*		dest; 
+// The drawers below copy the globals their loops read into locals
+// (source, colormap, the steps): the byte store through dest may alias
+// any global as far as C knows, so a loop naming dc_source reloads it,
+// an eight-byte ldc and an ldnl on the transputer, every pixel.
+void R_DrawColumn (void)
+{
+    byte*		source;
+    byte*		colormap;
+    int			count;
+    byte*		dest;
     fixed_t		frac;
-    fixed_t		fracstep;	 
- 
-    count = dc_yh - dc_yl; 
+    fixed_t		fracstep;
+
+    count = dc_yh - dc_yl;
 
     // Zero length, column does not exceed a pixel.
     if (count < 0) 
@@ -132,14 +138,17 @@ void R_DrawColumn (void)
     fracstep = dc_iscale; 
     frac = dc_texturemid + (dc_yl-centery)*fracstep; 
 
+    source = dc_source;
+    colormap = dc_colormap;
+
     // Inner loop that does the actual texture mapping,
     //  e.g. a DDA-lile scaling.
     // This is as fast as it gets.
-    do 
+    do
     {
 	// Re-map color indices from wall texture column
 	//  using a lighting/special effects LUT.
-	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	*dest = colormap[source[(frac>>FRACBITS)&127]];
 	
 	dest += SCREENWIDTH; 
 	frac += fracstep;
@@ -208,9 +217,11 @@ void R_DrawColumn (void)
 #endif
 
 
-void R_DrawColumnLow (void) 
-{ 
-    int			count; 
+void R_DrawColumnLow (void)
+{
+    byte*		source;
+    byte*		colormap;
+    int			count;
     byte*		dest; 
     byte*		dest2;
     fixed_t		frac;
@@ -238,13 +249,15 @@ void R_DrawColumnLow (void)
     dest = ylookup[dc_yl] + columnofs[dc_x];
     dest2 = ylookup[dc_yl] + columnofs[dc_x+1];
     
-    fracstep = dc_iscale; 
+    fracstep = dc_iscale;
     frac = dc_texturemid + (dc_yl-centery)*fracstep;
-    
-    do 
+    source = dc_source;
+    colormap = dc_colormap;
+
+    do
     {
 	// Hack. Does not work corretly.
-	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	*dest2 = *dest = colormap[source[(frac>>FRACBITS)&127]];
 	dest += SCREENWIDTH;
 	dest2 += SCREENWIDTH;
 	frac += fracstep; 
@@ -282,10 +295,13 @@ int	fuzzpos = 0;
 //  could create the SHADOW effect,
 //  i.e. spectres and invisible players.
 //
-void R_DrawFuzzColumn (void) 
-{ 
-    int			count; 
-    byte*		dest; 
+void R_DrawFuzzColumn (void)
+{
+    byte*		colormap;
+    int*		offsets;
+    int			pos;
+    int			count;
+    byte*		dest;
     fixed_t		frac;
     fixed_t		fracstep;	 
 
@@ -349,23 +365,27 @@ void R_DrawFuzzColumn (void)
     // Looks like an attempt at dithering,
     //  using the colormap #6 (of 0-31, a bit
     //  brighter than average).
-    do 
+    colormap = colormaps + 6*256;
+    offsets = fuzzoffset;
+    pos = fuzzpos;
+    do
     {
 	// Lookup framebuffer, and retrieve
 	//  a pixel that is either one column
 	//  left or right of the current one.
 	// Add index from colormap to index.
-	*dest = colormaps[6*256+dest[fuzzoffset[fuzzpos]]]; 
+	*dest = colormap[dest[offsets[pos]]];
 
 	// Clamp table lookup index.
-	if (++fuzzpos == FUZZTABLE) 
-	    fuzzpos = 0;
-	
+	if (++pos == FUZZTABLE)
+	    pos = 0;
+
 	dest += SCREENWIDTH;
 
-	frac += fracstep; 
-    } while (count--); 
-} 
+	frac += fracstep;
+    } while (count--);
+    fuzzpos = pos;
+}
  
   
  
@@ -382,9 +402,12 @@ void R_DrawFuzzColumn (void)
 byte*	dc_translation;
 byte*	translationtables;
 
-void R_DrawTranslatedColumn (void) 
-{ 
-    int			count; 
+void R_DrawTranslatedColumn (void)
+{
+    byte*		source;
+    byte*		colormap;
+    byte*		translation;
+    int			count;
     byte*		dest; 
     fixed_t		frac;
     fixed_t		fracstep;	 
@@ -431,15 +454,19 @@ void R_DrawTranslatedColumn (void)
     fracstep = dc_iscale; 
     frac = dc_texturemid + (dc_yl-centery)*fracstep; 
 
+    source = dc_source;
+    colormap = dc_colormap;
+    translation = dc_translation;
+
     // Here we do an additional index re-mapping.
-    do 
+    do
     {
 	// Translation tables are used
 	//  to map certain colorramps to other ones,
 	//  used with PLAY sprites.
 	// Thus the "green" ramp of the player 0 sprite
-	//  is mapped to gray, red, black/indigo. 
-	*dest = dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]];
+	//  is mapped to gray, red, black/indigo.
+	*dest = colormap[translation[source[frac>>FRACBITS]]];
 	dest += SCREENWIDTH;
 	
 	frac += fracstep; 
@@ -517,8 +544,12 @@ int			dscount;
 
 //
 // Draws the actual span.
-void R_DrawSpan (void) 
-{ 
+void R_DrawSpan (void)
+{
+    byte*		source;
+    byte*		colormap;
+    fixed_t		xstep;
+    fixed_t		ystep;
     fixed_t		xfrac;
     fixed_t		yfrac; 
     byte*		dest; 
@@ -544,20 +575,25 @@ void R_DrawSpan (void)
     dest = ylookup[ds_y] + columnofs[ds_x1];
 
     // We do not check for zero spans here?
-    count = ds_x2 - ds_x1; 
+    count = ds_x2 - ds_x1;
 
-    do 
+    source = ds_source;
+    colormap = ds_colormap;
+    xstep = ds_xstep;
+    ystep = ds_ystep;
+
+    do
     {
 	// Current texture index in u,v.
 	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
 
 	// Lookup pixel from flat texture tile,
 	//  re-index using light/colormap.
-	*dest++ = ds_colormap[ds_source[spot]];
+	*dest++ = colormap[source[spot]];
 
 	// Next step in u,v.
-	xfrac += ds_xstep; 
-	yfrac += ds_ystep;
+	xfrac += xstep;
+	yfrac += ystep;
 	
     } while (count--); 
 } 
@@ -640,8 +676,12 @@ void R_DrawSpan (void)
 //
 // Again..
 //
-void R_DrawSpanLow (void) 
-{ 
+void R_DrawSpanLow (void)
+{
+    byte*		source;
+    byte*		colormap;
+    fixed_t		xstep;
+    fixed_t		ystep;
     fixed_t		xfrac;
     fixed_t		yfrac; 
     byte*		dest; 
@@ -670,17 +710,21 @@ void R_DrawSpanLow (void)
     dest = ylookup[ds_y] + columnofs[ds_x1];
   
     
-    count = ds_x2 - ds_x1; 
-    do 
-    { 
+    count = ds_x2 - ds_x1;
+    source = ds_source;
+    colormap = ds_colormap;
+    xstep = ds_xstep;
+    ystep = ds_ystep;
+    do
+    {
 	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
 	// Lowres/blocky mode does it twice,
 	//  while scale is adjusted appropriately.
-	*dest++ = ds_colormap[ds_source[spot]]; 
-	*dest++ = ds_colormap[ds_source[spot]];
-	
-	xfrac += ds_xstep; 
-	yfrac += ds_ystep; 
+	*dest++ = colormap[source[spot]];
+	*dest++ = colormap[source[spot]];
+
+	xfrac += xstep;
+	yfrac += ystep;
 
     } while (count--); 
 }
