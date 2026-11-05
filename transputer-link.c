@@ -1288,7 +1288,7 @@ static void tp_audit_call_targets(TCCState *s1, Section *symtab_sec,
             size_t off;
             size_t pos;
 
-            if (rtype != R_TRANSPUTER_IPREL32)
+            if (rtype != R_TRANSPUTER_IPREL32 && rtype != R_TRANSPUTER_INSN)
                 continue;
 
             rsym = ELFW(R_SYM)(rel->r_info);
@@ -1296,6 +1296,14 @@ static void tp_audit_call_targets(TCCState *s1, Section *symtab_sec,
             expected_val = rsym_p->st_value;
             if (rsym_p->st_shndx > 0 && rsym_p->st_shndx < s1->nb_sections)
                 expected_val += s1->sections[rsym_p->st_shndx]->sh_addr;
+            if (rtype == R_TRANSPUTER_INSN) {
+                int op, addend;
+                if (tp_decode_instr_at(s->data, s->data_offset, rel->r_offset,
+                                       &op, &addend) != TP_ASM_SLOT
+                    || (op != TP_ENC_J && op != TP_ENC_CJ && op != TP_ENC_CALL))
+                    continue;
+                expected_val = (uint32_t)expected_val + (uint32_t)addend;
+            }
 
             call_addr = s->sh_addr + rel->r_offset;
             off = (size_t)(call_addr - base_addr);
@@ -1563,7 +1571,25 @@ static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
                                       int iprel_patch_trace, int iprel_patch_debug,
                                       uint8_t *ptr)
 {
+    TCCState *s1 = s->s1;
     switch (type) {
+    case R_TRANSPUTER_INSN: {
+        int op, addend;
+        size_t off = (size_t)(addr - base_addr);
+        unsigned long pos = addr - s->sh_addr;
+        uint32_t operand;
+
+        if (off > total_size || total_size - off < TP_ASM_SLOT
+            || pos > s->data_offset || s->data_offset - pos < TP_ASM_SLOT
+            || tp_decode_instr_at(ptr, TP_ASM_SLOT, 0, &op, &addend) != TP_ASM_SLOT
+            || op == TP_ENC_OPR)
+            return tcc_error_noabort("invalid instruction relocation at %s+0x%lx", s->name, pos);
+        operand = (uint32_t)val + (uint32_t)addend;
+        if (op == TP_ENC_J || op == TP_ENC_CALL || op == TP_ENC_CJ)
+            operand -= (uint32_t)addr + TP_ASM_SLOT;
+        tp_encode_asm_slot(ptr, op, (int32_t)operand);
+        break;
+    }
     case R_TRANSPUTER_32: {
         uint32_t old_val = read32le(ptr);
         uint32_t new_val = old_val + val;
@@ -1849,6 +1875,7 @@ int code_reloc (int reloc_type)
          case R_TRANSPUTER_IPREL32:
          case R_TRANSPUTER_IPREL16:
          case R_TRANSPUTER_IPREL8:
+         case R_TRANSPUTER_INSN:
          case R_TRANSPUTER_LDC_ABS:
          case R_TRANSPUTER_16:
          case R_TRANSPUTER_32:
@@ -1883,6 +1910,7 @@ int gotplt_entry_type (int reloc_type)
         case R_TRANSPUTER_IPREL32:
         case R_TRANSPUTER_IPREL16:
         case R_TRANSPUTER_IPREL8:
+        case R_TRANSPUTER_INSN:
         case R_TRANSPUTER_LDC_ABS:
             return NO_GOTPLT_ENTRY;
 /* Bare-metal target: Simple address relocations are solved directly
@@ -2385,24 +2413,46 @@ done:
     return removed;
 }
 
-static void tp_icf_fold(TCCState *s1, int link_debug)
+/* References through a section symbol or an instruction addend may enter
+ * the middle of a function. Keep the target section's bytes together and
+ * do not peephole across potential entry points there. */
+static uint8_t *tp_fixed_layout_sections(TCCState *s1)
+{
+    ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
+    int nsym = symtab_section->data_offset / sizeof(*syms);
+    uint8_t *fixed = tcc_mallocz(s1->nb_sections);
+    int i;
+
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *sr = s1->sections[i]->reloc;
+        ElfW_Rel *r;
+        if (!sr)
+            continue;
+        for_each_elem(sr, 0, r, ElfW_Rel) {
+            int si = ELFW(R_SYM)(r->r_info);
+            if (si <= 0 || si >= nsym || syms[si].st_shndx >= s1->nb_sections)
+                continue;
+            if (ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION
+                || ELFW(R_TYPE)(r->r_info) == R_TRANSPUTER_INSN)
+                fixed[syms[si].st_shndx] = 1;
+        }
+    }
+    return fixed;
+}
+
+static void tp_icf_fold(TCCState *s1, const uint8_t *fixed, int link_debug)
 {
     ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
     int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
     uint8_t *addr_taken;
-    uint8_t *sec_blocked;
     uint32_t total = 0;
     int folded = 0, i;
 
     if (!tp_icf_enabled())
         return;
     addr_taken = tcc_mallocz((size_t)nsym + 1);
-    sec_blocked = tcc_mallocz((size_t)s1->nb_sections + 1);
 
-    /* One pass over every relocation in the image: note which symbols have
-     * their address materialised, and refuse to touch a section that is
-     * referenced through its section symbol (the addend then lives in the
-     * patched bytes, where we cannot rewrite it).
+    /* Note which symbols have their address materialised.
      *
      * A call slot narrower than the usual 6 bytes was sized by the compiler
      * for a callee close behind it in the same section (tp_call_slot_width).
@@ -2422,9 +2472,6 @@ static void tp_icf_fold(TCCState *s1, int link_debug)
             int si = (int)ELFW(R_SYM)(rel->r_info);
             if (si <= 0 || si >= nsym)
                 continue;
-            if (ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION &&
-                syms[si].st_shndx > 0 && syms[si].st_shndx < s1->nb_sections)
-                sec_blocked[syms[si].st_shndx] = 1;
             if (tp_icf_addr_taken_type(type))
                 addr_taken[si] = 1;
             else if (type == R_TRANSPUTER_IPREL32 && ts->data) {
@@ -2444,9 +2491,9 @@ static void tp_icf_fold(TCCState *s1, int link_debug)
             continue;
         if (s->sh_type == SHT_NOBITS || s->data_offset == 0 || !s->data)
             continue;
-        if (sec_blocked[i]) {
+        if (fixed[i]) {
             if (link_debug)
-                fprintf(stderr, "  ICF %-16s skipped (section-symbol relocs)\n",
+                fprintf(stderr, "  ICF %-16s skipped (fixed layout)\n",
                         s->name);
             continue;
         }
@@ -2457,7 +2504,6 @@ static void tp_icf_fold(TCCState *s1, int link_debug)
     if (total && (link_debug || tp_env_enabled("T4_ICF_STATS")))
         fprintf(stderr, "transputer_simple_link: ICF folded %d duplicate "
                 "function bodies, %u bytes\n", folded, total);
-    tcc_free(sec_blocked);
     tcc_free(addr_taken);
 }
 
@@ -2958,12 +3004,12 @@ done:
     return ok ? size - total : 0;
 }
 
-static void tp_link_relax(TCCState *s1, int link_debug)
+static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
 {
     ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
     int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
     const char *e = tp_env("T4_LINK_RELAX");
-    uint8_t *marked, *sec_blocked;
+    uint8_t *marked;
     Section *list = NULL;
     uint32_t saved = 0;
     int i, fns = 0, kept = 0;
@@ -2977,37 +3023,18 @@ static void tp_link_relax(TCCState *s1, int link_debug)
         return;
 
     marked = tcc_mallocz((size_t)nsym + 1);
-    sec_blocked = tcc_mallocz((size_t)s1->nb_sections + 1);
     for (i = 0; i < (int)(list->reloc->data_offset / sizeof(ElfW_Rel)); i++) {
         int si = (int)ELFW(R_SYM)(((ElfW_Rel *)list->reloc->data)[i].r_info);
         if (si > 0 && si < nsym)
             marked[si] = 1;
     }
-    /* As for ICF: a section referenced through its section symbol keeps
-     * its offsets, since the addend lives in the referring bytes. */
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *sr = s1->sections[i]->reloc;
-        ElfW_Rel *r, *r_end;
-        if (!sr || !sr->data)
-            continue;
-        r_end = (ElfW_Rel *)(sr->data + sr->data_offset);
-        for (r = (ElfW_Rel *)sr->data; r < r_end; r++) {
-            int si = (int)ELFW(R_SYM)(r->r_info);
-            if (si > 0 && si < nsym
-                && ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION
-                && syms[si].st_shndx > 0
-                && syms[si].st_shndx < s1->nb_sections)
-                sec_blocked[syms[si].st_shndx] = 1;
-        }
-    }
-
     for (i = 1; i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
         uint32_t before = (uint32_t)s->data_offset, n;
         if ((s->sh_flags & (SHF_ALLOC | SHF_EXECINSTR))
             != (SHF_ALLOC | SHF_EXECINSTR)
             || s->sh_type == SHT_NOBITS || !s->data || !before
-            || sec_blocked[i] || !strcmp(s->name, ".text.start"))
+            || fixed[i] || !strcmp(s->name, ".text.start"))
             continue;
         n = tp_lr_section(s1, i, marked, &fns, &kept);
         saved += n;
@@ -3018,11 +3045,10 @@ static void tp_link_relax(TCCState *s1, int link_debug)
     if (link_debug || tp_env_enabled("T4_RELAX_STATS"))
         fprintf(stderr, "transputer_simple_link: relaxed %d functions "
                 "(%d kept whole), %u bytes\n", fns, kept, saved);
-    tcc_free(sec_blocked);
     tcc_free(marked);
 }
 
-static void tp_optimize_code_sections(TCCState *s1, int link_debug)
+static void tp_optimize_code_sections(TCCState *s1, const uint8_t *fixed, int link_debug)
 {
     int i;
 
@@ -3031,7 +3057,7 @@ static void tp_optimize_code_sections(TCCState *s1, int link_debug)
     for (i = 1; i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
         if ((s->sh_flags & (SHF_ALLOC | SHF_EXECINSTR)) == (SHF_ALLOC | SHF_EXECINSTR) &&
-            s->data_offset > 0 && s->data != NULL) {
+            !fixed[i] && s->data_offset > 0 && s->data != NULL) {
             if (link_debug) {
                 fprintf(stderr, " Optimizing section: %s (size=%lu bytes)\n",
                         s->name, (unsigned long)s->data_offset);
@@ -3492,6 +3518,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                 if (sym->st_shndx == SHN_UNDEF &&
                     ELFW(ST_BIND)(sym->st_info) != STB_WEAK &&
                     (type == R_TRANSPUTER_IPREL32 ||
+                     type == R_TRANSPUTER_INSN ||
                      type == R_TRANSPUTER_LDC_ABS ||
                      type == R_TRANSPUTER_32)) {
                     const char *un = tp_reloc_symbol_name(symtab_sec, sym);
@@ -3605,10 +3632,14 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     int iprel_patch_trace = tp_env_enabled("T4_IPREL_PATCH_TRACE");
     int iprel_patch_debug = tp_env_enabled("T4_IPREL_PATCH_DEBUG");
     InitcallLayout initcall_layout;
+    uint8_t *fixed;
+
     tp_alloc_common_syms(s1);
-    tp_optimize_code_sections(s1, link_debug);
-    tp_icf_fold(s1, link_debug);
-    tp_link_relax(s1, link_debug);
+    fixed = tp_fixed_layout_sections(s1);
+    tp_optimize_code_sections(s1, fixed, link_debug);
+    tp_icf_fold(s1, fixed, link_debug);
+    tp_link_relax(s1, fixed, link_debug);
+    tcc_free(fixed);
     if (tp_layout_sections(s1, base_addr, &total_size, &total_memsz,
 			   &current_addr, xip_mode, &xip_text_end,
 			   &xip_data_start, link_debug) < 0)

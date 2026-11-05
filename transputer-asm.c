@@ -1067,37 +1067,20 @@ ST_FUNC void asm_opcode(TCCState *s1, int t)
     }
 
     if (has_expr && expr.sym) {
-        int reloc_type;
-        int fixed_size = 0;
-        /* The linker replaces the entire instruction operand with the
-         * relocated value. It cannot recover a symbolic addend here. */
+        int relative = opcode == TP_ENC_J || opcode == TP_ENC_CALL || opcode == TP_ENC_CJ;
+        int reloc_type = relative ? R_TRANSPUTER_IPREL32 : R_TRANSPUTER_LDC_ABS;
+
+        if (opcode == TP_ENC_PFIX || opcode == TP_ENC_NFIX || expr.pcrel)
+            tcc_error("unsupported symbolic expression for '%s'", name);
+        if (expr.v != (uint32_t)expr.v && expr.v != (uint64_t)(int64_t)(int32_t)expr.v)
+            tcc_error("instruction addend does not fit in 32 bits");
         if (expr.v)
-            tcc_error("symbolic addend is unsupported for '%s'", name);
-        if (opcode == 0x0 || opcode == 0x9 || opcode == 0xA) {
-            reloc_type = R_TRANSPUTER_IPREL32;
-            fixed_size = 9;
-        } else if (opcode == 0x4) {
-            reloc_type = R_TRANSPUTER_LDC_ABS;
-            fixed_size = 9;
-        } else if (opcode == 0x1 || opcode == 0x3 || opcode == 0x5 ||
-                   opcode == 0x7 || opcode == 0x8 || opcode == 0xB ||
-                   opcode == 0xD || opcode == 0xE) {
-            /* ldlp, ldnl, ldnlp, ldl, adc, ajw, stl, stnl —
-             * workspace/memory opcodes need full prefix reservation */
-            reloc_type = R_TRANSPUTER_LDC_ABS;
-            fixed_size = 9;
-        } else {
-            reloc_type = R_TRANSPUTER_32;
-        }
+            reloc_type = R_TRANSPUTER_INSN;
         greloc(cur_text_section, expr.sym, ind, reloc_type);
-        if (fixed_size) {
-            int j;
-            for (j = 0; j < fixed_size - 1; j++)
-                g(0x20);
-            g((uint8_t)((opcode << 4) | (op & 0xF)));
-            return;
-        }
-        val = 0;
+        tp_encode_asm_slot(buf, opcode, (int32_t)expr.v);
+        for (i = 0; i < TP_ASM_SLOT; i++)
+            g(buf[i]);
+        return;
     }
 
     /* A branch displacement depends on the instruction's own length.  Only

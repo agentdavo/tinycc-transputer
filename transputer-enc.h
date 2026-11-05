@@ -134,6 +134,18 @@ static inline int tp_encode_len(int opcode, int operand)
     return tp_encode_instr(NULL, opcode, operand);
 }
 
+/* Full-width assembler relocation slot. Left padding keeps NextInst fixed. */
+#define TP_ASM_SLOT 9
+
+static inline void tp_encode_asm_slot(uint8_t *buf, int opcode, int32_t operand)
+{
+    int pad = TP_ASM_SLOT - tp_encode_len(opcode, operand);
+    int i;
+    for (i = 0; i < pad; i++)
+        buf[i] = TP_ENC_PFIX << 4;
+    tp_encode_instr(buf + pad, opcode, operand);
+}
+
 /* Check if byte is a prefix */
 static inline int tp_is_prefix_byte(uint8_t b)
 {

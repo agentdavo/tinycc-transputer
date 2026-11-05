@@ -63,6 +63,7 @@ require_tools() {
 }
 
 declare -A EXTRA_SOURCES=(
+    [test_asm_addends]="test_asm_addends_fn.S"
     [main]="support.c"
     [simple_main]="support.c"
     [test_main]="test_functions.c"
@@ -97,6 +98,7 @@ declare -A EXTRA_CFLAGS=(
 )
 
 declare -A FORCE_SKIP=(
+    [test_asm_addends_fn]="helper file for test_asm_addends"
     [minimal]="uses its own _start and writes memory, not UART-test oriented"
     [minimal_fp_test]="uses its own _start and debug memory only"
     [simple]="empty host-style stub"

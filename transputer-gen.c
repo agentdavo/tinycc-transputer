@@ -7798,6 +7798,16 @@ static int tp_relax_function(void)
     if (tcc_state->do_debug)
         return tp_relax_bail("debug");
 
+    /* An assembler addend can name an interior byte by its distance from a
+     * label. Preserve that layout, including for backward references. */
+    if (func_uses_inline_asm && sec->reloc) {
+        ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
+        int end = sec->reloc->data_offset / sizeof(*rel);
+        for (i = func_start_nrel; i < end; i++)
+            if (ELFW(R_TYPE)(rel[i].r_info) == R_TRANSPUTER_INSN)
+                return tp_relax_bail("asm-addend");
+    }
+
     code = sec->data + base;
     ins = tcc_malloc(sizeof(*ins) * (size + 1));
 
