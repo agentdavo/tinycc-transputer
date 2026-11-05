@@ -79,6 +79,15 @@ static int seq;
 static int next_seq(void) { return ++seq; }
 static inline int first(int a, int b) { return a * 16 + b; }
 
+/* constant arguments: bound by name only when the body just reads them */
+static inline int bumped(int x) { x += 1; return x; }
+static inline int preinc(int x) { return ++x; }
+static inline int via_addr(int x) { return *&x; }
+static inline u32 shr1(u32 x) { return x >> 1; }
+/* the kernel's generic_test_bit: a constant nr indexes and shifts */
+static inline int tbit(int nr, const u32 *a) { return 1 & (a[nr >> 5] >> (nr & 31)); }
+static NOINLINE int tbit_n(int nr, const u32 *a) { return 1 & (a[nr >> 5] >> (nr & 31)); }
+
 static void test_main_body(void)
 {
     int i, x, arr[4] = { 1, 2, 3, 4 };
@@ -86,6 +95,26 @@ static void test_main_body(void)
 
     for (i = 0; i < 40; i++)
         chk(__LINE__ * 256 + i, rol32(w, i), rol32_n(w, i));
+    chk(__LINE__, rol32(w, 0), w);
+    chk(__LINE__, rol32(w, 16), rol32_n(w, 16));
+    chk(__LINE__, rol32(w, 31), rol32_n(w, 31));
+    chk(__LINE__, rol32(w, 33), rol32_n(w, 1));
+    chk(__LINE__, rol32(0x80000001u, 4), 0x18u);
+    chk(__LINE__, bumped(5), 6);
+    chk(__LINE__, preinc(41), 42);
+    chk(__LINE__, via_addr(-9), (u32)-9);
+    chk(__LINE__, shr1(0x80000001u), 0x40000000u);
+    chk(__LINE__, shr1(0xfffffffeu), 0x7fffffffu);
+    chk(__LINE__, narrow(300), 44);
+    chk(__LINE__, half(0x12345678u), 0x5678u);
+    {
+        static const u32 bits[2] = { 0x00000100u, 0x00000020u };
+        chk(__LINE__, tbit(8, bits), tbit_n(8, bits));
+        chk(__LINE__, tbit(8, bits), 1);
+        chk(__LINE__, tbit(37, bits), 1);
+        chk(__LINE__, tbit(36, bits), 0);
+        chk(__LINE__, tbit(0, bits) + tbit(31, bits), 0);
+    }
     chk(__LINE__, add_g(5), add_g_n(5));
     {
         int g = 100;                         /* must not capture add_g's g */

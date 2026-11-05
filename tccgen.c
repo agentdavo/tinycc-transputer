@@ -7032,6 +7032,59 @@ static int tp_inline_temp(int size, int align)
     return i;
 }
 
+/* The tokens to replay: fn's body, with each parameter konst[] marks
+   written as its constant, `( 16 )`, where the body names it - a literal of
+   the parameter's own int type, no symbol.  Read from a copy the way the
+   scan reads it, so the result also ends in the 0 that returns to the
+   caller's tokens. */
+static TokenString *tp_inline_body(struct InlineFunc *fn, Sym *ftype,
+                                   const int *konst, const uint64_t *val)
+{
+    TokenString *c, *b;
+    int braces = 0, prev = '{', i, any = 0;
+    Sym *pa;
+
+    for (pa = ftype->next, i = 0; pa; pa = pa->next, i++)
+        any |= konst[i];
+    c = tp_inline_copy(fn->func_str);
+    if (!any)
+        return c;
+    b = tok_str_alloc();
+    unget_tok(0);
+    begin_macro(c, 1);
+    next();                                 /* '{' */
+    for (;;) {
+        int t = tok;
+        pa = NULL;
+        if (t >= TOK_UIDENT && prev != '.' && prev != TOK_ARROW)
+            for (pa = ftype->next, i = 0; pa; pa = pa->next, i++)
+                if ((pa->v & ~SYM_FIELD) == t)
+                    break;
+        if (pa && konst[i]) {
+            tok = '(';
+            tok_str_add_tok(b);
+            if (pa->type.t & VT_UNSIGNED)
+                tok = TOK_CUINT, tokc.i = (uint32_t)val[i];
+            else
+                tok = TOK_CINT, tokc.i = (int)val[i];
+            tok_str_add_tok(b);
+            tok = ')';
+            tok_str_add_tok(b);
+        } else {
+            tok_str_add_tok(b);
+        }
+        if (t == '{')
+            braces++;
+        else if (t == '}' && --braces == 0)
+            break;
+        prev = t;
+        next();
+    }
+    next();                                 /* past '}': the caller's token */
+    tok_str_add(b, 0);
+    return b;
+}
+
 /* vstack: the function, then its nb_args arguments.  Returns 1 with the
    call's value on the vstack instead, or 0 to make the call. */
 static int tp_inline_call(Sym *ftype, int nb_args)
@@ -7040,8 +7093,10 @@ static int tp_inline_call(Sym *ftype, int nb_args)
     Sym *fsym = fv->sym, *pa, *params[TP_INLINE_MAX_ARGS];
     struct InlineFunc *fn = NULL;
     int tmp[TP_INLINE_MAX_ARGS], konst[TP_INLINE_MAX_ARGS];
+    uint64_t val[TP_INLINE_MAX_ARGS];
     int i, n = 0, bt, has_ret, used, written, size, align, has_val = 0;
     struct scope o;
+    TokenString *body;
 
     if (!tp_inline_on() || nocode_wanted || debug_modes
         || tp_inline_depth >= TP_INLINE_MAX_DEPTH
@@ -7071,16 +7126,12 @@ static int tp_inline_call(Sym *ftype, int nb_args)
         return 0;
     for (i = 0; i < n; i++) {
         SValue *a = vtop - (n - 1 - i);
-        int pt = params[i]->type.t;
-        /* An integer constant the body only reads is bound by name, so it
-           folds there (rol32(x, 16) shifts by 16).  Below 2^31 when
-           unsigned, where its sign- and zero-extended forms agree. */
+        /* An int constant the body only reads is written into the body as
+           that constant, so it folds there (rol32(x, 16) shifts by 16). */
         konst[i] = (a->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
-            && !(written & (1 << i))
-            && ((pt & VT_BTYPE) == VT_INT || (pt & VT_BTYPE) == VT_SHORT
-                || (pt & VT_BTYPE) == VT_BYTE)
-            && (pt & VT_UNSIGNED ? (uint64_t)a->c.i <= 0x7fffffff
-                                 : a->c.i == (int)a->c.i);
+            && (params[i]->type.t & VT_BTYPE) == VT_INT
+            && (used & (1 << i)) && !(written & (1 << i));
+        val[i] = a->c.i;
         tmp[i] = -1;
         if (!(used & (1 << i)) || konst[i])
             continue;
@@ -7097,10 +7148,8 @@ static int tp_inline_call(Sym *ftype, int nb_args)
     tp_inline_depth++;
     for (i = n - 1; i >= 0; i--) {
         CType *pt = &params[i]->type;
-        if (konst[i] && (used & (1 << i))) {
-            sym_push(params[i]->v & ~SYM_FIELD, pt, VT_CONST,
-                     (int)vtop->c.i);
-            vpop();
+        if (konst[i]) {
+            vpop();                         /* it is in the body instead */
             continue;
         }
         if (tmp[i] < 0) {
@@ -7119,8 +7168,9 @@ static int tp_inline_call(Sym *ftype, int nb_args)
     }
     vpop();                                 /* the function */
 
+    body = tp_inline_body(fn, ftype, konst, val);
     unget_tok(0);
-    begin_macro(tp_inline_copy(fn->func_str), 1);
+    begin_macro(body, 1);
     next();                                 /* '{' */
     next();
     while (tok != '}') {
