@@ -1382,7 +1382,44 @@ static int tp_iprel_fallback_enabled(void)
     return !(strict_env && *strict_env);
 }
 
+struct tp_reloc_index {
+    int *heads;
+    int *next;
+    unsigned mask;
+};
+
+static unsigned tp_reloc_name_hash(const unsigned char *name)
+{
+    unsigned hash = 0;
+    while (*name)
+        hash = hash * 33 + *name++;
+    return hash;
+}
+
+/* Preserve symbol-table order within each hash bucket, including duplicate
+ * local names. The repair policy depends on both order and match count. */
+static void tp_reloc_index_init(struct tp_reloc_index *index, Section *symtab)
+{
+    ElfW(Sym) *syms = (ElfW(Sym) *)symtab->data;
+    int count = symtab->data_offset / sizeof(*syms);
+    unsigned buckets = 1;
+    int i;
+
+    while (buckets < (unsigned)count && buckets < (1u << 30))
+        buckets <<= 1;
+    index->mask = buckets - 1;
+    index->heads = tcc_mallocz(buckets * sizeof(*index->heads));
+    index->next = tcc_mallocz((size_t)count * sizeof(*index->next));
+    for (i = count - 1; i > 0; i--) {
+        const unsigned char *name = symtab->link->data + syms[i].st_name;
+        unsigned bucket = tp_reloc_name_hash(name) & index->mask;
+        index->next[i] = index->heads[bucket];
+        index->heads[bucket] = i;
+    }
+}
+
 static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
+                                    const struct tp_reloc_index *index,
                                     int type, ElfW(Sym) **sym_io,
                                     int *sym_index_io, addr_t *val_io,
                                     addr_t addr, int reloc_fix_debug)
@@ -1399,7 +1436,6 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
         if (rel_name && rel_name[0] &&
             !(rel_name[0] == 'L' && rel_name[1] == '.') &&
             !(rel_name[0] == '.' && rel_name[1] == 'L')) {
-            int nb_syms_total = symtab_sec->data_offset / sizeof(ElfW(Sym));
             int best_idx = -1;
             addr_t best_val = 0;
             int best_type_match = 0;
@@ -1407,7 +1443,8 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
             int want_type = (type == R_TRANSPUTER_IPREL32) ? STT_FUNC : STT_OBJECT;
             int j;
 
-            for (j = 1; j < nb_syms_total; j++) {
+            for (j = index->heads[tp_reloc_name_hash((const unsigned char *)rel_name) & index->mask];
+                 j; j = index->next[j]) {
                 ElfW(Sym) *cs = &((ElfW(Sym) *)symtab_sec->data)[j];
                 const char *cs_name;
                 addr_t cs_val;
@@ -3344,6 +3381,7 @@ static int tp_define_sched_class_boundaries(TCCState *s1,
 }
 
 static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
+                                const struct tp_reloc_index *index,
                                 uint8_t *image, size_t total_size,
                                 uint32_t base_addr, uint32_t start_kernel_addr,
                                 int link_debug, int link_trace,
@@ -3403,7 +3441,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                 val = sym->st_value;
                 if (sym->st_shndx > 0 && sym->st_shndx < s1->nb_sections)
                     val += s1->sections[sym->st_shndx]->sh_addr;
-                tp_resolve_reloc_symbol(s1, symtab_sec, type, &sym, &sym_index,
+                tp_resolve_reloc_symbol(s1, symtab_sec, index, type, &sym, &sym_index,
                                         &val, addr, reloc_fix_debug);
                 if (sym->st_shndx == SHN_UNDEF)
                     val = tp_resolve_array_bound_symbol(symtab_sec, sym, val,
@@ -3627,12 +3665,20 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     }
     tp_copy_alloc_sections(s1, image, base_addr);
 
-    if (tp_apply_relocations(s1, symtab_section, image, total_size, base_addr,
-                             start_kernel_addr, link_debug, link_trace,
-                             reloc_fix_debug, iprel_patch_trace,
-                             iprel_patch_debug) < 0) {
-        tcc_free(image);
-        return -1;
+    {
+        struct tp_reloc_index index;
+        int result;
+        tp_reloc_index_init(&index, symtab_section);
+        result = tp_apply_relocations(s1, symtab_section, &index, image,
+                                      total_size, base_addr, start_kernel_addr,
+                                      link_debug, link_trace, reloc_fix_debug,
+                                      iprel_patch_trace, iprel_patch_debug);
+        tcc_free(index.heads);
+        tcc_free(index.next);
+        if (result < 0) {
+            tcc_free(image);
+            return -1;
+        }
     }
 
     /* Post-link CALL target audit: verify all IPREL32 relocations encoded correctly.

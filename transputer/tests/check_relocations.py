@@ -154,6 +154,36 @@ def check_invalid_records(cc):
         run(cc, "-nostdlib", "mutant.o", "-o", "mutant", error=error)
 
 
+def check_duplicate_locals(cc):
+    Path("first.S").write_text("""
+.text
+.global _start
+_start: ret
+.data
+.global first_value, first_pointer
+first_value:
+same: .long 1
+first_pointer: .long same
+""")
+    Path("second.S").write_text("""
+.data
+.global second_value, second_pointer
+second_value:
+same: .long 2
+second_pointer: .long same
+""")
+    Path("global.S").write_text(".data\n.global same\nsame: .long 3\n")
+    for name in ("first", "second", "global"):
+        run(cc, "-c", name + ".S", "-o", name + ".o")
+    for inputs in (("first.o", "second.o", "global.o"),
+                   ("global.o", "second.o", "first.o")):
+        run(cc, "-nostdlib", *inputs, "-o", "locals.elf")
+        for prefix in ("first", "second"):
+            value, _ = image_bytes("locals.elf", prefix + "_value", 4)
+            _, pointer = image_bytes("locals.elf", prefix + "_pointer", 4)
+            assert struct.unpack("<I", pointer)[0] == value
+
+
 if __name__ == "__main__":
     cc = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory() as tmp:
@@ -161,4 +191,5 @@ if __name__ == "__main__":
         check_instructions(cc)
         check_narrow(cc)
         check_invalid_records(cc)
+        check_duplicate_locals(cc)
     print("Transputer ELF relocation checks passed.")
