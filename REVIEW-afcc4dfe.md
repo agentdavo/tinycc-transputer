@@ -31,6 +31,13 @@ defined behavior.
 
 **Other findings and remaining work**
 
+- **Packed call arguments.** Packed word lvalues can require byte-wise
+  reconstruction that uses more than one evaluation-stack position.
+  `tp_push_sv_is_pure` now excludes them from direct argument staging and
+  inline `memcpy`. The regression covers local and volatile global fields,
+  packed pointers, direct and indirect calls, and stacked arguments on T414,
+  T425, T800 and T9000. A code-generation check confirms aligned `memcpy`
+  still uses MOVE and the packed-length case calls `memcpy`.
 - **Linker safety.** `310efe5b` validates boot load slots before writing and
   propagates malformed optional-slot errors. Ordinary programs no longer
   get the missing-kernel-symbol or absent-BSS-pair warnings. The final

@@ -9863,9 +9863,9 @@ static int tp_push_sv_is_pure(const SValue *sv)
     if (bt == VT_STRUCT)
         return 0;
     if (fr & VT_LVAL) {
-        /* narrower than a word (_Bool and the 16-bit floats included) is
-           a byte or halfword load; wider pushes its low word */
-        if (size < 4)
+        /* Narrow and unaligned word loads need extra stack slots and
+           temporaries. A wider value pushes its low word here. */
+        if (size < 4 || tp_word_unaligned(sv))
             return 0;
         return v == VT_CONST || v == VT_LOCAL || v == VT_LLOCAL ||
                (v >= 0 && v < VT_CONST);
