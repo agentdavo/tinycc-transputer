@@ -8396,7 +8396,9 @@ try_copy:
  *
  * What stays put:
  *   - slot 0, which outbyte/outword and the ALT instructions use implicitly,
- *     and the outgoing-argument words, which the callee reads in place;
+ *     and the actual outgoing stack-argument words, which the callee reads
+ *     in place. Temporary call-staging words are accessed explicitly and
+ *     can move with the other reserved slots;
  *   - everything at and above the frame top: return address and parameters,
  *     and the `top` words tp_gaddr_cache put just under them, which this
  *     pass takes to be above the frame;
@@ -8415,7 +8417,7 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
 {
     static int off = -1, stats = -1;
     int F = func_frame_words - top, R = func_frame_reserved;
-    int P = func_max_outgoing_words > 1 ? func_max_outgoing_words : 1;
+    int P = func_max_stack_words > 1 ? func_max_stack_words : 1;
     int pin_top = 0, nu = 0, lo, hi, first, i, j, s, pos;
     int old_bytes = 0, new_bytes = 0;
     char *cut;

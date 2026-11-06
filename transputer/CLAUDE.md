@@ -792,6 +792,15 @@ the occam compiler does, and what new codegen should be held to:
   FixedMul/FixedDiv loops over global arrays 6-7%.
   `TCC_TRANSPUTER_GADDR=0` turns it off (`TP_SCHED_MASK=0x3d7f` S10),
   `TP_GADDR_STATS=1` lists what is kept; `test_gaddr_cache.c`.
+- The frame slot remapper pins slot 0 and the outgoing *stack argument*
+  words, which calls read implicitly. Other call-staging words are ordinary
+  explicit workspace accesses and may move with the reserved slots. Pinning
+  every slot below the highest staging word kept unused holes low in the
+  frame: `R_DrawSpan` had slots 0-13 pinned and a nine-word locals block
+  above them. Allowing those holes to move puts the block in short slots;
+  the T800 span benchmark falls from 5,049,704 to 4,416,624 estimated cycles
+  with the same hash. `test_slot_remap_call.c` exercises stacked arguments,
+  indirect calls, address-taken locals, and locals live across calls.
 - A one-word struct with word alignment (the ray tracer's `W`, a union of
   an int and a float) is copied by `ldnl`/`stnl`, not `ldc 4; move`
   (`gen_struct_copy`).  `VT_UNALIGNED` now also marks a member whose own
