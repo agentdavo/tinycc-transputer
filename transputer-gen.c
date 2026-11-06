@@ -140,7 +140,7 @@ struct tp_builtin_desc {
     const char *args;
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
-    unsigned char simple_op; /* zero-, one- or three-operand void instruction */
+    unsigned char simple_op; /* simple void instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -622,7 +622,7 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER },
         { TOK___mint,        "",    gen_builtin_mint,        0 },
         { TOK___ldpri,       "",    gen_builtin_ldpri,       0 },
-        { TOK___startp,      "ee",  gen_builtin_startp,      1 },
+        { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP },
         { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP },
         { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP },
         { TOK___stopp, "", NULL, 1, TP_OPR_STOPP },
@@ -631,9 +631,9 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___altend, "", NULL, 1, TP_OPR_ALTEND },
         { TOK___talt, "", NULL, 1, TP_OPR_TALT },
         { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT },
-        { TOK___enbc,        "ee",  gen_builtin_enbc,        1 },
+        { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC },
         { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS },
-        { TOK___enbt,        "ee",  gen_builtin_enbt,        1 },
+        { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT },
         { TOK___disc,        "eee", gen_builtin_disc,        0 },
         { TOK___diss,        "ee",  gen_builtin_diss,        0 },
         { TOK___dist,        "eee", gen_builtin_dist,        0 },
@@ -1056,6 +1056,8 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
         emit_instr(TP_OP_OPR, desc->simple_op);
     else if (desc->simple_op && !desc->args[1])
         tp_emit_1op(desc->simple_op);
+    else if (desc->simple_op && !desc->args[2])
+        tp_emit_2op(desc->simple_op, 1, 0);
     else if (desc->simple_op)
         tp_emit_3op(desc->simple_op, 2, 1, 0);
     else
@@ -4611,16 +4613,6 @@ void gen_builtin_outword(void) {
  * enable the wrong thing.  That is why link multiplexing could not be
  * expressed here.
  */
-void gen_builtin_enbc(void) {
-    /* ENABLE CHANNEL: __enbc(guard, chan) - AReg=guard, BReg=chan */
-    tp_emit_2op(TP_OPR_ENBC, 1, 0);
-}
-
-void gen_builtin_enbt(void) {
-    /* ENABLE TIMER: __enbt(guard, time) - AReg=guard, BReg=time */
-    tp_emit_2op(TP_OPR_ENBT, 1, 0);
-}
-
 void gen_builtin_disc(void) {
     /* DISABLE CHANNEL: __disc(code, guard, chan) -> selected
      * vstack: [-2]=code, [-1]=guard, [0]=chan
@@ -4666,11 +4658,6 @@ void gen_builtin_resetch(void) {
     vpushi(0);
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
-}
-
-void gen_builtin_startp(void) {
-    /* A is the child workspace, B the byte offset from the next IPtr. */
-    tp_emit_2op(TP_OPR_STARTP, 1, 0);
 }
 
 void gen_builtin_ldpri(void) {

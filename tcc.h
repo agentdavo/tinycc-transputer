@@ -1942,10 +1942,7 @@ void gen_builtin_mint(void);
 void gen_builtin_wcnt(void);
 /* Process/scheduler */
 void gen_builtin_ldpri(void);
-void gen_builtin_startp(void);
 /* ALT operations */
-void gen_builtin_enbc(void);
-void gen_builtin_enbt(void);
 void gen_builtin_disc(void);
 void gen_builtin_diss(void);
 void gen_builtin_dist(void);
