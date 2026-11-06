@@ -13,7 +13,7 @@ describe the current compiler or the active `linux-7` kernel.
 | Review and implement afcc4dfe | Seed verification `05b0cc9f`; MOVE2D timing `8177e21` / `04cb234d`; Doom harness `cabe1fbf`; linker profiling | Find a measured repeated scan/allocation beyond `a1d87275`; require byte/diagnostic equivalence and real-link throughput evidence |
 | Compare raytracer binaries | Scheduler correctness baseline; slot-weight and duplicate-load trials rejected in `55a9da8b` / `e75ac2a2`; hot-sequence profiling | Quantify a real hot-loop instruction/prefix saving before implementation; retain bounds/provenance/volatile/target/relocation guards |
 | Refactor transputer code layout | Symbol/builtin consolidation; shared history overlap `bef52a24`; `tps_dead_after` allocation/traversal profiling | Measure large-function compiler cost before changing storage; preserve rewrite decisions, updated reader facts and copy-chain folding |
-| Build per-part uClibc | Scalar64 repair `fc344c0b`; guarded whole-struct MOVE `c96e1bcd`; exact-tip acceptance report and separate compositor trial | Reconcile measured and integration snapshots, pin corrected emulator, retain volatile fallback and nested-call/padding behavior |
+| Build per-part uClibc | Scalar64 repair `fc344c0b`; guarded whole-struct MOVE `c96e1bcd`, exact acceptance `b0e8dc23`; compositor/shared-bank audit | Keep corrected emulator pinned, prove eligible bank ranges and adjacent MOVE2D setup/transfer; investigate slot-capacity overflow separately |
 | Optimize 64-bit division | Linux continuation/frame ABI repairs; T4 FP access repairs `fe000b2` / `2853b29`; per-continuation state preservation | Prove nested FP/block-move clobber first, repair entry/resume wrappers; keep physical alias migration separate and trap-first opt-in |
 | Improve TinyCC Transputer compiler | Coordination, regression gate, audit/ownership records | Verify scheduler baseline first, keep experiment ownership separate, review evidence and commit each validated group |
 
@@ -41,8 +41,8 @@ avenues above. All five compiler owners acknowledged these assignments.
 * Run the change-specific ABI/alias/volatile/target boundary regressions.
   For refactors, compare objects, relocations and diagnostics before changing
   emission decisions. Keep hardware timing estimates distinct from host speed.
-* Whole-struct MOVE has a promising targeted result, but fuzz seed 329 still
-  requires post-repair validation before landing. `fc344c0b` fixes an unaligned
+* Whole-struct MOVE cleared post-repair validation in `c96e1bcd` / `b0e8dc23`.
+  `fc344c0b` fixes an unaligned
   scalar64 spill reservation: word stores rounded down while reloads read two
   bytes into those words. The shift count was correct. Both original seeds
   329 and 367 now pass the agreeing host oracles; both failed before the fix.
@@ -96,10 +96,11 @@ commits. A session's title can lag behind its current workload.
   CoreMark CRCs and 25,368,644 whole-run cycles match, as do reference-equal
   405,061-ray images. The coordinator independently built a snapshot containing
   the integrated guard and passed `host/test_struct_call_volatile.py`.
-  The measured snapshot predates an unrelated TVX refactor in the integration
-  tree; the owner is repeating exact `c96e1bcd` versus parent acceptance and
-  writing a tracked report. Do not present the earlier matrix as exact-tip
-  evidence. `fc344c0b` remains the separate seed 329 alignment repair.
+  Exact `c96e1bcd` versus parent acceptance has now repeated the matrix with
+  pinned corrected T4 `fe000b2`; source hashes match the integrated commit.
+  [Tracked acceptance](tests/bench/struct-call-acceptance-2026-11-06.md),
+  committed as `b0e8dc23`, supersedes the earlier pre-rebase private matrix.
+  `fc344c0b` remains the separate seed 329 alignment repair.
 * **Pool initializer trial:** source-level dead initialization is real, but
   the normal scheduler also removes it. Current before/after objects and all
   three workload ELFs are identical; the isolated improvement with scheduling

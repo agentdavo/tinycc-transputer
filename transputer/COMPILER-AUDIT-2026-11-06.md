@@ -99,9 +99,10 @@ See [c-testsuite regression](c-testsuite/tests/single-exec/09118.c) and
 
 The separate aggregate-copy optimization landed as `c96e1bcd`, including
 volatile-source/member fallback. Its guarded trial passes 400 fuzz seeds at
-two link pads and the three workload checks. The owner is repeating acceptance
-from the exact integration commit after an unrelated TVX refactor changed the
-source snapshot; see the coordination record for current evidence status.
+two link pads and the three workload checks. Exact integration-commit versus
+parent acceptance was repeated after rebasing; `b0e8dc23` records matching
+source hashes and pinned inputs in the
+[tracked report](tests/bench/struct-call-acceptance-2026-11-06.md).
 
 ## Next performance experiments
 
