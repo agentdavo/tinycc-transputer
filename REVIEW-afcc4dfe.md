@@ -79,6 +79,10 @@ defined behavior.
   phase increased from 1,732,422 to 1,733,222 cycles.
   Shortening the remaining loop reduced the non-power-of-two `0x100000003`
   phase from 3,059,022 to 1,661,022 estimated cycles per 100 calls.
+  Replacing the loop's struct-by-value helper calls with direct word operations
+  reduced that phase to 562,022 cycles. The `0xffffffff` phase fell from
+  1,680,222 to 571,922 cycles. The regression includes borrow and high-bit
+  boundaries, and 100,000 host quotient/remainder comparisons passed.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of

@@ -22,19 +22,6 @@ typedef union {
 
 static u64_u u64_from(u64 v) { u64_u u; u.v = v; return u; }
 
-static int u64_cmp(u64_u a, u64_u b) {
-    if (a.p.hi != b.p.hi) return a.p.hi > b.p.hi ? 1 : -1;
-    if (a.p.lo != b.p.lo) return a.p.lo > b.p.lo ? 1 : -1;
-    return 0;
-}
-
-static u64_u u64_sub(u64_u a, u64_u b) {
-    u64_u r;
-    r.p.lo = a.p.lo - b.p.lo;
-    r.p.hi = a.p.hi - b.p.hi - (a.p.lo < b.p.lo);
-    return r;
-}
-
 static u64_u u64_add(u64_u a, u64_u b) {
     u64_u r;
     r.p.lo = a.p.lo + b.p.lo;
@@ -47,13 +34,6 @@ static u64_u u64_neg(u64_u v) {
     inv.p.lo = ~v.p.lo; inv.p.hi = ~v.p.hi;
     one.p.lo = 1; one.p.hi = 0;
     return u64_add(inv, one);
-}
-
-static u64_u u64_shl1(u64_u v) {
-    u64_u r;
-    r.p.hi = (v.p.hi << 1) | (v.p.lo >> 31);
-    r.p.lo = v.p.lo << 1;
-    return r;
 }
 
 static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
@@ -123,10 +103,13 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         remainder.p.lo = dividend.p.hi;
     }
     for (i = 31; i >= 0; i--) {
-        remainder = u64_shl1(remainder);
-        remainder.p.lo |= (dividend.p.lo >> i) & 1u;
-        if (u64_cmp(remainder, divisor) >= 0) {
-            remainder = u64_sub(remainder, divisor);
+        remainder.p.hi = (remainder.p.hi << 1) | (remainder.p.lo >> 31);
+        remainder.p.lo = (remainder.p.lo << 1) | ((dividend.p.lo >> i) & 1u);
+        if (remainder.p.hi > divisor.p.hi ||
+            (remainder.p.hi == divisor.p.hi && remainder.p.lo >= divisor.p.lo)) {
+            u32 borrow = remainder.p.lo < divisor.p.lo;
+            remainder.p.lo -= divisor.p.lo;
+            remainder.p.hi -= divisor.p.hi + borrow;
             result.p.lo |= (1u << i);
         }
     }

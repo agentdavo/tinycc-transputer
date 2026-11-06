@@ -12,6 +12,7 @@ void test_main(void)
     int ok = 1;
     volatile u64 high = 0xffffffffffffffffULL;
     volatile u64 small = 0x12345678ULL;
+    volatile u64 uneven = 0x123456789abcdef0ULL;
     volatile u64 powers = 1;
     int i;
 
@@ -41,6 +42,12 @@ void test_main(void)
     ok &= __umoddi3(high, 0x8000000000000001ULL) == 0x7ffffffffffffffeULL;
     ok &= __udivdi3(high, high) == 1;
     ok &= __umoddi3(high, high) == 0;
+    ok &= __udivdi3(uneven, 0x100000003ULL) == 0x12345678ULL;
+    ok &= __umoddi3(uneven, 0x100000003ULL) == 0x641fdb88ULL;
+    ok &= __udivdi3(high, 0x80000001ULL) == 0x1fffffffcULL;
+    ok &= __umoddi3(high, 0x80000001ULL) == 3;
+    ok &= __udivdi3(0x8000000000000000ULL, 0xffffffffULL) == 0x80000000ULL;
+    ok &= __umoddi3(0x8000000000000000ULL, 0xffffffffULL) == 0x80000000ULL;
     ok &= __udivdi3(high, 0) == 0;
     ok &= __umoddi3(high, 0) == 0;
     for (i = 0; i < 64; i++) {
