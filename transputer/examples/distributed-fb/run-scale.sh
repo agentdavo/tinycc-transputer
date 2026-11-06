@@ -32,6 +32,8 @@ case "$RENDERER" in
         render_sources=("$ROOT/transputer/examples/dengine-t4/hellknight_material.c" "$ROOT/transputer/examples/dengine-t4/demo_room.c" "$HERE/material_raster.c" "$HERE/gles2_fragment.c" "$HERE/shadow_map.c"); render_include=(); render_flags=(-DTG_DEMO_ROOM=1)
         if [[ ${ROOM:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_DRAW=1); fi
         if [[ ${ROOM_SHADOW:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_SHADOW=1); fi
+        if [[ ${ROOM_BUMP:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_BUMP=1); fi
+        if [[ ${ROOM_SPECULAR:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_SPECULAR=1); fi
         if [[ ${ANIMATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ANIMATION=1); fi ;;
     *) echo 'Unknown RENDERER' >&2; exit 1 ;;
 esac

@@ -65,24 +65,36 @@ The upstream default configuration selects `data/scenes/techDemo.scene`,
 which references `data/map/demo.map`, a room made of OBJ meshes, the
 Hellknight MD5 mesh and its idle animation. `RENDERER=techdemo` exports the
 29 OBJ objects using the map's room transform and renders them around the
-animated character, using their original diffuse material assignments. It
+animated character, using their original diffuse, normal and specular material assignments. It
 reverses OBJ winding as dEngine does and clips room triangles at the near
-plane. The 28 distinct diffuse maps are reduced to 16×16 and alpha is
-discarded. The character uses the approximate pre-skinned animation and
+plane. Its 51 distinct maps are reduced to 16×16; original alpha is retained.
+Material-marked transparent triangles use depth-tested straight-alpha blending
+after opaque geometry, sorted by average triangle depth. This approximation
+does not solve intersecting translucent geometry. Tangents are generated per
+triangle and light/eye direction is approximated by +Z. The character uses the approximate pre-skinned animation and
 material path described above. The static room projection is prepared once
-per node; every node separately prepares its character-only shadow map.
-The room receives that map but does not contribute to the shadow pass.
+per node; every node separately prepares the 64×64 shadow map from the
+character and opaque room geometry. Translucent room materials do not cast
+shadows; alpha-tested shadow generation is not implemented.
 
 This is a scene preview: its fixed camera and directional light are chosen
 for visibility, not the original camera path or scene light. It does not
-implement room bump/specular maps, transparency, animation-driven skinning
-on T4, or dEngine's actual GLSL renderer. The scene, mesh and texture
+implement animation-driven skinning on T4 or dEngine's actual GLSL renderer.
+The scene, mesh and texture
 exports are generated from the separate checkout in the run directory.
 The bounded shader compiler now accepts nested `#define`, `#ifdef`, `#ifndef`,
 `#else` and `#endif` feature flags for its existing small GLSL grammar. It
-does not expand macros or implement general preprocessor expressions; the
-full dEngine shaders exceed its 1,024-byte source limit and require much
-broader GLSL syntax and execution support.
+does not expand macros or implement general preprocessor expressions. The
+8,192-byte source limit accommodates the two original uber shaders, and all
+eight feature combinations reach the parser on host and T800. They are still
+rejected there because broader GLSL syntax and execution are not implemented.
+
+`ROOM_BUMP=0`, `ROOM_SPECULAR=0` and `ROOM_SHADOW=0` disable individual
+room features for comparisons. From the fixed default camera, disabling
+the room normal maps changes visible pixels; disabling the specular map did
+not change the captured frame, so its visible contribution has not been
+verified in this view. The fragment backend's specular sampling has separate
+tests. Room shadows are visibly different with room casting disabled.
 
 ```sh
 RENDERER=techdemo NODES=4 FRAMES=12 CAPTURE=1 \
@@ -90,10 +102,12 @@ RENDERER=techdemo NODES=4 FRAMES=12 CAPTURE=1 \
 RENDERER=techdemo bash transputer/examples/distributed-fb/test-scale.sh
 bash transputer/examples/dengine-t4/test-room.sh
 bash transputer/examples/dengine-t4/test-scene.sh
+bash transputer/examples/dengine-t4/test-uber.sh
 python3 transputer/examples/dengine-t4/audit_scene.py
 ```
 
-In one WSL T4 experiment (12 unpaced, capture-free frames per configuration,
+Before the normal/specular, transparency and room-shadow additions, one WSL
+T4 experiment (12 unpaced, capture-free frames per configuration,
 median after discarding the first), root assembly wall times were:
 
 | Nodes | ms/frame |
