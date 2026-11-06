@@ -57,6 +57,9 @@ static int run(void)
     if(tg_fragment_uber(&m,&v,out)!=TG_FRAGMENT_UNDEFINED || out[0]!=17.0f) return 8;
     m.features=0; v.normal[2]=-1.0f; out[0]=17.0f;
     if(tg_fragment_uber(&m,&v,out)!=TG_FRAGMENT_UNDEFINED || out[0]!=17.0f) return 9;
+    m.clamp_specular_base=1;
+    if(tg_fragment_uber(&m,&v,out)!=TG_FRAGMENT_OK) return 14;
+    m.clamp_specular_base=0;
     if(tg_fragment_sample(&grid,40000.0f,0.0f,out)!=TG_FRAGMENT_INVALID) return 10;
     out[0]=2.0f; out[1]=-1.0f; out[2]=0.5f; out[3]=1.0f;
     if(tg_fragment_argb(out)!=0xffff0080u) return 11;

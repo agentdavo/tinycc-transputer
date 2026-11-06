@@ -53,6 +53,7 @@ int tg_fragment_uber(const tg_fragment_material *m, const tg_fragment_varyings *
     } else for (i=0;i<3;i++) spec[i]=m->specular_material[i];
     lambert=dot3(v->light,normal); if (lambert<0.0f) lambert=0.0f;
     specbase=dot3(v->half_vector,normal);
+    if (m->clamp_specular_base && specbase<0.0f) specbase=0.0f;
     /* The shader evaluates pow before max, so negative bases are undefined. */
     if (specbase!=specbase || m->shininess!=m->shininess || specbase<0.0f ||
         (specbase==0.0f && m->shininess<=0.0f)) return TG_FRAGMENT_UNDEFINED;

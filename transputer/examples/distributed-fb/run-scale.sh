@@ -24,6 +24,8 @@ case "$RENDERER" in
     hellknight-material)
         render_sources=("$ROOT/transputer/examples/dengine-t4/hellknight_material.c" "$HERE/material_raster.c" "$HERE/gles2_fragment.c" "$HERE/shadow_map.c"); render_include=(); render_flags=()
         if [[ ${SHADOWS:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_SHADOW=1); fi
+        if [[ ${BUMP:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_BUMP=1); fi
+        if [[ ${SPECULAR:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_SPECULAR=1); fi
         if [[ ${ANIMATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ANIMATION=1); fi
         if [[ ${ROTATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROTATION=1); fi ;;
     *) echo 'Unknown RENDERER' >&2; exit 1 ;;
@@ -38,7 +40,7 @@ if [[ -n ${WORK:-} ]]; then mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd); WORK=$(
 cd "$WORK"
 if [[ $RENDERER == hellknight || $RENDERER == hellknight-material ]]; then
     texture_args=()
-    if [[ $RENDERER == hellknight-material ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png" --animation "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight_idle2.md5anim"); fi
+    if [[ $RENDERER == hellknight-material ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png" --normal-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight_local.png" --specular-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellBaronSpec.png" --animation "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight_idle2.md5anim"); fi
     python3 "$ROOT/transputer/examples/dengine-t4/export_hellknight.py" \
         "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight.pvr.2bpp.md5mesh" "$WORK/hellknight_asset.h" "${texture_args[@]}"
     render_include+=(-I"$WORK")

@@ -33,11 +33,18 @@ skins eight equally spaced frames of `hellknight_idle2.md5anim` offline, with
 normals recomputed for each pose. The T4 program linearly interpolates those
 pre-skinned poses; it does not calculate skeletal skinning at runtime, and
 vertex interpolation is an approximation to interpolating joint transforms.
-The preview has no normal/specular map, filtering, general clipping or ES
-framebuffer objects. `ANIMATE=0` restores the bind pose and `ROTATE=0` holds
-the camera-facing model rotation fixed.
+It uses the original Hellknight normal map and a **substitute** specular map
+from the bundled Hellbaron material: the Hellknight material itself specifies
+no specular map. Both are downsampled to 32×32. Tangent vectors are derived
+from mesh UVs for each baked pose, and the preview approximates both light and
+eye direction as world +Z. To avoid undefined negative-base GLSL `pow`, the
+preview opts into clamping the specular dot product before the square; strict
+fragment-backend callers retain the original undefined-domain behavior.
+The preview has no texture filtering, general clipping or ES framebuffer
+objects. `ANIMATE=0` restores the bind pose, `ROTATE=0` holds model rotation
+fixed, and `BUMP=0` / `SPECULAR=0` disable those material features.
 Texture PNG decoding uses Python's standard library and expects the bundled
-non-interlaced 8-bit RGB format. Generated model and texture data remain in
+non-interlaced 8-bit RGB/RGBA format. Generated model and texture data remain in
 the run directory.
 
 ```sh
@@ -45,6 +52,7 @@ RENDERER=hellknight-material NODES=4 FRAMES=2 CAPTURE=1 \
   bash transputer/examples/distributed-fb/run-scale.sh
 RENDERER=hellknight-material bash transputer/examples/distributed-fb/test-scale.sh
 bash transputer/examples/distributed-fb/test-material.sh
+bash transputer/examples/dengine-t4/test-features.sh
 ```
 
 On the WSL T4 setup, the two captured frames matched across 1, 2, 4, 8, 16
@@ -52,6 +60,11 @@ and 32 nodes. A separate one-node capture with shadows disabled differed
 from the shadowed image. These checks do not establish image agreement with
 the iOS renderer. Each node generates its own shadow map; nodes do not share
 or distribute that pass.
+
+The upstream default configuration selects `data/scenes/techDemo.scene`,
+which references `data/map/demo.map`, a room made of OBJ meshes, the
+Hellknight MD5 mesh and its idle animation. This preview does not yet load or
+render that scene or run dEngine's GLSL renderer.
 
 The expected upstream checkout is `transputer/examples/dEngine`, cloned from
 `https://github.com/fabiensanglard/dEngine.git`; the checkout used for these

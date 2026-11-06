@@ -27,6 +27,9 @@ typedef struct {
     float ambient[3], diffuse[3], specular_light[3], specular_material[3];
     float shininess;
     unsigned int features;
+    /* Optional preview policy for back-facing highlights; GLSL's pow is
+     * undefined for a negative base, so strict callers leave this zero. */
+    int clamp_specular_base;
     tg_fragment_pow_fn pow_fn;
 } tg_fragment_material;
 

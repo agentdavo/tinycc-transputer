@@ -9,6 +9,8 @@ static tg_shadow_vertex light_verts[HK_VERTEX_COUNT];
 static float map_depth[64*64]; static unsigned char map_pixels[64*64*4];
 static tg_shadow_map map={64,64,map_depth,map_pixels};
 static tg_fragment_texture base={hk_diffuse,32,32,TG_FRAG_REPEAT,TG_FRAG_REPEAT};
+static tg_fragment_texture bump={hk_bump,32,32,TG_FRAG_REPEAT,TG_FRAG_REPEAT};
+static tg_fragment_texture specular={hk_specular,32,32,TG_FRAG_REPEAT,TG_FRAG_REPEAT};
 static tg_fragment_texture shadow={map_pixels,64,64,TG_FRAG_CLAMP,TG_FRAG_CLAMP};
 static tg_fragment_material material;
 static unsigned int previous_frame=~0u;
@@ -20,20 +22,28 @@ static void prepare(unsigned int frame)
 #ifdef TG_DISABLE_ROTATION
     sy=0; cy=1;
 #endif
-    material.base=&base; material.shadow=&shadow;
+    material.base=&base; material.shadow=&shadow; material.bump=&bump; material.specular=&specular;
 #ifdef TG_DISABLE_SHADOW
-    material.features=0;
+    material.features=TG_FRAG_BUMP|TG_FRAG_SPEC;
 #else
-    material.features=TG_FRAG_SHADOW;
+    material.features=TG_FRAG_SHADOW|TG_FRAG_BUMP|TG_FRAG_SPEC;
 #endif
-    material.pow_fn=square; material.shininess=2;
-    for(i=0;i<3;i++) { material.ambient[i]=0.35f; material.diffuse[i]=0.75f; }
+#ifdef TG_DISABLE_BUMP
+    material.features&=~TG_FRAG_BUMP;
+#endif
+#ifdef TG_DISABLE_SPECULAR
+    material.features&=~TG_FRAG_SPEC;
+#endif
+    material.pow_fn=square; material.shininess=2; material.clamp_specular_base=1;
+    for(i=0;i<3;i++) { material.ambient[i]=0.35f; material.diffuse[i]=0.75f; material.specular_light[i]=0.3f; }
     for(i=0;i<HK_VERTEX_COUNT;i++) {
         const short *position=hk_animated[pose][i], *position_next=hk_animated[next][i];
         const short *normal=hk_animated_normals[pose][i], *normal_next=hk_animated_normals[next][i];
-        float x,y,z,nx,ny,nz;
+        const short *tangent=hk_animated_tangents[pose][i], *tangent_next=hk_animated_tangents[next][i];
+        float x,y,z,nx,ny,nz,tx,ty,tz,bz,lx,lz;
 #ifdef TG_DISABLE_ANIMATION
         position=position_next=hk_vertices[i]; normal=normal_next=hk_normals[i];
+        tangent=tangent_next=hk_tangents[i];
 #endif
         x=(position[0]+(position_next[0]-position[0])*blend)/32767.0f;
         y=(position[1]+(position_next[1]-position[1])*blend)/32767.0f;
@@ -42,13 +52,28 @@ static void prepare(unsigned int frame)
         nx=(normal[0]+(normal_next[0]-normal[0])*blend)/32767.0f;
         ny=(normal[1]+(normal_next[1]-normal[1])*blend)/32767.0f;
         nz=(normal[2]+(normal_next[2]-normal[2])*blend)/32767.0f;
+        tx=(tangent[0]+(tangent_next[0]-tangent[0])*blend)/32767.0f;
+        ty=(tangent[1]+(tangent_next[1]-tangent[1])*blend)/32767.0f;
+        tz=(tangent[2]+(tangent_next[2]-tangent[2])*blend)/32767.0f;
         tg_material_vertex *v=&verts[i];
         v->x=(int)(80.0f+110.0f*rx/w); v->y=(int)(60.0f-110.0f*y/w);
         v->depth=(int)(100000.0f/w); v->inverse_w=1.0f/w;
         v->varying.uv[0]=hk_uv[i][0]; v->varying.uv[1]=hk_uv[i][1];
         v->varying.normal[0]=cy*nx+sy*nz; v->varying.normal[1]=ny; v->varying.normal[2]=-sy*nx+cy*nz;
-        v->varying.light[0]=0; v->varying.light[1]=0; v->varying.light[2]=1;
-        v->varying.half_vector[0]=v->varying.half_vector[1]=v->varying.half_vector[2]=0;
+        /* World-space light and eye are both approximated by +Z. Transform
+         * the direction into the model tangent frame, as v_uber does. */
+        lx=-sy; lz=cy; bz=nx*ty-ny*tx;
+        v->varying.light[0]=lx*tx+lz*tz;
+        v->varying.light[1]=lx*(ny*tz-nz*ty)+lz*bz;
+        v->varying.light[2]=lx*nx+lz*nz;
+        v->varying.half_vector[0]=v->varying.light[0];
+        v->varying.half_vector[1]=v->varying.light[1];
+        v->varying.half_vector[2]=v->varying.light[2];
+#ifdef TG_DISABLE_BUMP
+        v->varying.light[0]=v->varying.half_vector[0]=0;
+        v->varying.light[1]=v->varying.half_vector[1]=0;
+        v->varying.light[2]=v->varying.half_vector[2]=1;
+#endif
         v->varying.light_clip[0]=rx; v->varying.light_clip[1]=y; v->varying.light_clip[2]=-rz; v->varying.light_clip[3]=1;
         light_verts[i].x=(int)((rx+1)*32.0f); light_verts[i].y=(int)((y+1)*32.0f); light_verts[i].depth=(-rz+1)*0.5f;
     }

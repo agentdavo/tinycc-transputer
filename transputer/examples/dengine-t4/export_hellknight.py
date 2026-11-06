@@ -88,6 +88,26 @@ def vertex_normals(points,triangles):
         mag=math.sqrt(sum(q*q for q in n)) or 1.0
         yield tuple(round(x/mag*32767) for x in n)
 
+def vertex_tangents(points,vertices,triangles,normals):
+    tangents=[[0.0,0.0,0.0] for _ in points]
+    for tri in triangles:
+        a,b,c=(points[i] for i in tri); uv=[vertices[i][:2] for i in tri]
+        u=[b[k]-a[k] for k in range(3)]; v=[c[k]-a[k] for k in range(3)]
+        s1=uv[1][0]-uv[0][0]; t1=uv[1][1]-uv[0][1]; s2=uv[2][0]-uv[0][0]; t2=uv[2][1]-uv[0][1]
+        det=s1*t2-s2*t1
+        if abs(det)<1e-10: continue
+        tangent=[(u[k]*t2-v[k]*t1)/det for k in range(3)]
+        for index in tri:
+            for k in range(3): tangents[index][k]+=tangent[k]
+    for tangent,normal in zip(tangents,normals):
+        n=[v/32767 for v in normal]; dot=sum(tangent[k]*n[k] for k in range(3))
+        tangent=[tangent[k]-dot*n[k] for k in range(3)]
+        mag=math.sqrt(sum(q*q for q in tangent))
+        if mag<1e-10:
+            tangent=[-n[1],n[0],0.0]; mag=math.sqrt(sum(q*q for q in tangent))
+            if mag<1e-10: tangent=[1.0,0.0,0.0]; mag=1.0
+        yield tuple(max(-32767,min(32767,round(x/mag*32767))) for x in tangent)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -95,6 +115,8 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--texture", type=Path)
     parser.add_argument("--animation", type=Path)
+    parser.add_argument("--normal-map", type=Path)
+    parser.add_argument("--specular-map", type=Path)
     args = parser.parse_args()
     lines = args.mesh.read_text().splitlines()
     joints=[]
@@ -178,9 +200,19 @@ def main():
             out.extend("{%d,%d,%d}," % n for n in vertex_normals(points_frame,triangles))
             out.append("},")
         out.append("};")
-    if args.texture:
-        pixels,w,h=read_rgb_png(args.texture)
-        out.append("static const unsigned char hk_diffuse[32*32*4]={")
+        out.append("static const short hk_animated_tangents[HK_ANIMATION_FRAMES][HK_VERTEX_COUNT][3]={")
+        for points_frame in frames:
+            out.append("{")
+            out.extend("{%d,%d,%d}," % n for n in vertex_tangents(points_frame,vertices,triangles,list(vertex_normals(points_frame,triangles))))
+            out.append("},")
+        out.append("};")
+        out.append("static const short hk_tangents[HK_VERTEX_COUNT][3]={")
+        out.extend("{%d,%d,%d}," % n for n in vertex_tangents(points,vertices,triangles,list(vertex_normals(points,triangles))))
+        out.append("};")
+    for name,path in (("diffuse",args.texture),("bump",args.normal_map),("specular",args.specular_map)):
+      if path:
+        pixels,w,h=read_rgb_png(path)
+        out.append(f"static const unsigned char hk_{name}[32*32*4]={{")
         for y in range(32):
             row=[]
             for x in range(32):
@@ -200,15 +232,16 @@ def read_rgb_png(path):
         size=struct.unpack_from(">I",data,pos)[0]; kind=data[pos+4:pos+8]; chunk=data[pos+8:pos+8+size]; pos+=12+size
         if kind==b"IHDR":
             w,h,bit,color,compression,flt,interlace=struct.unpack(">IIBBBBB",chunk)
-            if (bit,color,compression,flt,interlace)!=(8,2,0,0,0): raise SystemExit("expected noninterlaced 8-bit RGB PNG")
+            if bit!=8 or color not in (2,6) or (compression,flt,interlace)!=(0,0,0): raise SystemExit("expected noninterlaced 8-bit RGB/RGBA PNG")
         elif kind==b"IDAT": compressed+=chunk
         elif kind==b"IEND": break
-    raw=zlib.decompress(compressed); stride=w*3; previous=bytearray(stride); result=bytearray()
+    channels=3 if color==2 else 4
+    raw=zlib.decompress(compressed); stride=w*channels; previous=bytearray(stride); result=bytearray()
     if len(raw)!=(stride+1)*h: raise SystemExit("unexpected PNG size")
     for y in range(h):
         mode=raw[y*(stride+1)]; row=bytearray(raw[y*(stride+1)+1:(y+1)*(stride+1)])
         for i in range(stride):
-            a=row[i-3] if i>=3 else 0; b=previous[i]; c=previous[i-3] if i>=3 else 0
+            a=row[i-channels] if i>=channels else 0; b=previous[i]; c=previous[i-channels] if i>=channels else 0
             if mode==1: v=a
             elif mode==2: v=b
             elif mode==3: v=(a+b)//2
@@ -218,7 +251,10 @@ def read_rgb_png(path):
             elif mode==0: v=0
             else: raise SystemExit("unknown PNG filter")
             row[i]=(row[i]+v)&255
-        result.extend(row); previous=row
+        if channels==3: result.extend(row)
+        else:
+            for x in range(w): result.extend(row[x*4:x*4+3])
+        previous=row
     return result,w,h
 
 
