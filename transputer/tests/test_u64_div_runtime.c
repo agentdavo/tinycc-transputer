@@ -34,6 +34,8 @@ void test_main(void)
     ok &= __moddi3((-9223372036854775807LL - 1), 3) == -2;
     ok &= __divdi3(4294967297LL, -7) == -613566756LL;
     ok &= __moddi3(4294967297LL, -7) == 5;
+    ok &= __divdi3(-4294967296LL, -65535) == 65537;
+    ok &= __moddi3(-4294967296LL, -65535) == -1;
     ok &= __udivdi3(high, 0x8000000000000000ULL) == 1;
     ok &= __umoddi3(high, 0x8000000000000000ULL) == 0x7fffffffffffffffULL;
     ok &= __udivdi3(high, 0x100000001ULL) == 0xffffffffULL;

@@ -84,6 +84,9 @@ defined behavior.
   1,680,222 to 571,922 cycles. The regression includes borrow and high-bit
   boundaries. `test_u64_div_host.py` checks 100,000 deterministic signed and
   unsigned quotient/remainder pairs against host integer arithmetic.
+  Simplifying two-word negation removed an extra struct-by-value helper call.
+  Estimated cycles per 100 signed divisions fell from 163,522 to 124,322
+  for `-65535`, and from 633,122 to 593,922 for `0x100000003`.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of

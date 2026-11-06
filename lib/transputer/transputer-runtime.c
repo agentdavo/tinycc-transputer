@@ -22,18 +22,11 @@ typedef union {
 
 static u64_u u64_from(u64 v) { u64_u u; u.v = v; return u; }
 
-static u64_u u64_add(u64_u a, u64_u b) {
-    u64_u r;
-    r.p.lo = a.p.lo + b.p.lo;
-    r.p.hi = a.p.hi + b.p.hi + (r.p.lo < a.p.lo);
-    return r;
-}
-
 static u64_u u64_neg(u64_u v) {
-    u64_u inv, one;
-    inv.p.lo = ~v.p.lo; inv.p.hi = ~v.p.hi;
-    one.p.lo = 1; one.p.hi = 0;
-    return u64_add(inv, one);
+    u64_u result;
+    result.p.lo = 0u - v.p.lo;
+    result.p.hi = ~v.p.hi + (result.p.lo == 0);
+    return result;
 }
 
 static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
