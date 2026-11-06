@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Benchmark the real compositor blit. Usage: fbwm_blit.sh [cpu] [row|move]
 # TCC_DIR/T4_BIN select the compiler and emulator; WORK retains artifacts.
+# EXTRA_CFLAGS=-DTPOS_SPINE_CHIP tests the alternate address profile.
 set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
@@ -22,7 +23,7 @@ case $MODE in
 esac
 WORK=${WORK:-$(mktemp -d)}
 mkdir -p "$WORK"
-"$R/transputer-tcc" -m"$CPU" $FEATURE -nostdlib -nostdinc \
+"$R/transputer-tcc" -m"$CPU" $FEATURE ${EXTRA_CFLAGS:-} -nostdlib -nostdinc \
     -I"$ROOT/transputer/native-headers" -I"$ROOT/transputer/fbwm" \
     -o "$WORK/bench.elf" "$ROOT/transputer/tests/test_boot.S" \
     "$HERE/bench_fbwm_blit.c" "$R/$LIB"

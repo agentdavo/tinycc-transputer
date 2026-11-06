@@ -50,6 +50,9 @@ ELF2FLT="$ROOT_DIR/transputer-elf2flt"
 
 # Compiler flags
 CFLAGS="-m$CPU -w"
+if [ "$CPU" != t414 ]; then
+    CFLAGS="$CFLAGS -DTPOS_HAVE_MOVE2D=1"
+fi
 CFLAGS="$CFLAGS -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0"
 CFLAGS="$CFLAGS -DNORMALUNIX -DTRANSPUTER"
 CFLAGS="$CFLAGS -include $DOOM_SRC/doom_tp_config.h"

@@ -31,7 +31,7 @@ INC="-nostdinc -I$SCRIPT_DIR -I$ROOT_DIR/include/transputer -I$ROOT_DIR/include 
   -I$TRANS_DIR/$KERNEL_TREE/include"
 # TCC defines __TINYC__; headers now treat that like a modern C compiler for
 # long long / inline.  __GNUC__ pretence remains for any leftover GCC-only gates.
-CFLAGS_UCLIBC="-mt9000 -w -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0"
+CFLAGS_UCLIBC="-mt9000 -w -DTPOS_HAVE_MOVE2D=1 -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0"
 # SPINE=1 → SPINE-chip address profile (FB 0x81000000, compose 0x81200000,
 # scratch 0x81400000) matching a CONFIG_TRANSPUTER_SPINE_CHIP kernel.
 if [ "${SPINE:-0}" = "1" ]; then
