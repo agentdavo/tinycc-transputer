@@ -28,6 +28,10 @@ case "$RENDERER" in
         if [[ ${SPECULAR:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_SPECULAR=1); fi
         if [[ ${ANIMATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ANIMATION=1); fi
         if [[ ${ROTATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROTATION=1); fi ;;
+    techdemo)
+        render_sources=("$ROOT/transputer/examples/dengine-t4/hellknight_material.c" "$ROOT/transputer/examples/dengine-t4/demo_room.c" "$HERE/material_raster.c" "$HERE/gles2_fragment.c" "$HERE/shadow_map.c"); render_include=(); render_flags=(-DTG_DEMO_ROOM=1)
+        if [[ ${ROOM:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_DRAW=1); fi
+        if [[ ${ANIMATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ANIMATION=1); fi ;;
     *) echo 'Unknown RENDERER' >&2; exit 1 ;;
 esac
 if [[ $RENDERER == dengine || $RENDERER == glsl || $RENDERER == hellknight ]]; then render_include=(-I"$ROOT/transputer/native-headers"); render_flags=(); fi
@@ -38,13 +42,14 @@ case "$NODES" in 1|2|4|8|16|32) ;; *) echo 'NODES must be 1, 2, 4, 8, 16, or 32'
 FRAMES=$((10#$FRAMES)); FPS=$((10#$FPS))
 if [[ -n ${WORK:-} ]]; then mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd); WORK=$(mktemp -d "$WORK/scale.XXXXXX"); else WORK=$(mktemp -d); fi
 cd "$WORK"
-if [[ $RENDERER == hellknight || $RENDERER == hellknight-material ]]; then
+if [[ $RENDERER == hellknight || $RENDERER == hellknight-material || $RENDERER == techdemo ]]; then
     texture_args=()
-    if [[ $RENDERER == hellknight-material ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png" --normal-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight_local.png" --specular-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellBaronSpec.png" --animation "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight_idle2.md5anim"); fi
+    if [[ $RENDERER == hellknight-material || $RENDERER == techdemo ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png" --normal-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight_local.png" --specular-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellBaronSpec.png" --animation "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight_idle2.md5anim"); fi
     python3 "$ROOT/transputer/examples/dengine-t4/export_hellknight.py" \
         "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight.pvr.2bpp.md5mesh" "$WORK/hellknight_asset.h" "${texture_args[@]}"
     render_include+=(-I"$WORK")
     render_flags+=(-DTEST_LARGE_WORKSPACE=1)
+    if [[ $RENDERER == techdemo ]]; then PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/transputer/examples/dengine-t4/export_room.py" "$ROOT/transputer/examples/dEngine" "$WORK/room_asset.h"; fi
 fi
 {
     echo 'Connect HOST to processor 0 link 0'

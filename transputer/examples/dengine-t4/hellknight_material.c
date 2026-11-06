@@ -2,6 +2,9 @@
  * This is a native C material path, not the original dEngine GLSL renderer. */
 #include "../distributed-fb/material_raster.h"
 #include "../distributed-fb/shadow_map.h"
+#ifdef TG_DEMO_ROOM
+#include "demo_room.h"
+#endif
 #include "hellknight_asset.h"
 static const int sine[32]={0,50,98,142,181,213,237,251,256,251,237,213,181,142,98,50,0,-50,-98,-142,-181,-213,-237,-251,-256,-251,-237,-213,-181,-142,-98,-50};
 static tg_material_vertex verts[HK_VERTEX_COUNT];
@@ -19,6 +22,12 @@ static void prepare(unsigned int frame)
 {
     unsigned int i, pose=(frame/15)%HK_ANIMATION_FRAMES, next=(pose+1)%HK_ANIMATION_FRAMES;
     float blend=(float)(frame%15)/15.0f,sy=sine[frame&31]/256.0f,cy=sine[(frame+8)&31]/256.0f;
+#ifdef TG_DEMO_ROOM
+    float camera_x=-HK_CENTER_X*HK_WORLD_SCALE, camera_y=(80.0f-HK_CENTER_Y)*HK_WORLD_SCALE;
+    float camera_z=(100.0f-HK_CENTER_Z)*HK_WORLD_SCALE;
+    sy=0; cy=1;
+    if(previous_frame==~0u) demo_room_init(HK_CENTER_X,HK_CENTER_Y,HK_CENTER_Z,HK_WORLD_SCALE,camera_x,camera_y,camera_z);
+#endif
 #ifdef TG_DISABLE_ROTATION
     sy=0; cy=1;
 #endif
@@ -48,7 +57,12 @@ static void prepare(unsigned int frame)
         x=(position[0]+(position_next[0]-position[0])*blend)/32767.0f;
         y=(position[1]+(position_next[1]-position[1])*blend)/32767.0f;
         z=(position[2]+(position_next[2]-position[2])*blend)/32767.0f;
-        float rx=cy*x+sy*z,rz=-sy*x+cy*z,w=3.0f-rz;
+        float rx=cy*x+sy*z,rz=-sy*x+cy*z;
+#ifdef TG_DEMO_ROOM
+        float w=camera_z-rz;
+#else
+        float w=3.0f-rz;
+#endif
         nx=(normal[0]+(normal_next[0]-normal[0])*blend)/32767.0f;
         ny=(normal[1]+(normal_next[1]-normal[1])*blend)/32767.0f;
         nz=(normal[2]+(normal_next[2]-normal[2])*blend)/32767.0f;
@@ -56,7 +70,11 @@ static void prepare(unsigned int frame)
         ty=(tangent[1]+(tangent_next[1]-tangent[1])*blend)/32767.0f;
         tz=(tangent[2]+(tangent_next[2]-tangent[2])*blend)/32767.0f;
         tg_material_vertex *v=&verts[i];
+#ifdef TG_DEMO_ROOM
+        v->x=(int)(80.0f+72.0f*(rx-camera_x)/w); v->y=(int)(60.0f-72.0f*(y-camera_y)/w);
+#else
         v->x=(int)(80.0f+110.0f*rx/w); v->y=(int)(60.0f-110.0f*y/w);
+#endif
         v->depth=(int)(100000.0f/w); v->inverse_w=1.0f/w;
         v->varying.uv[0]=hk_uv[i][0]; v->varying.uv[1]=hk_uv[i][1];
         v->varying.normal[0]=cy*nx+sy*nz; v->varying.normal[1]=ny; v->varying.normal[2]=-sy*nx+cy*nz;
@@ -90,6 +108,9 @@ void cube_render_band(unsigned int *tile,int *depth,int quadrant,unsigned int fr
     c.color=tile; c.depth=depth; c.tile_x=(quadrant&1)*80; c.tile_y=(quadrant>>1)*60;
     c.clip_enabled=1; c.clip_x0=c.tile_x; c.clip_x1=c.tile_x+80; c.clip_y0=c.tile_y+row0; c.clip_y1=c.tile_y+row1;
     tg_clear_band(&c,0xff090e14u,row0,row1);
+#if defined(TG_DEMO_ROOM) && !defined(TG_DISABLE_ROOM_DRAW)
+    errors+=demo_room_draw(&c,&shadow);
+#endif
     for(i=0;i<HK_INDEX_COUNT;i+=3) errors+=tg_material_triangle(&c,&verts[hk_indices[i]],&verts[hk_indices[i+1]],&verts[hk_indices[i+2]],&material);
     if(errors) for(i=(unsigned int)(row0*80);i<(unsigned int)(row1*80);i++)tile[i]=0xffff00ffu;
 }

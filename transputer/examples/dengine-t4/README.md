@@ -63,10 +63,48 @@ or distribute that pass.
 
 The upstream default configuration selects `data/scenes/techDemo.scene`,
 which references `data/map/demo.map`, a room made of OBJ meshes, the
-Hellknight MD5 mesh and its idle animation. This preview does not yet load or
-render that scene or run dEngine's GLSL renderer.
-Run `python3 transputer/examples/dengine-t4/audit_scene.py` to verify its
-directly named map assets and count room geometry in the local checkout.
+Hellknight MD5 mesh and its idle animation. `RENDERER=techdemo` exports the
+29 OBJ objects using the map's room transform and renders them around the
+animated character, using their original diffuse material assignments. It
+reverses OBJ winding as dEngine does and clips room triangles at the near
+plane. The 28 distinct diffuse maps are reduced to 16×16 and alpha is
+discarded. The character uses the approximate pre-skinned animation and
+material path described above. The static room projection is prepared once
+per node; every node separately prepares its character-only shadow map.
+The room receives that map but does not contribute to the shadow pass.
+
+This is a scene preview: its fixed camera and directional light are chosen
+for visibility, not the original camera path or scene light. It does not
+implement room bump/specular maps, transparency, animation-driven skinning
+on T4, or dEngine's actual GLSL renderer. The scene, mesh and texture
+exports are generated from the separate checkout in the run directory.
+
+```sh
+RENDERER=techdemo NODES=4 FRAMES=12 CAPTURE=1 \
+  bash transputer/examples/distributed-fb/run-scale.sh
+RENDERER=techdemo bash transputer/examples/distributed-fb/test-scale.sh
+bash transputer/examples/dengine-t4/test-room.sh
+bash transputer/examples/dengine-t4/test-scene.sh
+python3 transputer/examples/dengine-t4/audit_scene.py
+```
+
+In one WSL T4 experiment (12 unpaced, capture-free frames per configuration,
+median after discarding the first), root assembly wall times were:
+
+| Nodes | ms/frame |
+| ---: | ---: |
+| 1 | 556.544 |
+| 2 | 548.160 |
+| 4 | 504.768 |
+| 8 | 454.144 |
+| 16 | 347.840 |
+| 32 | 176.512 |
+
+Each is one short emulator sample, includes tree transport and root assembly,
+and excludes build, capture and pacing. The host exposed 20 logical CPUs;
+32 emulated nodes are oversubscribed. These numbers are not physical T800
+times or a scaling guarantee. Two captured frames matched byte-for-byte at
+all six counts; independent room, animation and static controls passed.
 
 The expected upstream checkout is `transputer/examples/dEngine`, cloned from
 `https://github.com/fabiensanglard/dEngine.git`; the checkout used for these
