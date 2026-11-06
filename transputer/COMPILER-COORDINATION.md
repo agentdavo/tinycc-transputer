@@ -106,10 +106,11 @@ commits. A session's title can lag behind its current workload.
   generic lowering still needs a non-overlap proof. Volatility, final index,
   variable counts, break and continue are also covered; no compiler loop
   optimization is claimed from the source experiment.
-* **Loop-weighted slot placement:** private trial preserves images/CRCs, but
-  initial results trade about 128,000 fewer raytracer modeled cycles for 460
-  extra CoreMark cycles and two extra Doom fill cycles. It is not integrated;
-  complete scene/target coverage and assess the tradeoff before accepting it.
+* **Loop-weighted slot placement:** rejected; report committed in `55a9da8b`.
+  The private trial saves 127,908 raytracer modeled cycles but adds 460
+  CoreMark cycles and two Doom fill cycles. All four scenes match at one/four
+  nodes for both variants, and seed 329 passes. The small gain and quadratic
+  scan did not justify integration. See [report](tests/bench/slot-remap-loop-trial-2026-11-06.md).
 
 ## Landed work and measurement limits
 

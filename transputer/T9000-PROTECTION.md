@@ -44,6 +44,38 @@ permitted subset is unprivileged. A trap returns to the supervisor after
 The local OCR renders the null descriptor as `#8000000`; code uses
 `0x80000000`. Verify the printed facsimile before changing the literal.
 
+### Live descriptor audit
+
+The Linux owner inspected the desktop's emitted descriptors after
+`bc2969c2ea63`. Inclusive ranges below describe that compatibility boot:
+
+| Region | Descriptor | Logical range | Physical range | Permissions |
+| --- | --- | --- | --- | --- |
+| Q0 | `20000001` | `00000000–3FFFFFFF` | `00000000–3FFFFFFF` | RW, including devices |
+| Q1 | `80000000` | Disabled by the implementation | — | — |
+| Q2 | `A0000003` | `80000000–BFFFFFFF` | `80000000–BFFFFFFF` | RWX |
+| Q3 | `A0000001` | `C0000000–FFFFFFFF` | `80000000–BFFFFFFF` | RW |
+
+Q2 and Q3 alias the full physical GiB. A conforming replacement must reserve
+disjoint aligned backing for code, data/heap and workspace, then update the
+loader, relocations, entry/argv/GOT pointers, capability discovery and device
+access policy together. Software checks on syscall frames do not remove the
+alias available to ordinary P instructions.
+
+Separate standalone tests on T4 `2e44501`, using disjoint regions, passed
+CALL/AJW/GAJW workspace-extension restart, scalar access/execute/device checks,
+and privileged-instruction rejection. A test supervisor also preserved FP and
+block-move state across intentional clobber when it explicitly saved/restored
+them; omitting restoration was detected. This does not establish equivalent
+state handling in Linux.
+
+Those tests exposed two independent emulator defects: `FPLDNLSN` read zero
+instead of relocated `0x3FA00000`, and `FPSTNLSN` to RX memory failed to trap.
+The Linux session owns their repair and related FP-width/boundary checks.
+The retained audit/reproducer is in `logs/p-isa-audit/`; these are local
+captures, not installed test-suite artifacts. Keep this failure baseline
+distinct from any later emulator fix.
+
 ---
 
 ## Phase checklist
