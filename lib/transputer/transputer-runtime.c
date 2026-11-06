@@ -27,7 +27,7 @@ static u64_u u64_neg(u64_u v) {
     return result;
 }
 
-static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
+static u64 u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
     u64_u result, remainder;
     int i;
     result.p.hi = 0; result.p.lo = 0;
@@ -36,7 +36,7 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         result.p.lo = dividend.p.lo / divisor.p.lo;
         remainder.p.lo = dividend.p.lo % divisor.p.lo;
         if (rem_out) *rem_out = remainder;
-        return result;
+        return result.v;
     }
     if (divisor.p.hi == 0 && divisor.p.lo <= 0xffffu) {
         u32 part;
@@ -49,7 +49,7 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         result.p.lo |= part / divisor.p.lo;
         remainder.p.lo = part % divisor.p.lo;
         if (rem_out) *rem_out = remainder;
-        return result;
+        return result.v;
     }
     if (divisor.p.hi == 0 && (divisor.p.lo & (divisor.p.lo - 1)) == 0) {
         u32 mask = divisor.p.lo - 1;
@@ -66,7 +66,7 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
             result.p.lo |= dividend.p.hi << (32 - shift);
         remainder.p.lo = dividend.p.lo & mask;
         if (rem_out) *rem_out = remainder;
-        return result;
+        return result.v;
     }
     if (divisor.p.hi != 0 && divisor.p.lo == 0 &&
         (divisor.p.hi & (divisor.p.hi - 1)) == 0) {
@@ -81,7 +81,7 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         remainder.p.hi = dividend.p.hi & (divisor.p.hi - 1);
         remainder.p.lo = dividend.p.lo;
         if (rem_out) *rem_out = remainder;
-        return result;
+        return result.v;
     }
     if (divisor.p.hi == 0) {
         /* The high quotient word can be computed directly. The remaining
@@ -105,7 +105,7 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         }
     }
     if (rem_out) *rem_out = remainder;
-    return result;
+    return result.v;
 }
 
 s64 __divdi3(s64 dividend, s64 divisor) {
@@ -117,7 +117,7 @@ s64 __divdi3(s64 dividend, s64 divisor) {
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
     if (a.p.hi & 0x80000000u) { a = u64_neg(a); neg ^= 1; }
     if (b.p.hi & 0x80000000u) { b = u64_neg(b); neg ^= 1; }
-    q = u64_udivmod(a, b, 0);
+    q.v = u64_udivmod(a, b, 0);
     if (neg) q = u64_neg(q);
     return (s64)q.v;
 }
@@ -127,7 +127,7 @@ u64 __udivdi3(u64 dividend, u64 divisor) {
     a.v = dividend;
     b.v = divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
-    return u64_udivmod(a, b, 0).v;
+    return u64_udivmod(a, b, 0);
 }
 
 s64 __moddi3(s64 dividend, s64 divisor) {

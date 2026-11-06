@@ -98,6 +98,10 @@ defined behavior.
   struct-return calls. The corresponding signed phases fell to 110,322 and
   580,222 cycles, and the 32-bit-dividend unsigned phase fell from 60,422 to
   47,022 cycles per 100 calls.
+  Returning the quotient from the internal divider as a 64-bit scalar avoids
+  another struct-return copy. In the same benchmark the 32-bit-dividend phase
+  fell from 44,119 to 41,219 estimated cycles per 100 calls. The exact totals
+  reflect the compiler snapshot used for that comparison.
   The shift helpers likewise initialize their word unions directly. Their new
   regression checks every count from 0 through 64 on T414, T425, T800, T805,
   T9000 and T9000TVX. The benchmark's 100 variable logical-right shifts fell from

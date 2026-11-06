@@ -20,6 +20,7 @@ void test_main(void)
     ok &= __umoddi3(high, 65535) == 0;
     ok &= __udivdi3(high, 1) == high;
     ok &= __umoddi3(high, 1) == 0;
+    ok &= __udivdi3(high, 3) + 0x100000001ULL == 0x5555555655555556ULL;
     ok &= __udivdi3(small, 256) == 0x123456ULL;
     ok &= __umoddi3(small, 256) == 0x78;
     ok &= __udivdi3(small, 0xffffffffu) == 0;
