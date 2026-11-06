@@ -20,8 +20,6 @@ typedef union {
     struct { u32 lo; u32 hi; } p;
 } u64_u;
 
-static u64_u u64_from(u64 v) { u64_u u; u.v = v; return u; }
-
 static u64_u u64_neg(u64_u v) {
     u64_u result;
     result.p.lo = 0u - v.p.lo;
@@ -157,8 +155,8 @@ u64 __umoddi3(u64 dividend, u64 divisor) {
 }
 
 s64 __ashldi3(s64 value, int shift) {
-    u64_u v = u64_from((u64)value);
-    u64_u r;
+    u64_u v, r;
+    v.v = (u64)value;
     if (shift >= 64) return 0;
     if (shift == 0) return value;
     if (shift >= 32) {
@@ -172,9 +170,10 @@ s64 __ashldi3(s64 value, int shift) {
 }
 
 s64 __ashrdi3(s64 value, int shift) {
-    u64_u v = u64_from((u64)value);
-    u64_u r;
-    u32 sign = (v.p.hi & 0x80000000u) ? 0xFFFFFFFFu : 0u;
+    u64_u v, r;
+    u32 sign;
+    v.v = (u64)value;
+    sign = (v.p.hi & 0x80000000u) ? 0xFFFFFFFFu : 0u;
     if (shift >= 64) return sign ? -1 : 0;
     if (shift == 0) return value;
     if (shift >= 32) {
@@ -191,8 +190,8 @@ s64 __ashrdi3(s64 value, int shift) {
 }
 
 u64 __lshrdi3(u64 value, int shift) {
-    u64_u v = u64_from(value);
-    u64_u r;
+    u64_u v, r;
+    v.v = value;
     if (shift >= 64) return 0;
     if (shift == 0) return value;
     if (shift >= 32) {

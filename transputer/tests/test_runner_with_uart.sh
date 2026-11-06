@@ -63,6 +63,7 @@ require_tools() {
 }
 
 declare -A EXTRA_SOURCES=(
+    [test_u64_shift_runtime]="../../lib/transputer/transputer-runtime.c"
     [test_u64_div_runtime]="../../lib/transputer/transputer-runtime.c"
     [test_asm_addends]="test_asm_addends_fn.S"
     [main]="support.c"

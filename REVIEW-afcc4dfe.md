@@ -91,6 +91,11 @@ defined behavior.
   struct-return calls. The corresponding signed phases fell to 110,322 and
   580,222 cycles, and the 32-bit-dividend unsigned phase fell from 60,422 to
   47,022 cycles per 100 calls.
+  The shift helpers likewise initialize their word unions directly. Their new
+  regression checks zero, 1, 31, 32, 33, 63 and overshift counts on T414, T800
+  and T9000. The benchmark's 100 variable logical-right shifts fell from
+  24,883 to 17,605 estimated T800 cycles. The helpers still use word operations
+  instead of single LSHL/LSHR instructions.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of
