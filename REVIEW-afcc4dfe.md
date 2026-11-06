@@ -12,7 +12,7 @@ numbers and line numbers in the original review refer to the older source.
 | #2–9 | Fixed in the squash | Relaxation remaps local label symbols. Integer-result builtins and UMULL protect their result slots. The computed-goto, live-return, conversion, pointer-difference and narrow-argument UART regressions passed. |
 | #10–11 | Fixed for the reported cases | The peephole limits decoding to function ranges and skips relocated instructions. The linker skips non-allocated debug sections. A fresh `-g` link succeeded. |
 | #12 | Common storage fixed. Undefined-symbol policy remains a choice. | A `-g -fcommon` link placed a tentative definition in BSS. The strict linker suite rejects missing strong call targets with `T4_STRICT_UNRESOLVED_CALLS=1`. The default still warns. |
-| #13–14 | Opcode and branch sizing fixes present. Instruction addends still unsupported. | `rev` and `opr N` pass on T4, and `j 17` compiles. Before `04380cba`, `ldc target+4` emitted exactly the bytes and relocation for `ldc target`. It now fails assembly. The normal assembler also emits `21 27 fc` for `lddevid` and `21 2f ff` for `start`. |
+| #13–14 | Fixed for instruction addends and the reported opcode and sizing cases. | `80ab498f` carries instruction addends in a nine-byte ELF REL slot. Tests check positive and negative addends, branch targets and partial links, and execute the result on T4. `rev`, `opr N`, `lddevid`, `start`, and `j 17` have regression coverage. |
 | #15–18 | Fixed in the squash | VLAs use an arena. Invalid jump patches report internal errors. The static call-frequency table is gone. Value-returning early exits use their own epilogue. The VLA and timeslice regressions passed. |
 | #19 | Fixed for the reported cases | The NaN comparison, signed-zero and conversion UART tests passed with `-mt800` on T4's T800 model (`-s8`). |
 | #20 | Fixed in `88d57e3d` | The new test starts and joins a child, checks signed word counts, and checks the void types of the timer and ALT waits. |
@@ -26,11 +26,14 @@ numbers and line numbers in the original review refer to the older source.
 - **Linker safety.** `310efe5b` validates boot load slots before writing and
   propagates malformed optional-slot errors. Ordinary programs no longer
   get the missing-kernel-symbol or absent-BSS-pair warnings. The final
-  relocation switch still silently skips unhandled types, including the
-  narrow data relocations emitted for symbolic `.byte` and `.short`.
-  Full instruction addends require coordinated assembler, linker and
-  relaxation changes. Label boundaries now clear the backend's cached
-  register and peephole history.
+  linker now applies symbolic `.byte` and `.short` relocations and rejects
+  unsupported relocation types, malformed slots, and overflow. Absolute
+  narrow fields accept signed or unsigned results; PC-relative fields use
+  signed results. Their implicit REL addends must fit the signed field width.
+  Instruction addends use a new relocation type, so objects using them need
+  the updated linker. The linker conservatively preserves the layout of
+  sections referenced through these addends. Label boundaries clear the
+  backend's cached register and peephole history.
 - **§2–§4, implementation and maintenance.** The experimental inliner,
   compaction pass and call-frequency table are gone. Builtin dispatch uses
   descriptors. Environment-controlled code generation, shared-file tracing,
