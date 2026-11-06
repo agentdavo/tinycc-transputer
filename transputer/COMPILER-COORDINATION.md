@@ -14,6 +14,14 @@ See [bounds acceptance](fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md). FBWM and all
 guest clients must be rebuilt together; the commit is local and no complete
 rootfs deployment is claimed. The six worker chats remain archived.
 
+The chief also audited the supplied Whetstone/Savage sources and executed
+BTLs, and completed a 16-node POV-Ray `box.pov` render byte-identical to the
+included reference. The [legacy math/renderer audit](COMPILER-AUDIT-2026-11-06.md#legacy-math-and-renderer-reference-audit--6-november-2026)
+records benchmark pitfalls and new candidate work: resident FP unary operands,
+aligned double parameter staging and strict-order vector/polynomial loops.
+These are measured reference observations and unmerged optimization avenues;
+no worker sessions were reopened.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |

@@ -239,3 +239,163 @@ group; rejected trials should not be merged merely to keep commits frequent.
 See [coordination](COMPILER-COORDINATION.md) for ownership and
 [protection review](LINUX-PROTECTION-REVIEW-2026-11-06.md) for the separate
 trap-syscall/isolation blockers.
+
+## Legacy math and renderer reference audit — 6 November 2026
+
+The chief read the Whetstone and Savage sources/build descriptions, ran their
+supplied boot images, captured executed instruction profiles, and inspected
+POV-Ray's Transputer platform layer and configured BTL. This is reference
+evidence for future compiler work; no backend optimization was changed here.
+The six worker chats remain archived.
+
+### Whetstone: use the individual modules and preserve their actual semantics
+
+The [wrapper](t4/examples/whetston8/whetston.occ) calls the
+[REAL32 kernel](t4/examples/whetston8/whetr.occ) or
+[REAL64 kernel](t4/examples/whetston8/whetd.occ) with 10 then 20 repetitions
+and subtracts cumulative timings. Modules cover scalar/array arithmetic,
+array arguments, branches, integer-to-FP conversion, trig, calls, array
+references and log/exp/sqrt. However its count vector is
+`[0,12,14,345,0,210,32,899,616,0,93]`: modules 1 and 10 have zero iterations,
+and module 5 is omitted. This exact image cannot measure those absent loops.
+
+The zero-interrupt option halts: the high-priority branch contains only
+`IF delay <> 0`, with no true fallback when delay is zero. On T4 `2853b29`,
+the single-precision image executes `SETERR` at `0x800005ac` for argument 0.
+Argument 10 completes both precisions. Its high-priority timer process and
+two-run subtraction make the displayed score sensitive to scheduling and
+timer mode; ordinary wall-clock samples even produced a negative individual
+module difference. Do not use the printed KWhetstones or modeled-clock
+substitution as a calibrated CPU comparison.
+
+Both kernels' second trig update computes `COS(y)` into `r3` but uses `r2`
+in the final numerator. That differs from the adjacent formula comment.
+Keep the exact supplied source as a legacy case; a corrected/textbook
+variant needs a separate identity and expected results. Module 9 also has
+sequentially dependent stores: the final `e1[l] := e1[j]` reads the value
+written by the first store. It is not a simultaneous three-element rotation.
+
+Executed BTL profiles confirm:
+
+* REAL32 procedure `p3` at `0x80000a8b` runs 26,970 times (899 × 30). Its
+  arithmetic uses `fpldnlsn`, `fpldnladdsn`, `fpldnlmulsn`, `fpdiv`, explicit
+  stores and `fpchkerr`; the checked-error operations cannot be discarded as
+  ordinary staging noise.
+* The array-argument procedure's inner loop runs 2,520 times; the indexed
+  array-reference procedure runs 18,480 times. REAL64 uses `wsubdb` for
+  double-word indexing; the REAL32 path uses `wsub`.
+* The sqrt stage executes 2,790 first/last operations, with 5,580 steps for
+  REAL32 and 13,950 for REAL64: two versus five steps, as prescribed for T800.
+  TinyCC already emits these sequences and fused memory arithmetic; they
+  are regression requirements, not missing features.
+
+### Savage: repeated numerical composition, not just a throughput loop
+
+[Savage C](t4/examples/savage/savage.c) and
+[REAL64 Occam](t4/examples/savage/savage.occ) perform 2,499 iterations of:
+
+```c
+a = tan(atan(exp(log(sqrt(a*a))))) + 1.0;
+```
+
+For positive exact arithmetic the composition returns `a`, so starting at 1
+gives an ideal final value of 2500. The program prints the accumulated
+difference; it does not enforce a passing tolerance. It stresses math-library
+accuracy, rounding and cancellation as well as FP/call/workspace costs.
+Replacing the composition by `a + 1` would destroy this test's purpose and
+strict numerical behavior.
+
+| Supplied image / emulator | Observed result | Executed instructions |
+| --- | --- | ---: |
+| `savage.b8h` / T800 | `2500.0000000011773400`, difference `-1.1773408914450556e-09` | 2,373,606 |
+| `savage.b4h` / strict T414 | Same printed double result | 35,761,659 |
+| `savageb.bbh` / strict T414 | `2.4772444E+03`, difference `2.2755615E+01` | 7,151,270 |
+
+The `b` variant uses REAL32 and `tbmaths.lib`, so its result is not an oracle
+for the double variants. `savageb_test.occ` isolates log/exp round trips, while
+`savageb_test2.occ` probes `UNPACKSN`/`ROUNDSN`. No supplied BTL was identified
+for those two diagnostic sources. Both C and Occam makefiles can produce the
+same `.b8h` name; its filename alone does not prove language/compiler origin.
+Counts include startup, libraries and output, not just the recurrence, and
+are instruction counts rather than hardware timing comparisons.
+
+### POV-Ray: a working full-render baseline and a larger compiler workload
+
+The supplied [build configuration](t4/examples/povray/povsrc/build/povray.cfs)
+has a root/cache processor plus three pipes of five workers: 16 T800 nodes.
+The [platform template](t4/examples/povray/povsrc/machine/transp/povray.cfs)
+instead has three workers per pipe. The collector map agrees with the
+16-node build. Do not rebuild the template and assume it reproduces this BTL.
+
+The platform sources include startup/get_param handling, channel/alternative
+operations, high-priority I/O multiplexers, file caching and pixel transport.
+The map budgets each rendering process 25,876 bytes of workspace and 185,380
+bytes of code, including linked runtime/library code. These are process
+budgets, not per-function compiler frame sizes. The INMOS build uses `icc -t8`
+and toolset runtime interfaces; comparing new TinyCC-generated code requires
+rebuilding kernels/application code with verified compatible runtime support,
+not merely relinking an opaque BTL.
+
+`povscn/level1`, `level2` and `level3` contain 34, 27 and 16 demo `.pov`
+scenes. They are scene collections, not quality settings. `include` holds
+shared definitions and `math` contains mathematical scenes. Level 3's
+`chess.pov` documents 430 primitives plus 41 bounding shapes. The matching
+scripts select scene files and render at 640×480.
+
+The chief rendered `level1/box.pov` with the supplied BTL, isolated T4
+`2853b29`, the supplied collector map and `-st -s8 -sn -16 -sm 22`.
+The complete 921,615-byte PPM is **byte-identical** to
+`pictures.zip:ppm/level1/box.ppm`, SHA-256
+`fcaeaccaea31d263bede7a2f8774e2e7af8dcfc6f640a893a3fd1d3b8d1d6db0`.
+The BTL SHA-256 is
+`261e056fa3bc03bb9f41454938225703e45f8645d8fff8bc402350eadbf4d831`.
+This establishes one reference-matching baseline, not all-scene coverage or
+a TinyCC performance improvement.
+
+A 16×16 experiment timed out because `muxdemux.c` fixes `MAXX=640`,
+`MAXY=480`, writes full-width rows, and waits for 480 pixel messages. Use
+640×480 for the existing image; a small-resolution test requires rebuilding
+the multiplexer and workers consistently. Use short relative include paths
+and a single-line `povray.def`, as in the supplied scripts. A trial with
+long absolute paths/multiline defaults failed and is not an accepted harness.
+Do not run the old `pov` script's global `pkill -9 -x t4`; the threaded
+launcher avoids terminating unrelated emulator work.
+
+### Concrete compiler priorities from these references
+
+1. **Resident FP results across unary operations.** A current TinyCC probe
+   `__fpsqrt(x*x + 1)` still spills and reloads immediately before sqrt for
+   both float and double. The float case also copies the spilled word to
+   another workspace slot. Extending resident-operand handling to unary
+   builtins is a concrete next experiment, preserving aliasing, pending call
+   results, FP-stack depth, precision, rounding and exceptions.
+2. **Aligned double parameter storage.** A C Horner-step probe already uses
+   fused `fpldnlmuldb`/`fpldnladddb`, but first homes all three double arguments
+   through integer load/store pairs. Determine which copies are required by
+   the ABI and which can feed the FPU from existing aligned storage. The
+   seed-329 alignment and nested-call regressions remain mandatory.
+3. **Double vector/matrix and polynomial loops.** POV-Ray's `vector.h`,
+   `matrices.c`, `spheres.c` and `vect.c` provide dot products, normalization,
+   sphere intersection, matrix multiplication and Horner evaluation. Reuse
+   proven addresses and reduce workspace traffic while preserving operation
+   order. Matrix multiplication uses a temporary to support aliased inputs
+   and output; do not replace it with destructive direct stores.
+4. **Math-library and numerical contracts.** POV-Ray defaults `DBL` to
+   `double`; its quartic solver explicitly tunes tolerances for IEEE64.
+   Approximate reciprocal/sqrt, lower precision, reassociation or a
+   single-round multiply-add are not justified by these references. Savage's cumulative
+   error and reference POV pixels are useful numerical checks alongside
+   instruction/encoding measurements.
+5. **Control flow, scheduling and ABI costs.** Counted-loop lowering and
+   small procedure calls are visible in Whetstone; POV adds indirect calls,
+   recursive work, process parameters and channel traffic. Keep first-gen
+   ISA availability, protected FP/block state, volatile access and trap
+   behavior explicit. Do not copy Occam's bounds/error-check overhead into
+   ordinary C or compare differing safety contracts as pure optimizer gains.
+
+Raw runs, source-to-instruction probes, executed-address histograms, profiler
+adaptations and fingerprints are retained in
+`logs/compiler-coordination/whetstone-savage/`. Profiling disables emulator
+instruction fusion, records only executed addresses, and uses the current
+decoder's inclusive instruction length. Whetstone's timer process adds small
+run-to-run event-count variation; no aggregate hardware-speed claim is made.
