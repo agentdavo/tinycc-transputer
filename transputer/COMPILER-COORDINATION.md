@@ -22,6 +22,13 @@ aligned double parameter staging and strict-order vector/polynomial loops.
 These are measured reference observations and unmerged optimization avenues;
 no worker sessions were reopened.
 
+The chief's [deep POV-Ray analysis](POVRAY-BTL-ANALYSIS-2026-11-06.md)
+records the actual 16-node wiring and process/memory budgets, a reference-exact
+render with separate per-node instruction profiles, and measured FP/workspace
+and root byte-output targets. A TinyCC resident-result-before-sqrt candidate
+is under validation. Replaying the unchanged ICC BTL is explicitly separate
+from validating a renderer rebuilt with that candidate.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
