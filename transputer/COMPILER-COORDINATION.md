@@ -40,6 +40,15 @@ MOVE2D packing. The full generic box saves 1.946% modeled cycles. The actual
 sixteen-node ICC image still requires recollection/toolset integration;
 the existing BTL is unchanged. No archived worker chats were reopened.
 
+The next [double-parameter storage acceptance](tests/bench/double-param-storage-2026-11-06.md)
+reuses the existing ABI area for nonvolatile eight-byte doubles instead of
+copying them into new callee locals. It passes the four workload gates,
+including complete target glass, 48 target/layout regressions and sixteen
+mixed old/new ABI runs. The POV box saves 4,119,717 decoded instructions and
+0.17855% modeled T800 cycles; its ELF shrinks by 1,208 bytes. Volatile and
+variadic controls remain byte-identical. Caller ABI and runtime archives
+remain unchanged.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |

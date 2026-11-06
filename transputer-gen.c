@@ -6288,7 +6288,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
             n += sz / 4;
         }
     } else {
-        /* Non-variadic: spill params in descending order (original behavior) */
+        /* Non-variadic: home parameters unless incoming storage is reused. */
         while ((sym = sym->next) != NULL) {
             int align = 4, size, words, w;
             int param_addr;
@@ -6309,7 +6309,21 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
                 size = 4;
             words = size / 4;
 
-            /* Always spill incoming words into callee-local storage. */
+            /* CALL's saved A/B/C words and the stacked words form one
+             * ascending, word-aligned argument area.  A double may straddle
+             * its third/fourth words, but its halves are still contiguous.
+             * As for named variadic parameters above, this storage belongs
+             * to the callee's by-value parameter and survives nested calls.
+             * Use it directly instead of homing two words only to load them
+             * into the FPU again.  Keep volatile initialization unchanged. */
+            if (size == 8 && (bt == VT_DOUBLE || bt == VT_LDOUBLE) &&
+                !(sym->type.t & VT_VOLATILE)) {
+                gfunc_set_param(sym, 4 + 4 * n, 0);
+                n += words;
+                continue;
+            }
+
+            /* Other parameters retain their callee-local homes. */
             loc -= size;
             param_addr = loc;
 
