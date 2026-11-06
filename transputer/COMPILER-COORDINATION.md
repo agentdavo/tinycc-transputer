@@ -134,6 +134,12 @@ software chooses recovery, resumption or termination. In the port's boot
 terminology, G is the global-error/null-THDS starting condition. Do not infer a
 separate cluster-wide privileged scheduler from that label.
 
+ISM 10.1.3 explicitly specifies that a trap with a null trap-handler halts the
+processor. HRM 2.1.5 and 8.3 separately describe the control unit/control links
+and an external controlling processor. Those facilities do not establish an
+independently executing G-process, automatic kernel recovery, or debugging
+without timing effects.
+
 Compiler changes must preserve legal instruction availability, trap behavior,
 rounding state, memory-access semantics and the workspace ABI on these paths.
 Kernel integration does not relax the project's ISM/HRM → RTL → compiler →
