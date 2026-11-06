@@ -11,12 +11,16 @@ int tg_material_triangle(tg_context *c,const tg_material_vertex *a,const tg_mate
     for(i=0;i<3;i++) if(v[i]->inverse_w<=0.0f || v[i]->inverse_w>5.01f || v[i]->depth<=0) invalid++;
     return 0;
 }
+int tg_material_triangle_blended(tg_context *c,const tg_material_vertex *a,const tg_material_vertex *b,
+                                 const tg_material_vertex *d,const tg_fragment_material *m)
+{ return tg_material_triangle(c,a,b,d,m); }
 static int run(void)
 {
     static tg_context c; static const unsigned char texel[4]={255,255,255,255};
     tg_fragment_texture shadow={texel,1,1,TG_FRAG_CLAMP,TG_FRAG_CLAMP};
     demo_room_init(0,0,0,0.01f,0,0,1);
-    if(demo_room_draw(&c,&shadow) || invalid || calls<100 || calls>1306) return 1;
+    if(demo_room_draw(&c,&shadow,0) || invalid || calls<100 || calls>1306) return 1;
+    { unsigned int opaque=calls; if(demo_room_draw(&c,&shadow,1) || calls<=opaque || invalid) return 2; }
     return 0;
 }
 #ifdef TG_TARGET_TEST

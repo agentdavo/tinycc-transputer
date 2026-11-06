@@ -51,6 +51,15 @@ static int run(void)
         a.depth=b.depth=d.depth=45;
         if(tg_material_triangle(&c,&a,&b,&d,&m) || pixels[2*TG_TILE_W+2]!=0xff00ff00u) return 8;
     }
+    {
+        static const unsigned char translucent[4]={255,0,0,128};
+        t.rgba=translucent; t.width=t.height=1; m.features=0;
+        m.ambient[0]=m.ambient[1]=m.ambient[2]=1;
+        pixels[0]=0xff0000ffu; depth[0]=50; a.depth=b.depth=d.depth=51;
+        if(tg_material_triangle_blended(&c,&a,&b,&d,&m) || pixels[0]!=0xff80007fu || depth[0]!=50) return 9;
+        a.depth=b.depth=d.depth=49;
+        if(tg_material_triangle_blended(&c,&a,&b,&d,&m) || pixels[0]!=0xff80007fu || depth[0]!=50) return 10;
+    }
     return 0;
 }
 #ifdef TG_TARGET_TEST

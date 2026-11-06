@@ -58,17 +58,26 @@ void demo_room_init(float center_x,float center_y,float center_z,float scale,flo
         }
     }
 }
-int demo_room_draw(tg_context *ctx,const tg_fragment_texture *shadow)
+int demo_room_draw(tg_context *ctx,const tg_fragment_texture *shadow,int translucent)
 {
-    static tg_fragment_material m; unsigned int i; int errors=0;
+    static tg_fragment_material m; unsigned int i,k,order[MAX_ROOM_TRIANGLES],count=0; int errors=0;
     m.shadow=shadow; m.features=TG_FRAG_SHADOW; m.pow_fn=square; m.shininess=2; m.clamp_specular_base=1;
     for(i=0;i<3;i++) { m.ambient[i]=0.5f; m.diffuse[i]=0.5f; m.specular_light[i]=0.3f; }
-    for(i=0;i<projected_count;i++) {
-        draw_triangle *t=&projected[i]; const room_source_material *mat=&room_materials[t->material];
+    for(i=0;i<projected_count;i++) if(!!room_materials[projected[i].material].alpha==!!translucent) {
+        if(translucent) {
+            int z=projected[i].v[0].depth+projected[i].v[1].depth+projected[i].v[2].depth;
+            k=count;
+            while(k>0) { draw_triangle *p=&projected[order[k-1]]; int pz=p->v[0].depth+p->v[1].depth+p->v[2].depth; if(pz<=z)break; order[k]=order[k-1]; k--; }
+            order[k]=i; count++;
+        } else order[count++]=i;
+    }
+    for(i=0;i<count;i++) {
+        draw_triangle *t=&projected[order[i]]; const room_source_material *mat=&room_materials[t->material];
         m.base=&textures[mat->base]; m.features=TG_FRAG_SHADOW;
         if(mat->bump!=65535) { m.bump=&textures[mat->bump]; m.features|=TG_FRAG_BUMP; }
         if(mat->specular!=65535) { m.specular=&textures[mat->specular]; m.features|=TG_FRAG_SPEC; }
-        errors+=tg_material_triangle(ctx,&t->v[0],&t->v[1],&t->v[2],&m);
+        if(translucent) errors+=tg_material_triangle_blended(ctx,&t->v[0],&t->v[1],&t->v[2],&m);
+        else errors+=tg_material_triangle(ctx,&t->v[0],&t->v[1],&t->v[2],&m);
     }
     return errors;
 }

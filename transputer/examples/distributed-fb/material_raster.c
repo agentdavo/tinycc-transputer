@@ -3,9 +3,9 @@
 static int edge(int ax,int ay,int bx,int by,int x,int y)
 { return (x-ax)*(by-ay)-(y-ay)*(bx-ax); }
 
-int tg_material_triangle(tg_context *c,const tg_material_vertex *a,
+static int triangle(tg_context *c,const tg_material_vertex *a,
                          const tg_material_vertex *b,const tg_material_vertex *d,
-                         const tg_fragment_material *material)
+                         const tg_fragment_material *material,int blended)
 {
     int area=edge(a->x,a->y,b->x,b->y,d->x,d->y);
     int x0,x1,y0,y1,x,y,i,errors=0,row0,row1,stepx0,stepx1,stepy0,stepy1;
@@ -39,8 +39,19 @@ int tg_material_triangle(tg_context *c,const tg_material_vertex *a,
         INTERP(light,3); INTERP(half_vector,3); INTERP(normal,3); INTERP(uv,2); INTERP(light_clip,4);
 #undef INTERP
         if(tg_fragment_uber(material,&v,out)!=TG_FRAGMENT_OK) { errors++; continue; }
-        c->depth[off]=depth; c->color[off]=tg_fragment_argb(out);
+        if(blended) {
+            unsigned int src=tg_fragment_argb(out),dst=c->color[off],alpha=src>>24,inv=255-alpha;
+            unsigned int r=(((src>>16)&255)*alpha+((dst>>16)&255)*inv+127)/255;
+            unsigned int g=(((src>>8)&255)*alpha+((dst>>8)&255)*inv+127)/255;
+            unsigned int b=((src&255)*alpha+(dst&255)*inv+127)/255;
+            unsigned int da=alpha+((dst>>24)*inv+127)/255;
+            c->color[off]=(da<<24)|(r<<16)|(g<<8)|b;
+        } else { c->depth[off]=depth; c->color[off]=tg_fragment_argb(out); }
       }
     }
     return errors;
 }
+int tg_material_triangle(tg_context *c,const tg_material_vertex *a,const tg_material_vertex *b,const tg_material_vertex *d,const tg_fragment_material *m)
+{ return triangle(c,a,b,d,m,0); }
+int tg_material_triangle_blended(tg_context *c,const tg_material_vertex *a,const tg_material_vertex *b,const tg_material_vertex *d,const tg_fragment_material *m)
+{ return triangle(c,a,b,d,m,1); }

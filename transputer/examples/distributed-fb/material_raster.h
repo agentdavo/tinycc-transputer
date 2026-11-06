@@ -12,4 +12,8 @@ typedef struct {
 int tg_material_triangle(tg_context *, const tg_material_vertex *,
                          const tg_material_vertex *, const tg_material_vertex *,
                          const tg_fragment_material *);
+/* Straight-alpha source-over, depth-tested without depth writes. */
+int tg_material_triangle_blended(tg_context *, const tg_material_vertex *,
+                                 const tg_material_vertex *, const tg_material_vertex *,
+                                 const tg_fragment_material *);
 #endif

@@ -109,9 +109,12 @@ void cube_render_band(unsigned int *tile,int *depth,int quadrant,unsigned int fr
     c.clip_enabled=1; c.clip_x0=c.tile_x; c.clip_x1=c.tile_x+80; c.clip_y0=c.tile_y+row0; c.clip_y1=c.tile_y+row1;
     tg_clear_band(&c,0xff090e14u,row0,row1);
 #if defined(TG_DEMO_ROOM) && !defined(TG_DISABLE_ROOM_DRAW)
-    errors+=demo_room_draw(&c,&shadow);
+    errors+=demo_room_draw(&c,&shadow,0);
 #endif
     for(i=0;i<HK_INDEX_COUNT;i+=3) errors+=tg_material_triangle(&c,&verts[hk_indices[i]],&verts[hk_indices[i+1]],&verts[hk_indices[i+2]],&material);
+#if defined(TG_DEMO_ROOM) && !defined(TG_DISABLE_ROOM_DRAW)
+    errors+=demo_room_draw(&c,&shadow,1);
+#endif
     if(errors) for(i=(unsigned int)(row0*80);i<(unsigned int)(row1*80);i++)tile[i]=0xffff00ffu;
 }
 void cube_render(unsigned int *tile,int *depth,int quadrant,unsigned int frame)
