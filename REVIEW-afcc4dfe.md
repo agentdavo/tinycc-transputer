@@ -38,6 +38,14 @@ defined behavior.
   packed pointers, direct and indirect calls, and stacked arguments on T414,
   T425, T800, T805, T9000 and T9000TVX. A code-generation check confirms aligned `memcpy`
   still uses MOVE and the packed-length case calls `memcpy`.
+- **64-bit scalar call temporary alignment.** Fuzz seed 329 still fails on
+  the `5afc5a61` T800 compiler baseline. The published reduced case agrees
+  between GCC `-O0` with UBSan and GCC `-O2`; an independent T4 trace shows
+  that the shift count is 1, but the words supplied to `__ashrdi3` are
+  corrupted. The compiler stores the two words in aligned slots and reloads
+  them through addresses two bytes into those slots. The scalar call argument
+  staging path's temporary alignment is under repair; a fix and its
+  regression are not yet included in this audit.
 - **Linker safety.** `310efe5b` validates boot load slots before writing and
   propagates malformed optional-slot errors. Ordinary programs no longer
   get the missing-kernel-symbol or absent-BSS-pair warnings. The final
@@ -53,8 +61,12 @@ defined behavior.
   and `.long target - anchor` using a distinct 32-bit PC-relative relocation.
   The relocation regression checks separate objects, both input orders, and a
   partial link. This also preserves the affected code sections during layout.
-- **§2–§4, implementation and maintenance.** The experimental inliner,
-  compaction pass and call-frequency table are gone. Builtin dispatch uses
+- **§2–§4, implementation and maintenance.** The original broken
+  experimental inliner, compaction pass and call-frequency table are gone.
+  A separate, later inline expander was added in `9679d2c9`: it handles
+  restricted small scalar inline bodies, is enabled by default, and is
+  disabled by `TCC_TRANSPUTER_INLINE=0` or debug information. Its coverage
+  includes `transputer/tests/test_inline_expand.c`. Builtin dispatch uses
   descriptors. Environment-controlled code generation, shared-file tracing,
   symbol-repair paths, unconditional `.tccsym` output, standalone assembler
   code, and kernel boot policy in the linker remain. The review's line-count
