@@ -9,13 +9,13 @@ describe the current compiler or the active `linux-7` kernel.
 
 | Session title | Owned work | Next evidence to collect |
 | --- | --- | --- |
-| Explain per-architecture libtcc1 builds | Runtime selection, build/install integration, per-target libc links | Real application links and execution for each target; then fixed-seed CoreMark matrix/list/state profiles |
+| Explain per-architecture libtcc1 builds | Runtime selection and per-target libc links; T414 userspace image placement | Fix the reserved syscall-gate/image overlap using link placement/provenance, not an address-value exemption; then CoreMark component profiles |
 | Review and implement afcc4dfe | Runtime division, its regression/benchmark, review findings; MOVE2D semantic coverage | Signed/unsigned boundaries and cycle estimates; non-square, padded and conditional 2D transfers |
 | Compare raytracer binaries | Frame address/constant cache, binary32 literals, `TransLocal` copy-loop experiments | General three-element copy reproducer, image equality and modeled cycles; preserve alias/volatile semantics |
 | Refactor transputer code layout | Builtin descriptors, operand staging and target diagnostics | Explicit availability metadata replacing table-position gating; equivalent output/diagnostics on six targets |
 | Build per-part uClibc | Doom workspace remapping in the separate `doom-frame-layout` worktree; rectangular-copy experiment | Call-frame/implicit-slot safety, CoreMark CRCs and Doom hashes; integrate without overwriting root changes |
-| Optimize 64-bit division | Currently linux-7 framebuffer hotspots, despite the historical title | Boot through the exact `DESKTOP_LOOP` marker, output equality, compiler missed-opportunity reproductions |
-| Improve TinyCC Transputer compiler | Coordination, assembler lookup, linker relaxation filtering | Keep ownership clear, review results across workloads, record ISA contracts and measurement limits |
+| Optimize 64-bit division | Currently glyph-fix integration and Linux L/P isolation review, despite the historical title | Review task-private trap ABI, state lifetime, scheduler/fault handling, broad maps and SPINE/T4 differences; propose trap-default acceptance gates |
+| Improve TinyCC Transputer compiler | Coordination, assembler/linker work, protection docs and full backend audit | Three read-only audit agents cover snapshot lines 1–4700, 4701–9400 and 9401–14025; collect session lessons and rank concrete proposals |
 
 Several sessions share one checkout and Git index. Use private source snapshots
 for experiments, keep intermediate shared edits buildable, and commit only
@@ -122,8 +122,9 @@ This work is already substantially implemented in the active nested
   This is saved evidence, not a fresh protection test by the coordinator.
 * `tests/syscall_stub.c` currently defaults `TP_USE_T9K_SYSCALL` to **0**.
   The C-call gate remains the default; trap-first syscall rollout and tighter
-  isolation are incomplete. `T9000-PROTECTION.md` contains conflicting default
-  claims, so inspect source and build flags before relying on its checklist.
+  isolation are incomplete. [T9000-PROTECTION.md](T9000-PROTECTION.md) now
+  distinguishes kernel hard-P entry from the userspace syscall choice and lists
+  the remaining rollout tests; inspect source/build flags for each image.
 * Current code includes broad quarter mappings, a Q3 stack mirror, and
   non-SPINE T4-specific cause/leave-P mechanisms. Entering P-mode alone does
   not prove complete process isolation or hardware portability.
