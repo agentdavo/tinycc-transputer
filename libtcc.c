@@ -1293,6 +1293,22 @@ ST_FUNC int tcc_add_dll(TCCState *s, const char *filename, int flags)
         s->library_paths, s->nb_library_paths);
 }
 
+/* Select the runtime name before tcc_add_support adds the cross prefix. */
+ST_FUNC const char *tcc_runtime_library(TCCState *s1)
+{
+#ifdef TCC_TARGET_TRANSPUTER
+    if (TCC_LIBTCC1[0] && !strcmp(TCC_LIBTCC1, "libtcc1.a")) {
+        if (s1->tp_t414)
+            return CONFIG_TCC_CROSSPREFIX[0] ? "libtcc1-t414.a" : "transputer-libtcc1-t414.a";
+        if (s1->tp_t425)
+            return CONFIG_TCC_CROSSPREFIX[0] ? "libtcc1-t425.a" : "transputer-libtcc1-t425.a";
+        if (!s1->tp_t9000)
+            return CONFIG_TCC_CROSSPREFIX[0] ? "libtcc1-t800.a" : "transputer-libtcc1-t800.a";
+    }
+#endif
+    return TCC_LIBTCC1;
+}
+
 /* find [cross-]libtcc1.a and tcc helper objects in library path */
 ST_FUNC int tcc_add_support(TCCState *s1, const char *filename)
 {

@@ -373,7 +373,7 @@ INSTALLBIN = install -m 755 $(STRIP_$(CONFIG_strip))
 STRIP_yes = -s
 
 LIBTCC1_W = $(filter %-win32-libtcc1.a %-wince-libtcc1.a,$(LIBTCC1_CROSS))
-LIBTCC1_U = $(filter-out $(LIBTCC1_W),$(wildcard *-libtcc1.a))
+LIBTCC1_U = $(filter-out $(LIBTCC1_W),$(wildcard *-libtcc1.a transputer-libtcc1-t*.a))
 IB = $(if $1,$(IM) mkdir -p $2 && $(INSTALLBIN) $1 $2)
 IBw = $(call IB,$(wildcard $1),$2)
 IF = $(if $1,$(IM) mkdir -p $2 && $(INSTALL) $1 $2)

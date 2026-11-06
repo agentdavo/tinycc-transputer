@@ -1454,6 +1454,7 @@ ST_FUNC int tcc_add_crt(TCCState *s, const char *filename);
 #endif
 ST_FUNC int tcc_add_dll(TCCState *s, const char *filename, int flags);
 ST_FUNC int tcc_add_support(TCCState *s1, const char *filename);
+ST_FUNC const char *tcc_runtime_library(TCCState *s1);
 #ifdef CONFIG_TCC_BCHECK
 ST_FUNC void tcc_add_bcheck(TCCState *s1);
 #endif

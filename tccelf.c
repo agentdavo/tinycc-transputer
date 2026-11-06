@@ -1913,7 +1913,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         tcc_add_library(s1, "gcc_s"); // unwind code
 #endif
         if (TCC_LIBTCC1[0]) {
-            tcc_add_support(s1, TCC_LIBTCC1);
+            tcc_add_support(s1, tcc_runtime_library(s1));
             tcc_add_library(s1, "c");
         }
 #ifndef TCC_TARGET_MACHO
@@ -3066,6 +3066,9 @@ static int elf_output_file(TCCState *s1, const char *filename)
 #ifdef TCC_TARGET_TRANSPUTER
     /* Special case for Transputer: use simple linker for executables */
     if (file_type == TCC_OUTPUT_EXE) {
+        tcc_add_runtime(s1);
+        if (s1->nb_errors)
+            return -1;
         return transputer_simple_link(s1, filename);
     }
 #endif
