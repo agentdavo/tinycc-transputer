@@ -84,6 +84,10 @@ defined behavior.
   The subsequent 64-bit power-of-two path reduced the `0x100000000` phase
   from 3,057,422 to 63,222 estimated cycles per 100 calls. The `0xffffffff`
   phase increased from 1,732,422 to 1,733,222 cycles.
+  On Transputer, power-of-two shifts use NORM to find the exponent. In the
+  current compiler snapshot, 100 divisions by `0x80000000` fell from 139,419
+  to 53,019 estimated T800 cycles, and by `0x10000000000` from 65,719 to
+  45,719. The divisor-65535 phase increased from 73,019 to 73,419 cycles.
   Shortening the remaining loop reduced the non-power-of-two `0x100000003`
   phase from 3,059,022 to 1,661,022 estimated cycles per 100 calls.
   Replacing the loop's struct-by-value helper calls with direct word operations

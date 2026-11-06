@@ -51,12 +51,16 @@ static u64 u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
     if (divisor.p.hi == 0 && (divisor.p.lo & (divisor.p.lo - 1)) == 0) {
         u32 mask = divisor.p.lo - 1;
         u32 power = divisor.p.lo;
+#ifdef __TRANSPUTER__
+        int shift = 31 - __norm(power);
+#else
         int shift = 0;
 
         while (power > 1) {
             power >>= 1;
             shift++;
         }
+#endif
         result.p.hi = dividend.p.hi >> shift;
         result.p.lo = dividend.p.lo >> shift;
         if (shift)
@@ -68,12 +72,16 @@ static u64 u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
     if (divisor.p.hi != 0 && divisor.p.lo == 0 &&
         (divisor.p.hi & (divisor.p.hi - 1)) == 0) {
         u32 power = divisor.p.hi;
+#ifdef __TRANSPUTER__
+        int shift = power == 1 ? 0 : 31 - __norm(power);
+#else
         int shift = 0;
 
         while (power > 1) {
             power >>= 1;
             shift++;
         }
+#endif
         result.p.lo = dividend.p.hi >> shift;
         remainder.p.hi = dividend.p.hi & (divisor.p.hi - 1);
         remainder.p.lo = dividend.p.lo;

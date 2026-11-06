@@ -47,6 +47,8 @@ void test_main(void)
     ok &= __umoddi3(0, high) == 0;
     ok &= __udivdi3(high, 0x8000000000000000ULL) == 1;
     ok &= __umoddi3(high, 0x8000000000000000ULL) == 0x7fffffffffffffffULL;
+    ok &= __udivdi3(uneven, 0x10000000000ULL) == 0x123456ULL;
+    ok &= __umoddi3(uneven, 0x10000000000ULL) == 0x789abcdef0ULL;
     ok &= __udivdi3(high, 0x100000001ULL) == 0xffffffffULL;
     ok &= __umoddi3(high, 0x100000001ULL) == 0;
     ok &= __udivdi3(high, 0x8000000000000001ULL) == 1;
