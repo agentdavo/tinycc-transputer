@@ -158,9 +158,10 @@ struct tp_builtin_desc {
     short simple_op; /* simple instruction */
     short vector_op; /* TVX vector instruction */
     unsigned char cpu;
-    short scalar_op; /* TVX word instruction */
+    short scalar_op; /* TVX word or four-argument accumulating instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
+static void tp_gen_tvx_dot4(int opr);
 struct tp_soft_tvx_desc;
 static const struct tp_soft_tvx_desc *tp_find_soft_tvx(int tok);
 static void tp_soft_tvx_call(const struct tp_soft_tvx_desc *s);
@@ -203,20 +204,11 @@ void gen_builtin_fpabs(void);
 void gen_builtin_bf16tof32(void);
 void gen_builtin_f32tobf16(void);
 void gen_builtin_mxfp4dot(void);
-void gen_builtin_bf16dot(void);
-void gen_builtin_mxfp4gemv(void);
 void gen_builtin_mxfp4unpk8(void);
 void gen_builtin_vsetlen(void);
-void gen_builtin_mxfp4gemvbf(void);
 void gen_builtin_f16tof32(void);
 void gen_builtin_f32tof16(void);
-void gen_builtin_q8dot(void);
-void gen_builtin_q8dotbf(void);
-void gen_builtin_iq1mdot(void);
-void gen_builtin_iq2xxsdot(void);
-void gen_builtin_iq3xxsdot(void);
 void gen_builtin_qsetfmt(void);
-void gen_builtin_qdot(void);
 void gen_builtin_ftsetvp(void);
 void gen_builtin_ftransp(void);
 void gen_builtin_ftranspb(void);
@@ -656,14 +648,14 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___mxe8m0tof32, "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0TOR32 },
         { TOK___mxe8m0of,    "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0OF },
         { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___bf16dot,     "eeee",gen_builtin_bf16dot,     0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___mxfp4gemv,   "eeee",gen_builtin_mxfp4gemv,   0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16dot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16DOT },
+        { TOK___mxfp4gemv,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMV },
         { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1, 0, 0, TP_BUILTIN_TVX },
         { TOK___f32tomxfp4x8,"e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4X8 },
         { TOK___bf16mul2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16MUL2 },
         { TOK___bf16add2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16ADD2 },
         { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___mxfp4gemvbf, "eeee",gen_builtin_mxfp4gemvbf, 0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4gemvbf, "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMVBF },
         { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN, TP_BUILTIN_TVX },
         { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN, TP_BUILTIN_TVX },
         { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN, TP_BUILTIN_TVX },
@@ -671,13 +663,13 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN, TP_BUILTIN_TVX },
         { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0, 0, 0, TP_BUILTIN_ANY },
         { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___q8dot,       "eeee",gen_builtin_q8dot,       0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___q8dotbf,     "eeee",gen_builtin_q8dotbf,     0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___iq1mdot,     "eeee",gen_builtin_iq1mdot,     0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___iq2xxsdot,   "eeee",gen_builtin_iq2xxsdot,   0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___iq3xxsdot,   "eeee",gen_builtin_iq3xxsdot,   0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___q8dot,       "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOT },
+        { TOK___q8dotbf,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOTBF },
+        { TOK___iq1mdot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ1MDOT },
+        { TOK___iq2xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ2XXSDOT },
+        { TOK___iq3xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ3XXSDOT },
         { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___qdot,        "eeee",gen_builtin_qdot,        0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qdot,        "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_QDOT },
         { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32, TP_BUILTIN_TVX },
         { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT, TP_BUILTIN_TVX },
         { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF, TP_BUILTIN_TVX },
@@ -1011,7 +1003,9 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
      * both operands would name the builtin's result.  Spilling after the
      * arguments are parsed also covers an argument that is that result. */
     save_reg(REG_IRET);
-    if (desc->scalar_op && !desc->args[1])
+    if (desc->scalar_op && strlen(desc->args) == 4)
+        tp_gen_tvx_dot4(desc->scalar_op);
+    else if (desc->scalar_op && !desc->args[1])
         tp_gen_tvx_unary(desc->scalar_op);
     else if (desc->scalar_op)
         tp_gen_tvx_binary(desc->scalar_op);
@@ -5373,9 +5367,6 @@ static void tp_gen_tvx_dot4(int opr) {
     tp_gen_tvx_dot_finish(4);
 }
 
-void gen_builtin_bf16dot(void) { tp_gen_tvx_dot4(TP_OPR_BF16DOT); }
-void gen_builtin_mxfp4gemv(void) { tp_gen_tvx_dot4(TP_OPR_MXFP4GEMV); }
-
 /* void __mxfp4unpk8(unsigned packed, float *dst) - 8 lanes, one instruction */
 void gen_builtin_mxfp4unpk8(void) {
     gv2(RC_INT, RC_INT);
@@ -5616,8 +5607,6 @@ void gen_builtin_stvxstate(void) {
     vtop--;
 }
 
-void gen_builtin_mxfp4gemvbf(void) { tp_gen_tvx_dot4(TP_OPR_MXFP4GEMVBF); }
-
 void gen_builtin_f16tof32(void)
 {
     if (!tp_tvx())
@@ -5633,13 +5622,6 @@ void gen_builtin_f32tof16(void)
     else
         tp_gen_tvx_unary(TP_OPR_R32TOF16);
 }
-
-void gen_builtin_q8dot(void)   { tp_gen_tvx_dot4(TP_OPR_Q8DOT); }
-void gen_builtin_q8dotbf(void) { tp_gen_tvx_dot4(TP_OPR_Q8DOTBF); }
-void gen_builtin_iq1mdot(void)   { tp_gen_tvx_dot4(TP_OPR_IQ1MDOT); }
-void gen_builtin_iq2xxsdot(void) { tp_gen_tvx_dot4(TP_OPR_IQ2XXSDOT); }
-void gen_builtin_iq3xxsdot(void) { tp_gen_tvx_dot4(TP_OPR_IQ3XXSDOT); }
-void gen_builtin_qdot(void)      { tp_gen_tvx_dot4(TP_OPR_QDOT); }
 
 /* ---------------------------------------------------------------------
  * T9 FPU Temps T0-T7.
