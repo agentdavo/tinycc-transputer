@@ -102,6 +102,9 @@ defined behavior.
   another struct-return copy. In the same benchmark the 32-bit-dividend phase
   fell from 44,119 to 41,219 estimated cycles per 100 calls. The exact totals
   reflect the compiler snapshot used for that comparison.
+  The signed negation helper now takes and returns a 64-bit scalar as well.
+  In a subsequent isolated comparison, the two signed phases fell from
+  105,219 to 88,819 and from 575,119 to 558,719 estimated cycles per 100 calls.
   The shift helpers likewise initialize their word unions directly. Their new
   regression checks every count from 0 through 64 on T414, T425, T800, T805,
   T9000 and T9000TVX. The benchmark's 100 variable logical-right shifts fell from

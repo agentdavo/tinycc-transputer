@@ -20,11 +20,8 @@ typedef union {
     struct { u32 lo; u32 hi; } p;
 } u64_u;
 
-static u64_u u64_neg(u64_u v) {
-    u64_u result;
-    result.p.lo = 0u - v.p.lo;
-    result.p.hi = ~v.p.hi + (result.p.lo == 0);
-    return result;
+static u64 u64_neg(u64 value) {
+    return 0ULL - value;
 }
 
 static u64 u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
@@ -115,10 +112,10 @@ s64 __divdi3(s64 dividend, s64 divisor) {
     a.v = (u64)dividend;
     b.v = (u64)divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
-    if (a.p.hi & 0x80000000u) { a = u64_neg(a); neg ^= 1; }
-    if (b.p.hi & 0x80000000u) { b = u64_neg(b); neg ^= 1; }
+    if (a.p.hi & 0x80000000u) { a.v = u64_neg(a.v); neg ^= 1; }
+    if (b.p.hi & 0x80000000u) { b.v = u64_neg(b.v); neg ^= 1; }
     q.v = u64_udivmod(a, b, 0);
-    if (neg) q = u64_neg(q);
+    if (neg) q.v = u64_neg(q.v);
     return (s64)q.v;
 }
 
@@ -137,10 +134,10 @@ s64 __moddi3(s64 dividend, s64 divisor) {
     a.v = (u64)dividend;
     b.v = (u64)divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
-    if (a.p.hi & 0x80000000u) { a = u64_neg(a); neg ^= 1; }
-    if (b.p.hi & 0x80000000u) b = u64_neg(b);
+    if (a.p.hi & 0x80000000u) { a.v = u64_neg(a.v); neg ^= 1; }
+    if (b.p.hi & 0x80000000u) b.v = u64_neg(b.v);
     u64_udivmod(a, b, &r);
-    if (neg) r = u64_neg(r);
+    if (neg) r.v = u64_neg(r.v);
     return (s64)r.v;
 }
 
