@@ -40,11 +40,13 @@ typedef struct {
     const char *log;
 #ifdef TG_GLES_VM_PROGRAM
     GLboolean vm_linked;
+    GLboolean vm_shadow;
     tg_glsl_fragment_program vertex_ir,fragment_ir;
     tg_glsl_uber_vertex_shader vm_vertex;
     tg_glsl_fragment_shader vm_fragment;
     tg_uber_vertex_uniforms vm_uniforms;
     unsigned char vm_attributes[4],vm_sampler_units[TG_VM_TEXTURES];
+    unsigned char vm_shadow_position,vm_shadow_mvp,vm_shadow_varying;
 #endif
 } tg_gles_program;
 typedef struct tg_gles_program_state {

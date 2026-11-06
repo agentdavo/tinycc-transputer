@@ -7,7 +7,7 @@ python3 - "$ROOT/transputer/examples/dEngine/data/shaders" "$WORK/uber_source.h"
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]);lines=[]
-for name,file in [('vertex_source','v_uber.glsl'),('fragment_source','f_uber.glsl')]:
+for name,file in [('vertex_source','v_uber.glsl'),('fragment_source','f_uber.glsl'),('shadow_vertex_source','v_shadowMapGenerator.glsl'),('shadow_fragment_source','f_shadowMapGenerator.glsl')]:
     lines.append('static const char '+name+'[]={'+','.join(map(str,(p/file).read_bytes()))+',0};')
 Path(sys.argv[2]).write_text('\n'.join(lines)+'\n')
 PY

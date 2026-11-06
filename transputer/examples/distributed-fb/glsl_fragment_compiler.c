@@ -1,6 +1,6 @@
 #include "glsl_fragment_compiler.h"
 typedef struct { char name[32];unsigned char param,ret,entry; } function;
-typedef struct { const char *p; char tok[32]; int bad,vertex; tg_glsl_fragment_program *out; unsigned int samplers,function_count;function functions[8]; } parser;
+typedef struct { const char *p; char tok[32]; int bad,vertex,output_written; tg_glsl_fragment_program *out; unsigned int samplers,function_count;function functions[8]; } parser;
 typedef struct { int reg,width; } expr;
 static int letter(char c) { return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_'; }
 static int digit(char c) { return c>='0'&&c<='9'; }
@@ -49,11 +49,11 @@ static expr atom(parser *p)
         d=alloc(p);emit(p,TG_VM_MOV,d,f->ret,0,1,0,0);e.reg=d;e.width=1;return e;
     }
     if(eq(p->tok,"float")) { next(p);take(p,"(");e=expression(p);take(p,")");if(e.width!=1)p->bad=1;return e; }
-    if(eq(p->tok,"dot")||eq(p->tok,"cross")||eq(p->tok,"normalize")||eq(p->tok,"max")||eq(p->tok,"pow")) {
-        int op=eq(p->tok,"dot")?TG_VM_DOT:eq(p->tok,"cross")?TG_VM_CROSS:eq(p->tok,"normalize")?TG_VM_NORMALIZE:eq(p->tok,"max")?TG_VM_MAX:TG_VM_POW;
+    if(eq(p->tok,"dot")||eq(p->tok,"cross")||eq(p->tok,"normalize")||eq(p->tok,"max")||eq(p->tok,"pow")||eq(p->tok,"fract")) {
+        int op=eq(p->tok,"dot")?TG_VM_DOT:eq(p->tok,"cross")?TG_VM_CROSS:eq(p->tok,"normalize")?TG_VM_NORMALIZE:eq(p->tok,"max")?TG_VM_MAX:eq(p->tok,"fract")?TG_VM_FRACT:TG_VM_POW;
         int d,w,flags=0;expr a,b={0,0};next(p);take(p,"(");a=expression(p);
-        if(op!=TG_VM_NORMALIZE){take(p,",");b=expression(p);}take(p,")");
-        if(op==TG_VM_NORMALIZE)w=a.width;
+        if(op!=TG_VM_NORMALIZE&&op!=TG_VM_FRACT){take(p,",");b=expression(p);}take(p,")");
+        if(op==TG_VM_NORMALIZE||op==TG_VM_FRACT)w=a.width;
         else if(op==TG_VM_DOT||op==TG_VM_CROSS){if(a.width!=b.width||a.width<2||(op==TG_VM_CROSS&&a.width!=3)){p->bad=1;return a;}w=a.width;}
         else {if(a.width!=b.width&&a.width!=1&&b.width!=1){p->bad=1;return a;}w=a.width>b.width?a.width:b.width;flags=(a.width==1&&w>1?1:0)|(b.width==1&&w>1?2:0);}
         d=alloc(p);emit(p,op,d,a.reg,b.reg,w,flags,0);e.reg=d;e.width=op==TG_VM_DOT?1:w;return e;
@@ -79,6 +79,7 @@ static expr atom(parser *p)
         while(*s){if(*s=='.'){if(frac){p->bad=1;return e;}frac=1;}else {if(frac)scale*=0.1f;v=v*10+(*s-'0');}s++;}
         e.reg=alloc(p);e.width=1;p->out->initial[e.reg][0]=v*scale;next(p);return e;
     }
+    if(p->vertex&&p->output_written&&eq(p->tok,"gl_Position")){e.reg=p->out->output_register;e.width=4;next(p);return e;}
     i=tg_glsl_find_symbol(p->out,p->tok);
     if(i<0||p->out->symbols[i].kind==TG_GLSL_SAMPLER){p->bad=1;return e;}
     e.reg=p->out->symbols[i].slot;e.width=p->out->symbols[i].width;next(p);return e;
@@ -130,7 +131,7 @@ static int statements(parser *p,int is_main,int return_reg)
 {
     int wrote=0;
     while(!p->bad&&p->tok[0]&&!eq(p->tok,"}")) {
-        int w,index,is_output=0,i,component=-1;tg_glsl_symbol *s;expr e;
+        int w,index,is_output=0,i,component=-1,compound=0;tg_glsl_symbol *s;expr e;
         if(eq(p->tok,"return")) {
             if(is_main)return 0;next(p);e=expression(p);take(p,";");if(p->bad||e.width!=1)return 0;
             emit(p,TG_VM_MOV,return_reg,e.reg,0,1,0,0);emit(p,TG_VM_RETURN,0,0,0,1,0,0);wrote=1;continue;
@@ -151,8 +152,10 @@ static int statements(parser *p,int is_main,int return_reg)
                 if(is_output||component<0||p->tok[1]||component>=w)return 0;w=1;next(p);
             }
         }
+        if(eq(p->tok,"+")||eq(p->tok,"-")){compound=eq(p->tok,"+")?TG_VM_ADD:TG_VM_SUB;next(p);}
         take(p,"=");e=expression(p);take(p,";");if(p->bad||e.width!=w)return 0;
-        if(is_output){if(!wrote)p->out->output_register=alloc(p);emit(p,TG_VM_MOV,p->out->output_register,e.reg,0,4,0,0);wrote=1;}
+        if(compound){if(is_output||component>=0)return 0;emit(p,compound,p->out->symbols[index].slot,p->out->symbols[index].slot,e.reg,w,0,0);continue;}
+        if(is_output){if(!wrote)p->out->output_register=alloc(p);emit(p,TG_VM_MOV,p->out->output_register,e.reg,0,4,0,0);wrote=1;p->output_written=1;}
         else if(component>=0)emit(p,TG_VM_SET_COMPONENT,p->out->symbols[index].slot,e.reg,0,1,0,component);
         else emit(p,TG_VM_MOV,p->out->symbols[index].slot,e.reg,0,w,0,0);
     }
@@ -164,7 +167,7 @@ static int compile_source(const char *source,tg_glsl_fragment_program *out,int v
     if(!source||!out)return 0;
     out->symbol_count=out->register_count=0;out->instruction_count=0;out->output_register=0;
     for(i=0;i<TG_VM_REGS;i++)for(j=0;j<4;j++)out->initial[i][j]=0;
-    p.p=source;p.bad=0;p.vertex=vertex;p.out=out;p.samplers=0;p.function_count=0;next(&p);
+    p.p=source;p.bad=0;p.vertex=vertex;p.output_written=0;p.out=out;p.samplers=0;p.function_count=0;next(&p);
     if(eq(p.tok,"precision")){next(&p);if(!eq(p.tok,"lowp")&&!eq(p.tok,"mediump")&&!eq(p.tok,"highp"))return 0;next(&p);take(&p,"float");take(&p,";");}
     while(eq(p.tok,"uniform")||eq(p.tok,"varying")||eq(p.tok,"attribute")) {
         int kind=eq(p.tok,"uniform")?TG_GLSL_UNIFORM:eq(p.tok,"attribute")?TG_GLSL_ATTRIBUTE:TG_GLSL_VARYING,w;tg_glsl_symbol *s;

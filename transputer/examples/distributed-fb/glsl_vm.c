@@ -45,6 +45,8 @@ int tg_glsl_vm_run_from(tg_vm_state *s,const tg_vm_instruction *code,unsigned in
             if(in->width!=1 || in->aux>3 || in->flags)return TG_VM_INVALID;
             s->reg[in->dst][in->aux]=a[0]; continue;
         case TG_VM_GREATER: if(in->width!=1)return TG_VM_INVALID;r[0]=a[0]>b[0]?1.0f:0.0f;break;
+        case TG_VM_FRACT:
+            for(i=0;i<in->width;i++){int whole;if(a[i]!=a[i] || a[i]<-2147483000.0f || a[i]>2147483000.0f)return TG_VM_UNDEFINED;whole=(int)a[i];if((float)whole>a[i])whole--;r[i]=a[i]-(float)whole;}break;
         default: return TG_VM_INVALID;
         }
         for(i=0;i<(in->op==TG_VM_DOT?1u:in->width);i++)s->reg[in->dst][i]=r[i];

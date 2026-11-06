@@ -11,6 +11,7 @@ static tg_context target;static tg_gles_state gl;static tg_gles_draw_state draw;
 static tg_gles_texture_state textures;static unsigned int tile[80*60],arena[8*32*24];static int depth[80*60];
 #ifdef TG_GLES_FRAMEBUFFER
 static tg_gles_framebuffer_state framebuffers;static unsigned int scratch[32*24];static int rb_arena[4*32*24];
+static GLuint generated_shadow;
 #endif
 static const float pos[][3]={{-0.5f,0.5f,0},{-0.5f,-0.5f,0},{0.5f,0.5f,0}};
 static const float norm[][3]={{0,0,1},{0,0,1},{0,0,1}},uv[][2]={{0,0},{0,0},{0,0}};
@@ -59,20 +60,35 @@ static int run(void)
     if(glGetError()!=GL_NO_ERROR||tile[40*80+50]!=0xff0000ffu)return 7;
 #ifdef TG_GLES_FRAMEBUFFER
     if(mode==0) {
-        GLuint ft,fb,rb;unsigned char pixel[4];const tg_fragment_texture *view;
+        GLuint ft,fb,rb,sv,sf,sp;unsigned char pixel[4];const tg_fragment_texture *view;float unpacked,shadow_matrix[16];int k;
         glBindTexture(GL_TEXTURE_2D,tex[0]);glActiveTexture(GL_TEXTURE0+3);glGenTextures(1,&ft);glBindTexture(GL_TEXTURE_2D,ft);
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,32,24,0,GL_RGBA,GL_UNSIGNED_BYTE,0);
         glGenFramebuffers(1,&fb);glBindFramebuffer(GL_FRAMEBUFFER,fb);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ft,0);
         glGenRenderbuffers(1,&rb);glBindRenderbuffer(GL_RENDERBUFFER,rb);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,32,24);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,rb);
         if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)return 9;
-        glViewport(0,0,32,24);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        sv=compile(GL_VERTEX_SHADER,shadow_vertex_source,0);sf=compile(GL_FRAGMENT_SHADER,shadow_fragment_source,0);if(!sv||!sf)return 9;
+        sp=glCreateProgram();glAttachShader(sp,sv);glAttachShader(sp,sf);glLinkProgram(sp);glGetProgramiv(sp,GL_LINK_STATUS,&a);if(!a)return 9;glUseProgram(sp);
+        for(k=0;k<16;k++)shadow_matrix[k]=matrix[k];shadow_matrix[14]=-0.5f;
+        glUniformMatrix4fv(glGetUniformLocation(sp,"modelViewProjectionMatrix"),1,GL_FALSE,shadow_matrix);
+        a=glGetAttribLocation(sp,"a_vertex");glVertexAttribPointer(a,3,GL_FLOAT,GL_FALSE,0,pos);glEnableVertexAttribArray(a);
+        glViewport(0,0,32,24);glClearColor(1,1,1,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);glReadPixels(10,15,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
-        if(glGetError()!=GL_NO_ERROR||pixel[0]!=255||pixel[1]||pixel[2])return 10;
+        unpacked=(pixel[0]/255.0f)/16777216.0f+(pixel[1]/255.0f)/65536.0f+(pixel[2]/255.0f)/256.0f+pixel[3]/255.0f;
+        if(glGetError()!=GL_NO_ERROR||unpacked<0.247f||unpacked>0.254f)return 10;
         glBindFramebuffer(GL_FRAMEBUFFER,0);view=tgGlesTextureUnit(3);
-        if(!view||view->rgba[(15*32+10)*4]!=255)return 11;
-        glDeleteFramebuffers(1,&fb);glDeleteRenderbuffers(1,&rb);glDeleteTextures(1,&ft);glViewport(0,0,160,120);
-        glActiveTexture(GL_TEXTURE0+3);glBindTexture(GL_TEXTURE_2D,tex[3]);
+        if(!view||view->rgba[(15*32+10)*4]!=pixel[0]||view->rgba[(15*32+10)*4+3]!=pixel[3])return 11;
+        glUseProgram(p);glDeleteProgram(sp);glDeleteShader(sv);glDeleteShader(sf);
+        glDeleteFramebuffers(1,&fb);glDeleteRenderbuffers(1,&rb);glViewport(0,0,160,120);generated_shadow=ft;
+        glActiveTexture(GL_TEXTURE0+3);glBindTexture(GL_TEXTURE_2D,ft);
+    }
+    if(mode==7) {
+        glUniform3fv(glGetUniformLocation(p,"lightColorAmbient"),1,zero);glUniform3fv(glGetUniformLocation(p,"lightColorDiffuse"),1,ambient);
+        glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,tex[0]);glActiveTexture(GL_TEXTURE0+3);glBindTexture(GL_TEXTURE_2D,generated_shadow);
+        tg_clear(&target,0xff000000u);glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);
+        if(glGetError()!=GL_NO_ERROR||tile[40*80+50]!=0xff000000u)return 12;
+        glBindTexture(GL_TEXTURE_2D,tex[3]);tg_clear(&target,0xff000000u);glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);
+        if(glGetError()!=GL_NO_ERROR||tile[40*80+50]==0xff000000u)return 13;
     }
 #endif
     glUseProgram(0);glDeleteProgram(p);glDeleteShader(v);glDeleteShader(f);

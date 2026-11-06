@@ -21,13 +21,21 @@ static int bind_varying(tg_gles_program *p,const char *name,int input)
 int tgGlesVmLink(tg_gles_program *p)
 {
     unsigned int features=0,used=0;int i,j,k;
+    p->vm_shadow=tg_glsl_find_symbol(&p->vertex_ir,"a_normal")<0;
     if(tg_glsl_find_symbol(&p->vertex_ir,"a_tangent")>=0)features|=TG_FRAG_BUMP;
     if(tg_glsl_find_symbol(&p->vertex_ir,"lightPOVPVMMatrix")>=0)features|=TG_FRAG_SHADOW;
-    if(!tg_glsl_uber_vertex_init(&p->vm_vertex,&p->vertex_ir,features))return 0;
+    if(p->vm_shadow) {
+        int a=tg_glsl_find_symbol(&p->vertex_ir,"a_vertex"),m=tg_glsl_find_symbol(&p->vertex_ir,"modelViewProjectionMatrix"),v=tg_glsl_find_symbol(&p->vertex_ir,"position");
+        if(a<0||m<0||v<0||p->vertex_ir.symbols[a].kind!=TG_GLSL_ATTRIBUTE||p->vertex_ir.symbols[a].width!=3||
+           p->vertex_ir.symbols[m].kind!=TG_GLSL_UNIFORM||p->vertex_ir.symbols[m].width!=16||
+           p->vertex_ir.symbols[v].kind!=TG_GLSL_VARYING||p->vertex_ir.symbols[v].width!=4)return 0;
+        p->vm_shadow_position=p->vertex_ir.symbols[a].slot;p->vm_shadow_mvp=p->vertex_ir.symbols[m].slot;p->vm_shadow_varying=p->vertex_ir.symbols[v].slot;
+        tg_glsl_fragment_init(&p->vertex_ir,&p->vm_vertex.vm);
+    } else if(!tg_glsl_uber_vertex_init(&p->vm_vertex,&p->vertex_ir,features))return 0;
     tg_glsl_shader_init(&p->vm_fragment,&p->fragment_ir);p->vm_fragment.vm.pow_fn=integer_pow;
     if(!bind_varying(p,"v_texcoord",TG_GLSL_INPUT_UV)||!bind_varying(p,"v_normal",TG_GLSL_INPUT_NORMAL)||
        !bind_varying(p,"lightVec",TG_GLSL_INPUT_LIGHT)||!bind_varying(p,"halfVec",TG_GLSL_INPUT_HALF)||
-       !bind_varying(p,"lightPOVPosition",TG_GLSL_INPUT_LIGHT_CLIP))return 0;
+       !bind_varying(p,"lightPOVPosition",TG_GLSL_INPUT_LIGHT_CLIP)||!bind_varying(p,"position",TG_GLSL_INPUT_LIGHT_CLIP))return 0;
     for(i=0;i<p->fragment_ir.symbol_count;i++)if(p->fragment_ir.symbols[i].kind==TG_GLSL_VARYING && p->vm_fragment.varying_input[i]==TG_GLSL_INPUT_NONE)return 0;
     for(i=0;i<4;i++)p->vm_attributes[i]=255;
     if(p->bound_attribute[0])for(i=0;i<4;i++)if(same(p->bound_attribute,attributes[i])){p->vm_attributes[i]=(unsigned char)p->attribute_index;used|=1u<<p->attribute_index;}
@@ -92,7 +100,8 @@ int tgGlesVmUniformSampler(tg_gles_program *p,int loc,int value)
 static int prepare(void *user)
 {
     tg_gles_program *p=user;int i;
-    if(!tg_glsl_uber_vertex_uniforms(&p->vm_vertex,&p->vm_uniforms))return 0;
+    if(p->vm_shadow) { int j;for(i=0;i<4;i++)for(j=0;j<4;j++)p->vm_vertex.vm.reg[p->vm_shadow_mvp+i][j]=p->vm_uniforms.mvp[i*4+j]; }
+    else if(!tg_glsl_uber_vertex_uniforms(&p->vm_vertex,&p->vm_uniforms))return 0;
     for(i=0;i<p->fragment_ir.symbol_count;i++)if(p->fragment_ir.symbols[i].kind==TG_GLSL_SAMPLER) {
         tg_glsl_symbol *s=&p->fragment_ir.symbols[i];const tg_fragment_texture *texture=tgGlesTextureUnit(p->vm_sampler_units[s->slot]);
         if(!texture || !tg_glsl_shader_texture(&p->vm_fragment,s->name,texture))return 0;
@@ -102,9 +111,16 @@ static int prepare(void *user)
 static int shade_vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_vertex *v,void *user)
 {
     tg_gles_program *p=user;tg_uber_vertex_input in;tg_uber_vertex_output out;tg_gles_state *state=tgGlesCurrentState();int i;float w;
-    for(i=0;i<3;i++){in.position[i]=a[p->vm_attributes[0]][i];in.normal[i]=a[p->vm_attributes[1]][i];in.tangent[i]=p->vm_attributes[3]==255?0:a[p->vm_attributes[3]][i];}
-    for(i=0;i<2;i++)in.uv[i]=a[p->vm_attributes[2]][i];
-    if(tg_glsl_uber_vertex_run_prepared(&p->vm_vertex,&in,&out)!=TG_FRAGMENT_OK)return 0;
+    if(p->vm_shadow) {
+        static const tg_fragment_varyings zero={0};tg_vm_state *vm=&p->vm_vertex.vm;out.varying=zero;
+        for(i=0;i<3;i++)vm->reg[p->vm_shadow_position][i]=a[p->vm_attributes[0]][i];
+        if(tg_glsl_vm_run_from(vm,p->vertex_ir.code,p->vertex_ir.instruction_count,p->vertex_ir.entry_pc)!=TG_VM_OK)return 0;
+        for(i=0;i<4;i++){out.clip[i]=vm->reg[p->vertex_ir.output_register][i];out.varying.light_clip[i]=vm->reg[p->vm_shadow_varying][i];}
+    } else {
+        for(i=0;i<3;i++){in.position[i]=a[p->vm_attributes[0]][i];in.normal[i]=a[p->vm_attributes[1]][i];in.tangent[i]=p->vm_attributes[3]==255?0:a[p->vm_attributes[3]][i];}
+        for(i=0;i<2;i++)in.uv[i]=a[p->vm_attributes[2]][i];
+        if(tg_glsl_uber_vertex_run_prepared(&p->vm_vertex,&in,&out)!=TG_FRAGMENT_OK)return 0;
+    }
     w=out.clip[3];if(w<=0.01f || out.clip[0]<-w || out.clip[0]>w || out.clip[1]<-w || out.clip[1]>w || out.clip[2]<-w || out.clip[2]>w)return 0;
     v->x=(int)(state->viewport_x+(1.0f+out.clip[0]/w)*0.5f*state->viewport_width);
 #ifdef TG_GLES_FRAMEBUFFER
