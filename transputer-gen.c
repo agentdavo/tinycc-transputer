@@ -1247,6 +1247,7 @@ struct local_patch {
     int tcc_offset;     /* TCC's internal offset (usually negative) */
     int opcode;         /* The opcode used (LDL, STL, LDLP) */
     int placeholder_size; /* 2 or 3 bytes reserved at emit time */
+    int proven_nonvolatile_read; /* direct read of an unescaped, nonvolatile int */
     struct local_patch *next;
 };
 
@@ -1906,6 +1907,7 @@ static void emit_local_op(int op, int tcc_offset_bytes) {
     p->instr_offset = ind;
     p->tcc_offset = tcc_offset_bytes;
     p->opcode = op;
+    p->proven_nonvolatile_read = 0;
     p->next = local_patches;
     if (!local_patches)
         local_patches_tail = p;
@@ -2057,6 +2059,7 @@ static void tp_local_patch_append(int off, int op, int tcc_offset_bytes)
     p->instr_offset = off;
     p->tcc_offset = tcc_offset_bytes;
     p->opcode = op;
+    p->proven_nonvolatile_read = 0;
     p->placeholder_size = 3;
     p->next = NULL;
 
@@ -6485,6 +6488,7 @@ static int tp_relax_bail(const char *why)
 #define TPS_ROUNDS  6
 
 struct tps_ann {
+    int proven_pair;        /* original second index load + 1, or 0 */
     int depth;              /* eval-stack depth before this insn, -1 unknown */
     int delta;              /* stack effect, valid when known */
     int succ1;              /* fall-through/target successor, -1 = none */
@@ -6779,6 +6783,22 @@ static int tps_free(struct tp_relax_insn *ins, struct tps_ann *an,
     return 1;
 }
 
+/* A local placeholder survives until relaxation, and is dropped on emitter
+ * rollback.  Check both its final byte and its patched workspace operand so
+ * a later rewrite cannot accidentally transfer the proof to a different load. */
+static int tps_proven_nonvolatile_ldl(struct tp_relax_insn *ins, int i)
+{
+    struct local_patch *p;
+    int end = func_start_ind + ins[i].old_off + ins[i].old_len;
+    for (p = local_patches; p; p = p->next)
+        if (p->proven_nonvolatile_read && p->opcode == TP_OP_LDL &&
+            p->instr_offset + p->placeholder_size == end &&
+            (p->tcc_offset & 3) == 0 &&
+            ins[i].operand == func_frame_words + p->tcc_offset / 4)
+            return 1;
+    return 0;
+}
+
 /*
  * Mark the redundant workspace round trips in a decoded function.  `top` is
  * the number of words tp_gaddr_cache put over the locals.
@@ -7029,6 +7049,25 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
         k = idx[ins[i].target_old];
         if (k >= 0)
             an[k].head = 1;
+    }
+
+    /* Record the original pair before S4 removes the address staging store.
+     * Both reads must be proven nonvolatile, and the intervening store must
+     * not change the index. Branch entries and relocations are barriers. */
+    for (i = 0; i < n && !tp_t414() && !func_uses_inline_asm; i++) {
+        int j[7], k;
+        j[0] = i;
+        for (k = 1; k < 7 && j[k-1] >= 0; k++) j[k] = tps_next(ins, an, n, j[k-1]);
+        if (k != 7 || j[6] < 0 || ins[j[0]].opcode != TP_ENC_LDL ||
+            ins[j[1]].opcode != TP_ENC_LDLP || ins[j[2]].opcode != TP_ENC_OPR ||
+            ins[j[2]].operand != TP_OPR_WSUB || ins[j[3]].opcode != TP_ENC_STL ||
+            ins[j[3]].operand == ins[j[0]].operand ||
+            ins[j[4]].opcode != TP_ENC_LDL || ins[j[4]].operand != ins[j[0]].operand ||
+            ins[j[5]].opcode != TP_ENC_LDLP || ins[j[5]].operand != ins[j[1]].operand ||
+            ins[j[6]].opcode != TP_ENC_OPR || ins[j[6]].operand != TP_OPR_FPLDNLSNI ||
+            !tps_proven_nonvolatile_ldl(ins, j[0]) || !tps_proven_nonvolatile_ldl(ins, j[4]) ||
+            !tps_free(ins, an, j[0], j[6])) continue;
+        an[j[0]].proven_pair = j[4] + 1;
     }
 
     /* ---- 3. evaluation-stack depth within each block ---- */
@@ -7613,6 +7652,38 @@ try_copy:
 
         if (!changed)
             break;
+    }
+
+    /* S4 may expose:
+     *   LDL i; LDLP a; WSUB; LDL i; LDLP a; FPLDNLSNI
+     * The already-computed address can instead be duplicated:
+     *   LDL i; LDLP a; WSUB; DUP; FPLDNLSN
+     * The floating-point access remains in place and occurs exactly once. */
+    for (i = 0; i < n; i++) {
+        int j[6], k;
+        if (!an[i].proven_pair || an[i].dead) continue;
+        j[0] = i;
+        for (k = 1; k < 6 && j[k-1] >= 0; k++) j[k] = tps_next(ins, an, n, j[k-1]);
+        /* The original indexed load overwrites the deeper integer-stack
+         * cells; the duplicated form preserves different garbage there. */
+        if (k != 6 || j[5] < 0 || an[i].proven_pair != j[3] + 1 ||
+            an[j[2]].depth != 2 ||
+            ins[j[0]].opcode != TP_ENC_LDL || ins[j[1]].opcode != TP_ENC_LDLP ||
+            ins[j[2]].opcode != TP_ENC_OPR || ins[j[2]].operand != TP_OPR_WSUB ||
+            ins[j[3]].opcode != TP_ENC_LDL || ins[j[3]].operand != ins[j[0]].operand ||
+            ins[j[4]].opcode != TP_ENC_LDLP || ins[j[4]].operand != ins[j[1]].operand ||
+            ins[j[5]].opcode != TP_ENC_OPR || ins[j[5]].operand != TP_OPR_FPLDNLSNI ||
+            !tps_proven_nonvolatile_ldl(ins, j[0]) || !tps_proven_nonvolatile_ldl(ins, j[3]) ||
+            !tps_free(ins, an, j[0], j[5])) continue;
+        ins[j[3]].opcode = TP_ENC_OPR; ins[j[3]].operand = TP_OPR_DUP;
+        ins[j[3]].new_len = tp_encode_len(TP_ENC_OPR, TP_OPR_DUP);
+        an[j[3]].use = -1;
+        an[j[3]].known = tps_effect(ins[j[3]].opcode, ins[j[3]].operand, &an[j[3]].delta, &an[j[3]].reads);
+        ins[j[4]].opcode = -1; an[j[4]].dead = 1;
+        an[j[4]].known = 1; an[j[4]].delta = an[j[4]].reads = 0;
+        ins[j[5]].operand = TP_FPU_LDNLSN;
+        an[j[5]].known = tps_effect(ins[j[5]].opcode, ins[j[5]].operand, &an[j[5]].delta, &an[j[5]].reads);
+        removed++;
     }
 
     /* ---- 5a. delete a REV by swapping the two pure pushes that feed it ----
@@ -10568,12 +10639,30 @@ static int tp_operand_is_simple(const SValue *sv)
     return v == VT_CONST || (v >= TREG_W0 && v < NB_REGS);
 }
 
+/* A cast can erase the lvalue's volatile qualifier.  Require the original
+ * active local symbol too, and reject address-taken locals: a volatile access
+ * could otherwise have been made through a cast pointer to that object. */
+static int tp_simple_nonvolatile_local(const SValue *sv)
+{
+    Sym *s;
+    if (sv->type.t & VT_VOLATILE)
+        return 0;
+    for (s = local_stack; s; s = s->prev)
+        if (s == sv->sym && (s->r & (VT_VALMASK | VT_LVAL)) == (VT_LOCAL | VT_LVAL) &&
+            s->c == sv->c.i && !(s->type.t & (VT_VOLATILE | VT_BITFIELD)) &&
+            (s->type.t & VT_BTYPE) == VT_INT && !s->a.addrtaken)
+            return 1;
+    return 0;
+}
+
 static void tp_push_simple(const SValue *sv)
 {
     int v = sv->r & VT_VALMASK;
 
     if (sv->r & VT_LVAL) {
         emit_local_op(TP_OP_LDL, sv->c.i);
+        if (!nocode_wanted && local_patches && tp_simple_nonvolatile_local(sv))
+            local_patches->proven_nonvolatile_read = 1;
         abcreg_push(1);
     } else if (v == VT_CONST) {
         tp_ldc_pooled((int)sv->c.i);
