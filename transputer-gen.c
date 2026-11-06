@@ -2858,7 +2858,13 @@ ST_FUNC void load(int r, SValue *sv) {
                 if (sv->c.i)
                     Tp_ADC(sv->c.i);
             } else {
-                tp_ldc_pooled(sv->c.i);
+                if (bt == VT_FLOAT) {
+                    union { float f; uint32_t u; } bits;
+                    bits.f = sv->c.f;
+                    tp_ldc_pooled(bits.u);
+                } else {
+                    tp_ldc_pooled(sv->c.i);
+                }
             }
             Tp_STL(r);
         } else if (v == VT_LOCAL) {
