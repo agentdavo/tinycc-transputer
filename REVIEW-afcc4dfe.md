@@ -94,7 +94,9 @@ defined behavior.
   reduced that phase to 562,022 cycles. The `0xffffffff` phase fell from
   1,680,222 to 571,922 cycles. The regression includes borrow and high-bit
   boundaries. `test_u64_div_host.py` checks 100,000 deterministic signed and
-  unsigned quotient/remainder pairs against host integer arithmetic.
+  unsigned quotient/remainder pairs against host integer arithmetic, plus
+  every divisor from 1 through 65539 with full-width dividends to cover the
+  small-divisor path and its boundary.
   Simplifying two-word negation removed an extra struct-by-value helper call.
   Estimated cycles per 100 signed divisions fell from 163,522 to 124,322
   for `-65535`, and from 633,122 to 593,922 for `0x100000003`.

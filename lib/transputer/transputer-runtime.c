@@ -1,7 +1,8 @@
 /* Transputer 64-bit arithmetic runtime for libtcc1.
  *
- * These routines intentionally use only 32-bit operations internally, so
- * compiling the runtime cannot recursively introduce calls to itself.
+ * Division uses 32-bit operations internally. Logical 64-bit shifts and
+ * negation rely on native lowering; code-generation tests guard the shifts
+ * against recursive calls to these helpers.
  */
 
 typedef long long s64;

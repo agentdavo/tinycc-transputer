@@ -42,9 +42,14 @@ def main():
             if (a < 0) != (b < 0):
                 quotient = -quotient
             assert (sdiv(a, b), smod(a, b)) == (quotient, a - quotient * b)
+        # Exercise every divisor in the base-65536 path, plus the adjacent
+        # restoring-division path, with full-width dividends.
+        for divisor in range(1, 65540):
+            dividend = rng.getrandbits(64) | (1 << 63)
+            assert (udiv(dividend, divisor), umod(dividend, divisor)) == divmod(dividend, divisor)
         for fn in (udiv, umod, sdiv, smod):
             assert fn(123, 0) == 0
-    print("100,000 signed and unsigned quotient/remainder pairs passed")
+    print("100,000 signed and unsigned pairs and 65,539 small divisors passed")
 
 
 if __name__ == "__main__":
