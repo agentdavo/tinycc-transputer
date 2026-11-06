@@ -1484,6 +1484,13 @@ static int tp_fpu_indexed_ok(void)
     return ok;
 }
 
+/* Classify only the direct workspace opcodes; callers apply their own
+ * operand bounds and account for any indirect access following LDLP. */
+static int tp_is_direct_workspace_op(int opc)
+{
+    return opc == TP_OP_LDL || opc == TP_OP_STL || opc == TP_OP_LDLP;
+}
+
 static void emit_instr(int opc, int v) {
     uint8_t buf[12];  /* Max instruction length */
     int len;
@@ -1509,7 +1516,7 @@ static void emit_instr(int opc, int v) {
     /* Track highest fixed workspace slot used for dynamic frame sizing.
      * Only counts direct register/scratch slot accesses (non-negative operands).
      * Local variable accesses go through emit_local_op() and are NOT counted here. */
-    if ((opc == TP_OP_LDL || opc == TP_OP_STL || opc == TP_OP_LDLP) &&
+    if (tp_is_direct_workspace_op(opc) &&
         v >= 0 && v < FRAME_SLOT_MIN_LOCALS) {
         /* LDLP of a fixed slot is always followed by an indirect access
          * (LDNL/STNL, FPLDNLDB/FPSTNLDB, ...) that can reach slot+1 for the
@@ -1521,7 +1528,7 @@ static void emit_instr(int opc, int v) {
     /* A call word being materialised must not read or overwrite one that is
      * already staged (see tp_stage_push). */
     if (tp_staging_push && !nocode_wanted && v >= 0 &&
-        (opc == TP_OP_LDL || opc == TP_OP_STL || opc == TP_OP_LDLP)) {
+        tp_is_direct_workspace_op(opc)) {
         for (i = 0; i < 3; i++)
             if (v >= tp_staged_lo[i] && v < tp_staged_hi[i])
                 tcc_internal_error("call word staged in a slot the next one uses");
