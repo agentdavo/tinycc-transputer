@@ -49,9 +49,10 @@ numbers and line numbers in the original review refer to the older source.
   byte-load mask removal and capped inline memset are implemented. Debug
   and switch-table functions still bypass compiler relaxation, dense switch
   tables are opt-in. The 64-bit division runtime uses 32-bit division for
-  32-bit dividends and for larger dividends with divisors up to 65535. Other
-  inputs retain the 64-step division loop. `test_u64_div_runtime` exercises
-  both paths on the T414, T800 and T9000 emulator models.
+  32-bit dividends and for larger dividends with divisors up to 65535. Larger
+  32-bit divisors use 32 iterations after dividing the high word. Divisors
+  wider than 32 bits retain the 64-step loop. `test_u64_div_runtime` exercises
+  these paths on the T414, T800 and T9000 emulator models.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of

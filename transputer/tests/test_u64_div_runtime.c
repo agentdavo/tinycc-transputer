@@ -23,6 +23,8 @@ void test_main(void)
     ok &= __umoddi3(small, 0xffffffffu) == small;
     ok &= __udivdi3(high, 0x10000) == 0xffffffffffffULL;
     ok &= __umoddi3(high, 0x10000) == 0xffff;
+    ok &= __udivdi3(high, 0xffffffffu) == 0x100000001ULL;
+    ok &= __umoddi3(high, 0xffffffffu) == 0;
     ok &= __divdi3(-4294967297LL, 7) == -613566756LL;
     ok &= __moddi3(-4294967297LL, 7) == -5;
     message = ok ? "DIVFASTOK\n" : "FAIL\n";
