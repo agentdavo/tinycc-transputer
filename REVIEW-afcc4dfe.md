@@ -128,6 +128,35 @@ defined behavior.
   `test_u64_shift_host.py` also
   checks 5,006 values against host arithmetic for every shift count from 0
   through 65.
+  A separate trial staged native shift operands directly, reserving result
+  slots before emission and retaining the complex-load fallback. It changed
+  a small shift object but did not change any of the three application ELFs
+  below, so the trial was not merged. `test_shift_staging.c` checks counts
+  0, 1, 31, 32, 33, 63, 64 and 65, live values, packed loads, nested calls and
+  signed shifts on all six targets with both compilers. The last two counts
+  record the existing lowering convention; such C shifts are undefined.
+
+  The matched `-mt800` comparison used compiler source `5afc5a61` (baseline
+  compiler SHA-256 `47d708f6a3c7418bd907f9b74dff48d42f1b29a8572d9cee3d7324c4fc6cec6f`,
+  trial `6ac7731efe3848bff6dc5e7a959cc0c9f87c42209f767fbbf277834789587aa2`),
+  runtime archive `dbb6d39c4e13aec053eea8fbae2d550e1dbc64bc3cfb1b8b6fa5b006f3169e06`,
+  and T4 binary `2c5972c20329d9730726ebea9ed966263c86f275c22ae4fa7c90f765dc1ce884`.
+  Doom's benchmark reported `check 0` and identical phase hashes and estimated
+  cycles before and after: column `b6eadcb0`/2,608,228; tcolumn
+  `5a9ca119`/721,001; span `05d26359`/4,413,304; segloop
+  `6b9d321f`/2,445,729; fixedmul `58d667ae`/663,647; fixeddiv
+  `63da69d9`/816,598; palblit `23091322`/1,718,015; rowcopy
+  `23091322`/170,250; fill `a9ac55c5`/992,020; masked
+  `9c0f0700`/1,463,818; mapplane `e3973655`/8,783,742. Its unused Doom
+  functions had unresolved references under the linker's warning policy.
+  One-iteration CoreMark had 5,008,259 estimated cycles in each build, seed
+  CRC `e9f5`, list `e714`, matrix `1fd7`, and state `8e3a`. The model-3,
+  256x256, one-node raytracer matched the reference image in both runs and
+  measured 3,655,261,764 estimated cycles and 1,176,409,704 instructions.
+  For this count, a private T4 build from `2e44501` printed its existing
+  cycle counter from the worker at exit (binary SHA-256
+  `5be8f05ddd56002cfa20813f10a4711b91352b2cbe8cef09d12fc96ffd78f617`).
+  These are T800 emulator estimates, not hardware timings or CoreMark scores.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of
