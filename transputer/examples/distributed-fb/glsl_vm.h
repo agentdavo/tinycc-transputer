@@ -3,7 +3,7 @@
 #ifndef TG_GLSL_VM_H
 #define TG_GLSL_VM_H
 #include "gles2_fragment.h"
-#define TG_VM_REGS 32
+#define TG_VM_REGS 96
 #define TG_VM_TEXTURES 8
 #define TG_VM_MAX_INSTRUCTIONS 256
 enum { TG_VM_MOV=1,TG_VM_ADD,TG_VM_SUB,TG_VM_MUL,TG_VM_DIV,TG_VM_DOT,

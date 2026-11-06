@@ -126,9 +126,51 @@ int tg_glsl_compile_fragment(const char *source,tg_glsl_fragment_program *out)
         next(&p);take(&p,";");if(p.bad)return 0;
     }
     take(&p,"void");take(&p,"main");take(&p,"(");if(eq(p.tok,"void"))next(&p);take(&p,")");take(&p,"{");
-    take(&p,"gl_FragColor");take(&p,"=");e=expression(&p);take(&p,";");take(&p,"}");
-    if(p.bad||p.tok[0]||e.width!=4)return 0;
-    out->output_register=e.reg;return 1;
+    j=0;
+    while(!p.bad && p.tok[0] && !eq(p.tok,"}")) {
+        int w=width(p.tok),index,is_output=0;tg_glsl_symbol *s;
+        if(w) {
+            next(&p);if(!letter(p.tok[0])||out->symbol_count>=TG_GLSL_SYMBOLS||tg_glsl_find_symbol(out,p.tok)>=0)return 0;
+            index=out->symbol_count++;s=&out->symbols[index];i=0;while(p.tok[i]){s->name[i]=p.tok[i];i++;}s->name[i]=0;
+            s->kind=TG_GLSL_LOCAL;s->width=w;s->slot=alloc(&p);next(&p);
+            if(eq(p.tok,";")){next(&p);continue;}
+        } else {
+            is_output=eq(p.tok,"gl_FragColor");index=is_output?-1:tg_glsl_find_symbol(out,p.tok);
+            if(!is_output && (index<0||out->symbols[index].kind!=TG_GLSL_LOCAL))return 0;
+            w=is_output?4:out->symbols[index].width;next(&p);
+        }
+        take(&p,"=");e=expression(&p);take(&p,";");if(p.bad||e.width!=w)return 0;
+        if(is_output){if(!j)out->output_register=alloc(&p);emit(&p,TG_VM_MOV,out->output_register,e.reg,0,4,0,0);j=1;}
+        else emit(&p,TG_VM_MOV,out->symbols[index].slot,e.reg,0,w,0,0);
+    }
+    take(&p,"}");if(p.bad||p.tok[0]||!j)return 0;return 1;
 }
 void tg_glsl_fragment_init(const tg_glsl_fragment_program *p,tg_vm_state *s)
 { int i,j;for(i=0;i<TG_VM_REGS;i++)for(j=0;j<4;j++)s->reg[i][j]=p->initial[i][j];for(i=0;i<TG_VM_TEXTURES;i++)s->texture[i]=0;s->sqrt_fn=0;s->pow_fn=0; }
+
+int tg_glsl_compile_fragment_variant(const char *src,unsigned int features,tg_glsl_fragment_program *out)
+{
+    static char text[8192];unsigned char parent[16],condition[16],seen_else[16];
+    int depth=0,active=1,n=0;
+    if(!src||(features&~(TG_FRAG_BUMP|TG_FRAG_SPEC|TG_FRAG_SHADOW)))return 0;
+    while(*src) {
+        const char *line=src,*end,*p;while(*src&&*src!='\n')src++;end=src;if(*src)src++;
+        p=line;while(p<end&&(*p==' '||*p=='\t'||*p=='\r'))p++;
+        if(p<end&&*p=='#') {
+            char op[16],name[32];int i=0,bit=0;p++;while(p<end&&(*p==' '||*p=='\t'))p++;
+            while(p<end&&letter(*p)){if(i>=15)return 0;op[i++]=*p++;}op[i]=0;
+            while(p<end&&(*p==' '||*p=='\t'))p++;i=0;
+            while(p<end&&(letter(*p)||digit(*p))){if(i>=31)return 0;name[i++]=*p++;}name[i]=0;
+            while(p<end&&(*p==' '||*p=='\t'||*p=='\r'))p++;
+            if(p<end&&!(p+1<end&&p[0]=='/'&&p[1]=='/'))return 0;
+            if(eq(op,"ifdef")) {
+                if(eq(name,"BUMP_MAPPING"))bit=TG_FRAG_BUMP;else if(eq(name,"SPEC_MAPPING"))bit=TG_FRAG_SPEC;else if(eq(name,"SHADO_MAPPING"))bit=TG_FRAG_SHADOW;else return 0;
+                if(depth>=16)return 0;parent[depth]=active;condition[depth]=!!(features&bit);seen_else[depth]=0;active=active&&condition[depth];depth++;
+            } else if(eq(op,"else")) { if(name[0]||!depth||seen_else[depth-1])return 0;seen_else[depth-1]=1;active=parent[depth-1]&&!condition[depth-1]; }
+            else if(eq(op,"endif")) { if(name[0]||!depth)return 0;depth--;active=parent[depth]; }
+            else return 0;
+        } else if(active) while(line<end){if(n>=8190)return 0;text[n++]=*line++;}
+        if(n>=8191)return 0;text[n++]='\n';
+    }
+    if(depth)return 0;text[n]=0;return tg_glsl_compile_fragment(text,out);
+}
