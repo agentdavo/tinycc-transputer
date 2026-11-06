@@ -95,7 +95,9 @@ defined behavior.
   regression checks zero, 1, 31, 32, 33, 63 and overshift counts on T414, T800
   and T9000. The benchmark's 100 variable logical-right shifts fell from
   24,883 to 17,605 estimated T800 cycles. The helpers still use word operations
-  instead of single LSHL/LSHR instructions.
+  instead of single LSHL/LSHR instructions. `test_u64_shift_host.py` also
+  checks 5,006 values against host arithmetic for every shift count from 0
+  through 65.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of
