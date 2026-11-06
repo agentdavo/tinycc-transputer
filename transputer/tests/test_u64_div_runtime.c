@@ -12,6 +12,8 @@ void test_main(void)
     int ok = 1;
     volatile u64 high = 0xffffffffffffffffULL;
     volatile u64 small = 0x12345678ULL;
+    volatile u64 powers = 1;
+    int i;
 
     ok &= __udivdi3(high, 65535) == 0x1000100010001ULL;
     ok &= __umoddi3(high, 65535) == 0;
@@ -35,6 +37,11 @@ void test_main(void)
     ok &= __umoddi3(high, 0x8000000000000000ULL) == 0x7fffffffffffffffULL;
     ok &= __udivdi3(high, 0) == 0;
     ok &= __umoddi3(high, 0) == 0;
+    for (i = 0; i < 32; i++) {
+        ok &= __udivdi3(high, powers) == (high >> i);
+        ok &= __umoddi3(high, powers) == (high & (powers - 1));
+        powers <<= 1;
+    }
     message = ok ? "DIVFASTOK\n" : "FAIL\n";
     while (*message)
         *(volatile unsigned *)0x10000000u = (unsigned char)*message++;

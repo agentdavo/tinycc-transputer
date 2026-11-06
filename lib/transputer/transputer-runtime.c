@@ -80,6 +80,23 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         if (rem_out) *rem_out = remainder;
         return result;
     }
+    if (divisor.p.hi == 0 && (divisor.p.lo & (divisor.p.lo - 1)) == 0) {
+        u32 mask = divisor.p.lo - 1;
+        u32 power = divisor.p.lo;
+        int shift = 0;
+
+        while (power > 1) {
+            power >>= 1;
+            shift++;
+        }
+        result.p.hi = dividend.p.hi >> shift;
+        result.p.lo = dividend.p.lo >> shift;
+        if (shift)
+            result.p.lo |= dividend.p.hi << (32 - shift);
+        remainder.p.lo = dividend.p.lo & mask;
+        if (rem_out) *rem_out = remainder;
+        return result;
+    }
     if (divisor.p.hi == 0) {
         /* The high quotient word can be computed directly. The remaining
          * loop divides the low word with that operation's remainder. */
