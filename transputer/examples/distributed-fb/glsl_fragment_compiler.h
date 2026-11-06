@@ -18,6 +18,7 @@ typedef struct {
  * normalize, max and pow. It rejects all other syntax, rather than silently
  * accepting a shader with different semantics. Not full GLSL ES. */
 int tg_glsl_compile_fragment(const char *source,tg_glsl_fragment_program *out);
+int tg_glsl_compile_vertex(const char *source,tg_glsl_fragment_program *out);
 /* Preprocess the dEngine uber feature branches, then compile. */
 int tg_glsl_compile_fragment_variant(const char *source,unsigned int features,tg_glsl_fragment_program *out);
 int tg_glsl_compile_vertex_variant(const char *source,unsigned int features,tg_glsl_fragment_program *out);

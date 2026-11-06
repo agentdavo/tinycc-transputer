@@ -196,6 +196,8 @@ static int compile_source(const char *source,tg_glsl_fragment_program *out,int v
 }
 int tg_glsl_compile_fragment(const char *source,tg_glsl_fragment_program *out)
 { return compile_source(source,out,0); }
+int tg_glsl_compile_vertex(const char *source,tg_glsl_fragment_program *out)
+{ return compile_source(source,out,1); }
 void tg_glsl_fragment_init(const tg_glsl_fragment_program *p,tg_vm_state *s)
 { int i,j;for(i=0;i<TG_VM_REGS;i++)for(j=0;j<4;j++)s->reg[i][j]=p->initial[i][j];for(i=0;i<TG_VM_TEXTURES;i++)s->texture[i]=0;s->sqrt_fn=0;s->pow_fn=0;s->clamp_negative_pow=0; }
 

@@ -175,6 +175,13 @@ void glCompileShader(GLuint id)
     if(!s || !(h=shader(s,id))) return;
     pp=!h->overflow && preprocess(h->source,preprocessed,sizeof(preprocessed));
     h->compiled=(pp && compile(h,preprocessed)) ? GL_TRUE : GL_FALSE;
+#ifdef TG_GLES_VM_PROGRAM
+    h->vm_compiled=GL_FALSE;
+    if(pp && !h->compiled) {
+        int ok=h->type==GL_VERTEX_SHADER ? tg_glsl_compile_vertex(preprocessed,&h->ir) : tg_glsl_compile_fragment(preprocessed,&h->ir);
+        if(ok) { h->compiled=GL_TRUE; h->vm_compiled=GL_TRUE; }
+    }
+#endif
     h->log=h->compiled ? "" : (h->overflow ? "shader source exceeds implementation limit" : (!pp ? "unsupported or malformed shader preprocessor input" : "unsupported GLSL ES shader syntax or operations"));
 }
 void glGetShaderiv(GLuint id, GLenum pname, GLint *params)
@@ -256,6 +263,22 @@ void glLinkProgram(GLuint id)
     if(!p->vertex_shader || !p->fragment_shader) { p->log="vertex and fragment shaders required"; return; }
     v=&s->shaders[p->vertex_shader-1]; f=&s->shaders[p->fragment_shader-1];
     if(!v->compiled || !f->compiled) { p->log="attached shader did not compile"; return; }
+#ifdef TG_GLES_VM_PROGRAM
+    p->vm_linked=GL_FALSE;
+    if(v->vm_compiled || f->vm_compiled) {
+        int i,j;
+        if(!v->vm_compiled || !f->vm_compiled) { p->log="shader backends do not match"; return; }
+        for(i=0;i<f->ir.symbol_count;i++) if(f->ir.symbols[i].kind==TG_GLSL_VARYING) {
+            j=tg_glsl_find_symbol(&v->ir,f->ir.symbols[i].name);
+            if(j<0 || v->ir.symbols[j].kind!=TG_GLSL_VARYING || v->ir.symbols[j].width!=f->ir.symbols[i].width) { p->log="varying interface mismatch"; return; }
+        }
+        for(i=0;i<f->ir.symbol_count;i++) if(f->ir.symbols[i].kind==TG_GLSL_UNIFORM || f->ir.symbols[i].kind==TG_GLSL_SAMPLER) {
+            j=tg_glsl_find_symbol(&v->ir,f->ir.symbols[i].name);
+            if(j>=0 && ((v->ir.symbols[j].kind!=f->ir.symbols[i].kind) || (v->ir.symbols[j].width!=f->ir.symbols[i].width))) { p->log="uniform interface mismatch"; return; }
+        }
+        p->vertex_ir=v->ir;p->fragment_ir=f->ir;p->vm_linked=GL_TRUE;p->linked=GL_TRUE;p->log="";return;
+    }
+#endif
     copy(p->attribute,v->attribute,32); copy(p->matrix_name,v->matrix,32); copy(p->color_name,f->color,32);
     if(p->bound_attribute[0] && !same(p->bound_attribute,p->attribute)) p->attribute_index=0;
     p->linked=1; p->log="";
@@ -311,6 +334,10 @@ void glUseProgram(GLuint id)
     }
     p=program(s,id); if(!p) return;
     if(!p->linked) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+#ifdef TG_GLES_VM_PROGRAM
+    /* The indexed programmable draw bridge is not wired yet. */
+    if(p->vm_linked) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+#endif
     old=s->current_program; s->current_program=id; c->draw->vertex=program_vertex; c->draw->vertex_user=p; c->draw->persistent_cache=1; c->target->texture=p->texture;
     tgGlesInvalidateVertexCache(c->draw);
     if(old && old!=id && s->programs[old-1].deleted) release_program(s,old);

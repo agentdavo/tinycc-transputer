@@ -2,6 +2,9 @@
 #ifndef DISTFB_GLES2_PROGRAM_H
 #define DISTFB_GLES2_PROGRAM_H
 #include "gles2_draw.h"
+#ifdef TG_GLES_VM_PROGRAM
+#include "glsl_fragment_compiler.h"
+#endif
 typedef char GLchar;
 #define GL_VERTEX_SHADER 0x8b31
 #define GL_FRAGMENT_SHADER 0x8b30
@@ -20,6 +23,10 @@ typedef struct {
     char source[TG_GLES_SHADER_SOURCE_MAX];
     char attribute[32], matrix[32], color[32];
     const char *log;
+#ifdef TG_GLES_VM_PROGRAM
+    GLboolean vm_compiled;
+    tg_glsl_fragment_program ir;
+#endif
 } tg_gles_shader;
 typedef struct {
     GLboolean used, linked, deleted;
@@ -29,6 +36,10 @@ typedef struct {
     GLfloat matrix[16], color[4];
     unsigned int texture[64];
     const char *log;
+#ifdef TG_GLES_VM_PROGRAM
+    GLboolean vm_linked;
+    tg_glsl_fragment_program vertex_ir,fragment_ir;
+#endif
 } tg_gles_program;
 typedef struct tg_gles_program_state {
     tg_gles_shader shaders[TG_GLES_MAX_SHADERS];
