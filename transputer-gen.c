@@ -140,7 +140,7 @@ struct tp_builtin_desc {
     const char *args;
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
-    unsigned char simple_op; /* simple void instruction */
+    short simple_op; /* simple void instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -244,29 +244,13 @@ void gen_builtin_vq80(void);
 void gen_builtin_vcvt(void);
 void gen_builtin_vxfer(void);
 void gen_builtin_ldconf(void);
-void gen_builtin_stconf(void);
-void gen_builtin_initvlcb(void);
-void gen_builtin_sethdr(void);
-void gen_builtin_writehdr(void);
-void gen_builtin_readhdr(void);
-void gen_builtin_setchmode(void);
-void gen_builtin_stopch(void);
 void gen_builtin_swapbfr(void);
 void gen_builtin_vin(void);
-void gen_builtin_vout(void);
 void gen_builtin_ldchstatus(void);
 void gen_builtin_chantype(void);
-void gen_builtin_semwait(void);
-void gen_builtin_semsignal(void);
-void gen_builtin_mkrc(void);
-void gen_builtin_unmkrc(void);
-void gen_builtin_grant(void);
-void gen_builtin_enbg(void);
 void gen_builtin_disg(void);
-void gen_builtin_irdsq(void);
 void gen_builtin_erdsq(void);
 void gen_builtin_ldresptr(void);
-void gen_builtin_stresptr(void);
 void gen_builtin_tld(void);
 void gen_builtin_tst(void);
 void gen_builtin_tclr(void);
@@ -736,30 +720,30 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___vxfer,       "ee",  gen_builtin_vxfer,       1 },
         /* T9000 configuration space and VCP */
         { TOK___ldconf,      "e",   gen_builtin_ldconf,      0 },
-        { TOK___stconf,      "ee",  gen_builtin_stconf,      1 },
-        { TOK___initvlcb,    "ee",  gen_builtin_initvlcb,    1 },
-        { TOK___sethdr,      "eee", gen_builtin_sethdr,      1 },
-        { TOK___writehdr,    "eee", gen_builtin_writehdr,    1 },
-        { TOK___readhdr,     "eee", gen_builtin_readhdr,     1 },
-        { TOK___setchmode,   "ee",  gen_builtin_setchmode,   1 },
-        { TOK___stopch,      "e",   gen_builtin_stopch,      1 },
+        { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF },
+        { TOK___initvlcb,      "ee",   NULL, 1, TP_OPR_INITVLCB },
+        { TOK___sethdr,        "eee",  NULL, 1, TP_OPR_SETHDR },
+        { TOK___writehdr,      "eee",  NULL, 1, TP_OPR_WRITEHDR },
+        { TOK___readhdr,       "eee",  NULL, 1, TP_OPR_READHDR },
+        { TOK___setchmode,     "ee",   NULL, 1, TP_OPR_SETCHMODE },
+        { TOK___stopch,        "e",    NULL, 1, TP_OPR_STOPCH },
         { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0 },
         { TOK___vin,         "eee", gen_builtin_vin,         0 },
-        { TOK___vout,        "eee", gen_builtin_vout,        1 },
+        { TOK___vout,          "eee",  NULL, 1, TP_OPR_VOUT },
         { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0 },
         { TOK___chantype,    "e",   gen_builtin_chantype,    0 },
         /* T9000 semaphores and resource channels */
-        { TOK___semwait,     "e",   gen_builtin_semwait,     1 },
-        { TOK___semsignal,   "e",   gen_builtin_semsignal,   1 },
-        { TOK___mkrc,        "eee", gen_builtin_mkrc,        1 },
-        { TOK___unmkrc,      "e",   gen_builtin_unmkrc,      1 },
-        { TOK___grant,       "ee",  gen_builtin_grant,       1 },
-        { TOK___enbg,        "ee",  gen_builtin_enbg,        1 },
+        { TOK___semwait,       "e",    NULL, 1, TP_OPR_WAIT },
+        { TOK___semsignal,     "e",    NULL, 1, TP_OPR_SIGNAL },
+        { TOK___mkrc,          "eee",  NULL, 1, TP_OPR_MKRC },
+        { TOK___unmkrc,        "e",    NULL, 1, TP_OPR_UNMKRC },
+        { TOK___grant,         "ee",   NULL, 1, TP_OPR_GRANT },
+        { TOK___enbg,          "ee",   NULL, 1, TP_OPR_ENBG },
         { TOK___disg,        "eee", gen_builtin_disg,        0 },
-        { TOK___irdsq,       "eee", gen_builtin_irdsq,       1 },
+        { TOK___irdsq,         "eee",  NULL, 1, TP_OPR_IRDSQ },
         { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0 },
         { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0 },
-        { TOK___stresptr,    "ee",  gen_builtin_stresptr,    1 },
+        { TOK___stresptr,      "ee",   NULL, 1, TP_OPR_STRESPTR },
         /* T9 FPU Temps T0-T7 */
         { TOK___tld,         "e",   gen_builtin_tld,         0 },
         { TOK___tst,         "ee",  gen_builtin_tst,         1 },
@@ -5767,13 +5751,6 @@ static void tp_t9k_result(void)
     tp_tvx_word_result(VT_INT | VT_UNSIGNED);
 }
 void gen_builtin_ldconf(void)     { tp_emit_1op(TP_OPR_LDCONF); tp_t9k_result(); }
-void gen_builtin_stconf(void)     { tp_emit_2op(TP_OPR_STCONF, 1, 0); }
-void gen_builtin_initvlcb(void)   { tp_emit_2op(TP_OPR_INITVLCB, 1, 0); }
-void gen_builtin_sethdr(void)     { tp_emit_3op(TP_OPR_SETHDR, 2, 1, 0); }
-void gen_builtin_writehdr(void)   { tp_emit_3op(TP_OPR_WRITEHDR, 2, 1, 0); }
-void gen_builtin_readhdr(void)    { tp_emit_3op(TP_OPR_READHDR, 2, 1, 0); }
-void gen_builtin_setchmode(void)  { tp_emit_2op(TP_OPR_SETCHMODE, 1, 0); }
-void gen_builtin_stopch(void)     { tp_emit_1op(TP_OPR_STOPCH); }
 void gen_builtin_swapbfr(void)
 {
     tp_emit_2op(TP_OPR_SWAPBFR, 1, 0);
@@ -5781,7 +5758,6 @@ void gen_builtin_swapbfr(void)
     vtop->type.t = VT_PTR;
     vtop->type.ref = char_pointer_type.ref;
 }
-void gen_builtin_vout(void)       { tp_emit_3op(TP_OPR_VOUT, 2, 1, 0); }
 void gen_builtin_vin(void)
 {
     /* vin may deschedule; ldcnt then reads the count it left in the
@@ -5814,12 +5790,6 @@ void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(
  *                                  its back through *back
  *   unsigned __ldresptr(chan)      read rc.Ptr; __stresptr(chan, v) write it
  * They take a T9000 (the descriptor table puts them after __vxfer). */
-void gen_builtin_semwait(void)    { tp_emit_1op(TP_OPR_WAIT); }
-void gen_builtin_semsignal(void)  { tp_emit_1op(TP_OPR_SIGNAL); }
-void gen_builtin_mkrc(void)       { tp_emit_3op(TP_OPR_MKRC, 2, 1, 0); }
-void gen_builtin_unmkrc(void)     { tp_emit_1op(TP_OPR_UNMKRC); }
-void gen_builtin_grant(void)      { tp_emit_2op(TP_OPR_GRANT, 1, 0); }
-void gen_builtin_enbg(void)       { tp_emit_2op(TP_OPR_ENBG, 1, 0); }
 void gen_builtin_disg(void)
 {
     /* as __disc: A=code(0), B=guard(1), C=rds(2) -> selected */
@@ -5829,7 +5799,6 @@ void gen_builtin_disg(void)
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
 }
-void gen_builtin_irdsq(void)      { tp_emit_3op(TP_OPR_IRDSQ, 2, 1, 0); }
 void gen_builtin_erdsq(void)
 {
     /* erdsq leaves the queue's front in A and its back in B.  Park the
@@ -5854,7 +5823,6 @@ void gen_builtin_erdsq(void)
     vtop->type.ref = char_pointer_type.ref;
 }
 void gen_builtin_ldresptr(void)   { tp_emit_1op(TP_OPR_LDRESPTR); tp_t9k_result(); }
-void gen_builtin_stresptr(void)   { tp_emit_2op(TP_OPR_STRESPTR, 1, 0); }
 void gen_builtin_stvxstate(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
