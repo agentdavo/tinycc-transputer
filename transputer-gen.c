@@ -8234,6 +8234,42 @@ try_copy:
         tps_note(7);
     }
 
+    /* A table index can shift right and then scale back up by the same
+     * power of two (e.g. table[bits >> 4] with 16-byte rows). Clear the
+     * low bits directly. Match the decoded sequence so spills removed by
+     * scheduling do not hide it, and preserve every interior entry point. */
+    for (i = 0; i < n; i++) {
+        int right, count, left, shift, mask, width;
+        if (an[i].dead || ins[i].opcode != TP_ENC_LDC)
+            continue;
+        shift = ins[i].operand;
+        if (shift < 1 || shift > 31)
+            continue;
+        right = tps_next(ins, an, n, i);
+        if (right < 0 || ins[right].opcode != TP_ENC_OPR ||
+            ins[right].operand != TP_OPR_SHR)
+            continue;
+        count = tps_next(ins, an, n, right);
+        if (count < 0 || ins[count].opcode != TP_ENC_LDC ||
+            ins[count].operand != shift)
+            continue;
+        left = tps_next(ins, an, n, count);
+        if (left < 0 || ins[left].opcode != TP_ENC_OPR ||
+            ins[left].operand != TP_OPR_SHL || !tps_free(ins, an, i, left))
+            continue;
+
+        mask = (int)(~0u << shift);
+        width = tp_encode_len(TP_ENC_LDC, mask);
+        if (width > ins[i].new_len + ins[right].new_len + ins[count].new_len)
+            continue;
+        ins[i].operand = mask;
+        ins[i].new_len = width;
+        ins[left].operand = TP_OPR_AND;   /* same encoded width as SHL */
+        ins[right].new_len = ins[count].new_len = 0;
+        an[right].dead = an[count].dead = 1;
+        removed += 2;
+    }
+
     /* ---- 6. commit ---- */
     for (i = 0; i < n; i++) {
         if (an[i].dead) {
