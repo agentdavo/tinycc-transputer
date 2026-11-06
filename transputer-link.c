@@ -3564,6 +3564,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     /* MemStart: #80000070 on the T800/T805/T425/T9000, #80000048 on the
        T414 (-mt414 on the link command), which has less on-chip RAM. */
     uint32_t base_addr = xip_mode ? 0x7F001000u
+                         : s1->has_text_addr ? s1->text_addr
                          : s1->tp_t414 ? 0x80000048u : 0x80000070u;
     uint32_t total_size = 0;
     uint32_t total_memsz = 0;  /* includes BSS (p_memsz) */

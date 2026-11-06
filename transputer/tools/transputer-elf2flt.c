@@ -15,6 +15,9 @@
  *
  * Build:  make transputer-elf2flt
  * Usage:  ./transputer-elf2flt [-k] input.elf output.flt
+ * Linux reserves 0x80000060 for its syscall gate.  If an executable's
+ * segment overlaps that word, link userspace with -Wl,-Ttext=80000070;
+ * the T414's default bare-metal link address is below the gate.
  */
 
 #include <stdio.h>
@@ -192,6 +195,19 @@ int main(int argc, char **argv)
 
 	fprintf(stderr, "PT_LOAD: vaddr=0x%08x offset=0x%x filesz=%u memsz=%u\n",
 		seg_vaddr, seg_offset, seg_filesz, seg_memsz);
+
+	/* Linux publishes its syscall gate at this fixed word.  This converter
+	 * scans values rather than retained ELF relocations, so an image that
+	 * overlaps the gate cannot distinguish references to it from references
+	 * to image data.  Refuse the ambiguous layout instead of corrupting it. */
+	if ((uint64_t)seg_vaddr < 0x80000064ULL &&
+	    (uint64_t)seg_vaddr + seg_memsz > 0x80000060ULL) {
+		fprintf(stderr, "PT_LOAD overlaps the Linux syscall gate at "
+			"0x80000060; link userspace with "
+			"-Wl,-Ttext=80000070 before converting to bFLT\n");
+		free(buf);
+		return 1;
+	}
 
 	if (entry_vaddr < seg_vaddr ||
 	    entry_vaddr >= seg_vaddr + seg_filesz) {
