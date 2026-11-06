@@ -12,7 +12,7 @@ void tgGlesInit(tg_gles_state *s, tg_context *target)
     s->target=target; s->clear_argb=0; s->color_write_mask=0xffffffffu;
     s->depth_write=GL_TRUE; s->error=GL_NO_ERROR;
     s->scissor_x=0; s->scissor_y=0; s->scissor_width=160; s->scissor_height=120;
-    s->scissor_enabled=GL_FALSE; s->draw=0; s->programs=0; target->clip_enabled=0;
+    s->scissor_enabled=GL_FALSE; s->draw=0; s->programs=0; s->textures=0; target->clip_enabled=0;
 }
 void tgGlesMakeCurrent(tg_gles_state *s) { current=s; if (s) update_clip(); }
 tg_gles_state *tgGlesCurrentState(void) { return current; }

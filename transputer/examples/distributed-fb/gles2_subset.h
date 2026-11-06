@@ -34,6 +34,7 @@ typedef struct {
     GLboolean scissor_enabled;
     struct tg_gles_draw_state *draw;
     struct tg_gles_program_state *programs;
+    struct tg_gles_texture_state *textures;
 } tg_gles_state;
 /* Explicit embedding hook, not part of OpenGL ES or EGL. One current state
  * per transputer address space; call before using the gl* subset. */
