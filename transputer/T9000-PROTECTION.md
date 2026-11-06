@@ -21,7 +21,9 @@ and workspace state. Linux `bc2969c2ea63` and root stub `a747d3b2` replace the
 shared syscall transport with caller-owned frames and register results,
 including the packed mmap helper. The owner reports nested trap-path boots
 reaching `DESKTOP_LOOP` and mixed-version compatibility checks. These repairs
-do not complete isolation, FP/block-move state preservation or trap policy.
+do not complete isolation or trap policy. Linux `e3181b5f0775` additionally
+preserves FP and MOVE2D state across the P boundary and synchronous nested
+spawn; its scope and remaining validation are described below.
 
 ## Model (not a classic page MMU)
 
@@ -87,6 +89,35 @@ collision; a private build with only that field renamed passes the debug
 guest suite. The retained audit/reproducer and validation record are local
 captures in `logs/p-isa-audit/`.
 
+### Linux FP and block-move continuation state
+
+Linux `e3181b5f0775` adds a native seven-word FP image and three-word block
+image to each continuation's `t9k_soft_mm`. The `goprot` wrapper saves the
+supervisor's images on its workspace, restores the selected P images, and
+captures P state immediately on trap return before restoring supervisor state.
+The trap reason/type are saved before either state-store operation uses the
+integer stack. The existing synchronous-spawn snapshot copies these images
+with the parent PDS/maps, so nested children cannot replace a suspended
+parent's FP or MOVE2D state. Fresh entry obtains a clean processor-generated
+FP image instead of assuming an emulator-specific status encoding.
+
+The committed fixture in `linux-7/arch/transputer/tools/pstate-test/` passes
+at three levels on T4 `2853b29`, including mixed FP widths/values, rounding,
+sticky error state and all three block registers. Returns are 37 from the
+grandchild, 23 from the child and zero from the shell, followed by
+`DESKTOP_LOOP`. Omitting FP or block saves independently fails the tests;
+an instrumented supervisor passes 200 round trips. Ordinary trap-first and
+legacy desktop boots also pass. Independent source review found no blocker
+in frame offsets, return-value handling, image order or updated call sites.
+
+These are T4 round-trip results, not native status-bit compatibility or
+SPINE/physical T9000 validation. T4 uses a local FP status/error encoding;
+independent preservation of native exception flags needs hardware/PDS/THDS
+checks. A review also identified that T4's `fpstall` does not apply the ISM
+round-to-nearest postcondition; test that separately before changing it.
+FPUNOROUND transient state, asynchronous scheduling, timeslice/signal policy
+and non-restartable memory-semantics traps remain separate acceptance work.
+
 ---
 
 ## Phase checklist
@@ -103,7 +134,7 @@ captures in `logs/p-isa-audit/`.
 | **7 Hard P-process** | **Done** | `t9k_enter_userspace` → `goprot`; trap loop; SPAWN_EXIT leave_p; goprot re-enter leave |
 | **8 Process-local maps / compatibility bridge** | Implemented; isolation incomplete | Per-task soft maps, NULL rejection, PMI default ON, trap arguments and soft-mm teardown. C-call compatibility still permits broad kernel/device access under P. |
 | **9 Split RX/RW bFLT** | Compatibility only; physical alias violates HRM §5.2.2 | `flat_q3.c` publishes WPtr→Q3 via **full Q2 mirror** (`LA = phys + 0x40000000`, RODS 1 GiB). With the simultaneous Q2 identity descriptor, two logical regions map the same physical GiB: behavior is architecturally undefined. Historical T4 desktop boots do not establish T9000 conformance. Disjoint code/data/workspace mappings remain required. |
-| **10 Concurrent P** | Partial: per-context continuation repair and frame ABI implemented | Per-task PDS/RODS and nested-spawn context save/restore replace shared continuation buffers. Syscall arguments are caller-owned and results return in A. Concurrent state, FP/block-move preservation and strict isolation still need review. PMI text-write and foreign-private checks remain opt-in. Trap-first syscall code remains opt-in. |
+| **10 Concurrent P** | Partial: continuation/frame ABI and FP/block boundary switching implemented | `e3181b5f0775` preserves per-continuation FP/block images and supervisor state; three-level nested and supervisor controls pass on T4. Asynchronous scheduling, native flags, RTL and strict isolation remain open. PMI strict options and trap-first syscalls remain opt-in. |
 | **11 Data quarter / trap default** | Partial | Soft RX via `end_code`; stack Q3 mirror. Full data-LA rewrite + trap-only default still experimental. |
 
 ---
@@ -255,9 +286,10 @@ required review/test areas, not claims that every case currently fails:
    64-bit argument packing, return-register clobbers, misaligned/wrapping/bad
    pointers, complete-range checks and old/new kernel-client combinations.
 2. Verify per-context PDS/RODS and integer state across concurrent tasks,
-   nested spawn/exec and supervisor re-entry. Hardware P-state saving does not
-   preserve FP registers; supervisor FP and block-move save/restore is required
-   where those resources can be clobbered (ISM ch.13).
+   asynchronous scheduling and supervisor re-entry. The nested FP/block
+   save/restore fix `e3181b5f0775` passes the T4 fixture; verify native exception
+   flags, PDS/THDS interactions, RTL and scheduling paths separately. Hardware
+   P-state saving alone does not preserve FP/block registers (ISM ch.13).
 3. Handle timeslice, signals/restarts, exit and access/privilege faults with
    explicit policy. The current loop dispatches syscall traps, returns other
    causes, and the entry wrapper calls `do_exit`; it is not a complete scheduler

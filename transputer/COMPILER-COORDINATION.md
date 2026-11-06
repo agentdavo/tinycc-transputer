@@ -1,11 +1,62 @@
 # Compiler coordination — 6 November 2026
 
-This is a working ownership and evidence record for the active TinyCC
-Transputer sessions. Check current source, commits and session workloads before
-starting another change. `STATUS.md` contains historical baselines; it does not
-describe the current compiler or the active `linux-7` kernel.
+This is the saved handoff for the six TinyCC Transputer sessions on
+**6 November 2026**. At the user's request all six stopped taking new work,
+finished their bounded checks and reported ready for archival. The chief has
+reviewed the handoffs and preserved the unfinished patch. Archive completion
+is recorded below. `STATUS.md` contains historical baselines, not the current
+compiler or `linux-7` state.
 
-## Current ownership and next avenues
+## Closure checkpoint
+
+| Session | Saved result and validation | Remaining work / retained artifacts |
+| --- | --- | --- |
+| Optimize 64-bit division (Linux lane) | Linux `e3181b5f0775`: per-continuation FP/block switching; three nested clients and supervisor 200-round-trip controls pass. Exact fixture rebuilds match. Trap-first/default boots reach `DESKTOP_LOOP`; six syscall arguments traced across four calls. | Native flags/RTL, timeslice/signal/task-switch policy and disjoint regions remain open. T4 high-priority shadow omits rounding mode: add an interrupt/rounding regression first. Replay commands: `logs/p-isa-audit/checkpoint-2026-11-06.txt`; committed fixture: `linux-7/arch/transputer/tools/pstate-test/`. |
+| Review and implement afcc4dfe (linker lane) | `f792e755`, acceptance `a402b034`: exact parent/commit pass hardened Doom, fixed-seed CoreMark and reference ray; ELF/diagnostic/relocation pairs match. Linux-link medians improve 0.8–1.7%, costing about 444 KiB of extra index memory for the measured object. | No pending code or process. Captures: `logs/link-acceptance-f792/`; [tracked report](tests/bench/linker-reloc-index-2026-11-06.md). These are short-link measurements, not whole-build gains. |
+| Compare raytracer binaries | `681cbe51`, acceptance `f2997503`: exact parent/commit save 8,980,996 modeled T800 cycles (0.2965%) on model 3. All four images match at one/four nodes; hardened Doom and CoreMark unchanged; volatile/cast/alias/stack/target/relocation tests and seeds 329/367 pass. | TransLocal loop-to-MOVE proof remains open. Retained `.tmp-rayaccept/` snapshots/logs/histograms; [tracked report](tests/bench/indexed-fp-address-reuse-2026-11-06.md). No live process. |
+| Refactor transputer code layout | `84d7e632`: shared direct workspace opcode classification. 294 comparisons across six targets/options: 252 identical objects, 42 matching diagnostic failures. Independent Linux wrapper source review found no blocker. | `_wsop_private_7204/` retained. S10/`tps_dead_after` is reachable; profiling did not justify changing allocations. No pending edits/process/worktree owned. |
+| Explain per-architecture libtcc1 builds (FPU lane) | Direct conversion `16e7e460`; investigations `1dbe953a` / `15c7037b`; no speculative FPUNOROUND fix. Read-only Linux image-size/order review completed. | T4 `fpstall` rounding postcondition, native exception flags and FPUNOROUND transient representation need separate tests. Unary FP resident-operand/sqrt reuse is only a candidate. Detached worktree and `_fp_noround_audit/`/earlier untracked probes retained. |
+| Build per-part uClibc (aggregate/compositor lane) | Seed repair `fc344c0b`; aggregate `c96e1bcd`, exact acceptance `b0e8dc23`; compositor `bc3c780c`, bank canary `f873c42b`. Guarded compositor shows about 9% fewer modeled cycles in its real-blit test. | Slot-3 overflow is still live. Four-file 400×284 repair is saved unapplied as [pending patch](fbwm/fbwm-slot-bounds.pending.patch), with host checks passed and target `slot3_overflow 0` still required. Original detached worktree/results remain intact. |
+
+All sessions report no remaining live build/emulator process. No new task
+should be inferred from the candidate list. Resume only a selected lane with
+the relevant snapshots and current source checked first.
+
+### Repository and publication state
+
+* Outer repository `main`: the listed compiler/linker/acceptance commits are
+  local. The sessions did not push this concurrent history.
+* Linux `master`: `bc2969c2ea63` (frame ABI) and `e3181b5f0775` (FP/block state)
+  are local. The owner confirmed `cbf812242ba1` as the published
+  `origin/transputer` tip at checkpoint.
+* T4 `master`: `8177e21`, `fe000b2` and `2853b29` are local timing/FP-access
+  commits. The shared executable is older; use a recorded isolated build when
+  reproducing measurements.
+* Compositor branch `codex/fbwm-move2d` was pushed with `ed29c40e` / `31379af7`,
+  equivalent to the local main canary/compositor files. Its detached worktree
+  contains the uncommitted bounds repair; do not discard it.
+* Shared `.gitignore` scratch-directory additions, untracked `transputer/examples/`,
+  Python caches, Linux `framebuffer.bmp`, T4 `CODEGEN.md` edits and
+  `t4.pre-2e44501` remain untouched. The closure commit does not sweep them in.
+* Full six-session handoffs are retained locally in
+  `logs/compiler-coordination/session-handoffs-2026-11-06.json`. Logs and private
+  snapshots are retained evidence, not tracked production inputs.
+
+### Chat archival record
+
+All six handoffs reviewed; archival pending. Archive the chats only, preserving
+their worktrees and evidence. The chief chat remains open.
+
+| Session title | Chat ID |
+| --- | --- |
+| Compare raytracer binaries | `01a1abe3-87fc-7913-9242-a60ac3dbfc8c` |
+| Refactor transputer code layout | `01a1abec-9ea0-71c0-aad9-bdf264ca9b32` |
+| Explain per-architecture libtcc1 builds | `01a1b0c7-5f2d-7ef1-a9ed-1c1c1be6d241` |
+| Review and implement afcc4dfe | `01a1abe1-bc88-7353-a81f-778bdf8088f3` |
+| Build per-part uClibc | `01a1b0bf-996f-70e3-9c3b-d2620f9677f3` |
+| Optimize 64-bit division | `01a1b0bd-7353-73c1-b70b-325d45a2d08e` |
+
+## Work allocation before checkpoint
 
 | Session title | Owned work | Next evidence to collect |
 | --- | --- | --- |
@@ -292,7 +343,9 @@ Apply these to Linux, emulator tests and compiler effects descriptions:
   preflights wide writes. Denied second-word probes preserve memory/FP state;
   removing the preflight fails the canary. Host/guest protection and workspace
   tests pass, and the unchanged Linux frame-ABI image reaches `DESKTOP_LOOP`.
-  Actual Linux per-continuation FP/block state preservation remains separate.
+  Linux `e3181b5f0775` then adds actual per-continuation and supervisor
+  FP/block switching; the repeated nested, omitted-save and supervisor tests
+  pass on T4. Native flags, interrupt rounding and RTL remain separate gates.
 * Both local text manuals render the null descriptor as `#8000000`, whereas
   implementation code uses `0x80000000`. Verify the printed facsimile before
   changing that literal; OCR alone does not establish a correction.
