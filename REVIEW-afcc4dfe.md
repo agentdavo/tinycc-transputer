@@ -38,14 +38,22 @@ defined behavior.
   packed pointers, direct and indirect calls, and stacked arguments on T414,
   T425, T800, T805, T9000 and T9000TVX. A code-generation check confirms aligned `memcpy`
   still uses MOVE and the packed-length case calls `memcpy`.
-- **64-bit scalar call temporary alignment.** Fuzz seed 329 still fails on
-  the `5afc5a61` T800 compiler baseline. The published reduced case agrees
+- **64-bit scalar call temporary alignment.** Fuzz seed 329 failed on
+  the `5afc5a61` compiler baseline. The published reduced case agrees
   between GCC `-O0` with UBSan and GCC `-O2`; an independent T4 trace shows
   that the shift count is 1, but the words supplied to `__ashrdi3` are
   corrupted. The compiler stores the two words in aligned slots and reloads
-  them through addresses two bytes into those slots. The scalar call argument
-  staging path's temporary alignment is under repair; a fix and its
-  regression are not yet included in this audit.
+  them through addresses two bytes into those slots. `fc344c0b` aligns the
+  scalar call argument staging temporary and adds a focused regression.
+  Independently, the original seed matched its preserved host oracle on strict
+  T414 and T425, T800 and T9000 after the fix; all four had failed before it.
+  The fixed compiler was built from `fc344c0b` (SHA-256
+  `16d37539d96895502d88af11265a60676d4c3a2d70461cd953dbe8cd96042a33`).
+  The original source and oracle hashes were respectively
+  `5b4805b2ff3ebec87fb864693d000ccbd459a160884c5b52ffdaa3f2864b34f6`
+  and `ee6aa2c6dae28528975387090fb2fbe943c41271f0e2409553ef97b6a559fe80`;
+  the T4 binary hash was
+  `2c5972c20329d9730726ebea9ed966263c86f275c22ae4fa7c90f765dc1ce884`.
 - **Linker safety.** `310efe5b` validates boot load slots before writing and
   propagates malformed optional-slot errors. Ordinary programs no longer
   get the missing-kernel-symbol or absent-BSS-pair warnings. The final
