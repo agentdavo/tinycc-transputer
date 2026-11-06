@@ -4132,13 +4132,28 @@ ST_FUNC void gen_cvt_itof(int t) {
     sv = vtop[0];
     abcreg_stack_depth = 0;
     fpureg_stack_depth = 0;
-    tp_push_sv(&sv);
-    Tp_STL(FRAME_SLOT_SCRATCH);
+    /* The FPU reads memory itself.  A word-aligned local lvalue or an
+     * already materialized workspace value needs no scratch copy. */
+    {
+        int v = sv.r & VT_VALMASK;
+        if ((sbt & VT_BTYPE) == VT_INT && !(sv.r & VT_MUSTCAST) &&
+            (sv.r & VT_LVAL) && v == VT_LOCAL &&
+            !(sv.r & VT_UNALIGNED) && !(sv.c.i & 3)) {
+            emit_local_addr(sv.c.i);
+        } else if ((sbt & VT_BTYPE) == VT_INT &&
+                   !(sv.r & (VT_LVAL | VT_MUSTCAST)) &&
+                   v >= 0 && v < VT_CONST) {
+            Tp_LDLP(v);
+        } else {
+            tp_push_sv(&sv);
+            Tp_STL(FRAME_SLOT_SCRATCH);
+            Tp_LDLP(FRAME_SLOT_SCRATCH);
+        }
+    }
 
     if (sbt == (VT_INT | VT_UNSIGNED)) {
         /* fpi32tor* would read bit 31 as a sign.  fpb32tor64 loads the
          * word as unsigned, exactly; a float result is rounded once. */
-        Tp_LDLP(FRAME_SLOT_SCRATCH);
         emit_instr(TP_OP_OPR, TP_OPR_FPB32TOR64);
         abcreg_pop(1);
         fpureg_push(1);
@@ -4150,7 +4165,6 @@ ST_FUNC void gen_cvt_itof(int t) {
     /* T800 integer->float converters load INT32 from address in AReg.  They
      * round to nearest: every FP instruction resets the rounding mode to
      * that (ISM 11.6), so no fpurn is needed first. */
-    Tp_LDLP(FRAME_SLOT_SCRATCH);
     emit_instr(TP_OP_OPR, is_db ? TP_FPU_I32TOR64 : TP_FPU_I32TOR32);
     abcreg_pop(1);
     fpureg_push(1);
