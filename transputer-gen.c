@@ -9635,9 +9635,13 @@ static void tp_expand_scalar_call_words(struct tp_call_words *cw, SValue *arg, i
 
         if ((arg->r & VT_LVAL) &&
             ((v < VT_CONST && v != VT_LOCAL) || v == VT_LLOCAL)) {
-            int spill_lo = loc - 4;
-            int spill_hi = loc - 8;
-            loc -= 8;
+            int spill_lo, spill_hi;
+            /* STL addresses whole workspace words, while later VT_LOCAL
+             * loads honor byte offsets.  Narrow locals can leave loc off a
+             * word boundary, so align the pair before emitting either. */
+            loc = (loc - 8) & -4;
+            spill_lo = loc + 4;
+            spill_hi = loc;
             if (v == VT_LLOCAL)
                 emit_local_op(TP_OP_LDL, arg->c.i);
             else
