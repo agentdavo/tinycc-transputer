@@ -201,7 +201,10 @@ estimates, not measured hardware cycles.
   skips repair scans when only the original symbol occupies it. A measured
   Linux link saved about 1–2 ms at the cost of an extra word per symbol;
   the [profile and output checks](transputer/tests/bench/linker-reloc-index-2026-11-06.md)
-  include stress cases where no speedup was established.
+  include stress cases where no speedup was established. Postcommit builds of
+  `f792e755` and its exact parent passed matched Doom, fixed-seed CoreMark and
+  reference raytracer runs, with identical ELFs, linker diagnostics and
+  relocation listings.
 
 Verification covered focused compiler, linker and UART regressions. The
 kernel boot, full test corpus, physical hardware, and the historical size

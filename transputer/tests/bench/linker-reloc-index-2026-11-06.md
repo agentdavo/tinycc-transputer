@@ -1,5 +1,40 @@
 # Relocation index link profile
 
+## Integration acceptance status
+
+The integrated linker commit is `f792e7555da9929dc4a4eff9bffdb8ea0d9378d5`,
+whose parent is `bc3c780c4952488dfda9bc2aeaa779d6f4a00899`. Between the
+`1dbe953a` profiling snapshot and that parent, the tracked C/header changes
+were in the framebuffer compositor and two test sources, rather than the
+compiler sources used by this build. The final tested candidate compiler was
+rebuilt from the committed linker source and matched the candidate hash below.
+
+Fresh compiler builds from the exact parent and commit produced the baseline
+and candidate compiler hashes below. Using the same T800 runtime and workload
+sources, the hardened Doom runs passed with identical phase output, including
+all eleven reference hashes and `check 0 0`. Both fixed-seed, one-iteration
+CoreMark runs reported 5,008,259 estimated cycles, seed CRC `e9f5`, list CRC
+`e714`, matrix CRC `1fd7`, state CRC `8e3a`, and final CRC `e714`. This short
+run is a diagnostic and is not a CoreMark score. Both model-3, 256x256,
+one-node raytracer runs matched the reference image and reported 3,654,480,420
+estimated cycles and 1,175,888,819 instructions.
+
+The three pairs of workload ELFs matched byte for byte. Relinking each with
+the same input objects and output path also produced identical standard output,
+standard error and relocation listings. The Doom/CoreMark emulator SHA-256 was
+`2c5972c20329d9730726ebea9ed966263c86f275c22ae4fa7c90f765dc1ce884`
+and the T800 runtime archive was
+`dbb6d39c4e13aec053eea8fbae2d550e1dbc64bc3cfb1b8b6fa5b006f3169e06`.
+For both raytracer runs a private T4 build printed the existing per-thread
+counter at exit (SHA-256
+`5be8f05ddd56002cfa20813f10a4711b91352b2cbe8cef09d12fc96ffd78f617`);
+the image SHA-256 was
+`672e73749ea0ee27c3e452fe0dbd558dbc23cdae61741b399557f7f1a26fdbb2`.
+The fixed workloads and their captures are retained under
+`logs/link-acceptance-f792/`. Cycle values are T800 emulator estimates, not
+hardware measurements or T9000 grouping results. The wall-time and memory
+tradeoff measured on the Linux link is documented below.
+
 The baseline source was `1dbe953a`, after the no-candidate relaxation fast
 path. A `-pg -fno-inline` diagnostic compiler linked the existing Linux
 `vmlinux.o` 20 times. Its sampled profile attributed 0.34 of 1.21 CPU seconds
