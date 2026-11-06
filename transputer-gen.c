@@ -96,6 +96,8 @@ ST_FUNC void gen_le32(int c);
 
 /* Forward declarations */
 static void transputer_func_reset(void);
+static void tp_gen_vec2(int opr);
+static void tp_gen_vec3(int opr);
 static void emit_instr(int opc, int v);
 static void tp_push_sv(SValue *sv);
 static void tp_push_float_sv(SValue *sv);
@@ -141,6 +143,7 @@ struct tp_builtin_desc {
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
     short simple_op; /* simple void instruction */
+    short vector_op; /* TVX vector instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -201,11 +204,6 @@ void gen_builtin_bf16mul2(void);
 void gen_builtin_bf16add2(void);
 void gen_builtin_vsetlen(void);
 void gen_builtin_mxfp4gemvbf(void);
-void gen_builtin_vadd(void);
-void gen_builtin_vmul(void);
-void gen_builtin_vsilu(void);
-void gen_builtin_vrmsnorm(void);
-void gen_builtin_vsoftmax(void);
 void gen_builtin_f16tof32(void);
 void gen_builtin_f32tof16(void);
 void gen_builtin_q8dot(void);
@@ -215,34 +213,20 @@ void gen_builtin_iq2xxsdot(void);
 void gen_builtin_iq3xxsdot(void);
 void gen_builtin_qsetfmt(void);
 void gen_builtin_qdot(void);
-void gen_builtin_vhad32(void);
-void gen_builtin_mxqrot(void);
-void gen_builtin_mxqrotbf(void);
 void gen_builtin_ftsetvp(void);
 void gen_builtin_ftransp(void);
 void gen_builtin_ftranspb(void);
-void gen_builtin_fsincos(void);
 void gen_builtin_frsqrtb(void);
 void gen_builtin_frecipb(void);
-void gen_builtin_fsincosb(void);
-void gen_builtin_vsetstride(void);
 void gen_builtin_ftcull(void);
 void gen_builtin_tskin(void);
 void gen_builtin_vsetfmt(void);
 void gen_builtin_ftsetlit(void);
 void gen_builtin_flitb(void);
 void gen_builtin_qgemm(void);
-void gen_builtin_vblend8(void);
-void gen_builtin_vfill(void);
-void gen_builtin_vfill2d(void);
 void gen_builtin_csumb(void);
-void gen_builtin_vblend2d(void);
 void gen_builtin_stvxstate(void);
 void gen_builtin_csumcpy(void);
-void gen_builtin_vq8k(void);
-void gen_builtin_vq80(void);
-void gen_builtin_vcvt(void);
-void gen_builtin_vxfer(void);
 void gen_builtin_ldconf(void);
 void gen_builtin_swapbfr(void);
 void gen_builtin_vin(void);
@@ -676,11 +660,11 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___bf16add2,    "ee",  gen_builtin_bf16add2,    0 },
         { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1 },
         { TOK___mxfp4gemvbf, "eeee",gen_builtin_mxfp4gemvbf, 0 },
-        { TOK___vadd,        "eee", gen_builtin_vadd,        1 },
-        { TOK___vmul,        "eee", gen_builtin_vmul,        1 },
-        { TOK___vsilu,       "ee",  gen_builtin_vsilu,       1 },
-        { TOK___vrmsnorm,    "eee", gen_builtin_vrmsnorm,    1 },
-        { TOK___vsoftmax,    "ee",  gen_builtin_vsoftmax,    1 },
+        { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN },
+        { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN },
+        { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN },
+        { TOK___vrmsnorm,    "eee", NULL, 1, 0, TP_OPR_VRMSNORM },
+        { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN },
         { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0 },
         { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0 },
         { TOK___q8dot,       "eeee",gen_builtin_q8dot,       0 },
@@ -690,34 +674,34 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___iq3xxsdot,   "eeee",gen_builtin_iq3xxsdot,   0 },
         { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1 },
         { TOK___qdot,        "eeee",gen_builtin_qdot,        0 },
-        { TOK___vhad32,      "eee", gen_builtin_vhad32,      1 },
-        { TOK___mxqrot,      "eee", gen_builtin_mxqrot,      1 },
-        { TOK___mxqrotbf,    "eee", gen_builtin_mxqrotbf,    1 },
+        { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32 },
+        { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT },
+        { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF },
         { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1 },
         { TOK___ftransp,     "eee", gen_builtin_ftransp,     0 },
         { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0 },
-        { TOK___fsincos,     "ee",  gen_builtin_fsincos,     1 },
+        { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS },
         { TOK___frsqrtb,     "e",   gen_builtin_frsqrtb,     0 },
         { TOK___frecipb,     "e",   gen_builtin_frecipb,     0 },
-        { TOK___fsincosb,    "ee",  gen_builtin_fsincosb,    1 },
-        { TOK___vsetstride,  "ee",  gen_builtin_vsetstride,  1 },
+        { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB },
+        { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE },
         { TOK___ftcull,      "eee", gen_builtin_ftcull,      0 },
         { TOK___tskin,       "eee", gen_builtin_tskin,       0 },
         { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1 },
         { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1 },
         { TOK___flitb,       "eee", gen_builtin_flitb,       0 },
         { TOK___qgemm,       "eee", gen_builtin_qgemm,       0 },
-        { TOK___vblend8,     "eee", gen_builtin_vblend8,     1 },
-        { TOK___vfill,       "eee", gen_builtin_vfill,       1 },
-        { TOK___vfill2d,     "eee", gen_builtin_vfill2d,     1 },
+        { TOK___vblend8,     "eee", NULL, 1, 0, TP_OPR_VBLEND8 },
+        { TOK___vfill,       "eee", NULL, 1, 0, TP_OPR_VFILL },
+        { TOK___vfill2d,     "eee", NULL, 1, 0, TP_OPR_VFILL2D },
         { TOK___csumb,       "eee", gen_builtin_csumb,       0 },
-        { TOK___vblend2d,    "eee", gen_builtin_vblend2d,    1 },
+        { TOK___vblend2d,    "eee", NULL, 1, 0, TP_OPR_VBLEND2D },
         { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1 },
         { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0 },
-        { TOK___vq8k,        "ee",  gen_builtin_vq8k,        1 },
-        { TOK___vq80,        "ee",  gen_builtin_vq80,        1 },
-        { TOK___vcvt,        "eee", gen_builtin_vcvt,        1 },
-        { TOK___vxfer,       "ee",  gen_builtin_vxfer,       1 },
+        { TOK___vq8k,        "ee",  NULL, 1, 0, TP_OPR_VQ8K },
+        { TOK___vq80,        "ee",  NULL, 1, 0, TP_OPR_VQ80 },
+        { TOK___vcvt,        "eee", NULL, 1, 0, TP_OPR_VCVT },
+        { TOK___vxfer,       "ee",  NULL, 1, 0, TP_OPR_VXFER },
         /* T9000 configuration space and VCP */
         { TOK___ldconf,      "e",   gen_builtin_ldconf,      0 },
         { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF },
@@ -1036,7 +1020,11 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
      * both operands would name the builtin's result.  Spilling after the
      * arguments are parsed also covers an argument that is that result. */
     save_reg(REG_IRET);
-    if (desc->simple_op && !desc->args[0])
+    if (desc->vector_op && !desc->args[2])
+        tp_gen_vec2(desc->vector_op);
+    else if (desc->vector_op)
+        tp_gen_vec3(desc->vector_op);
+    else if (desc->simple_op && !desc->args[0])
         emit_instr(TP_OP_OPR, desc->simple_op);
     else if (desc->simple_op && !desc->args[1])
         tp_emit_1op(desc->simple_op);
@@ -5614,11 +5602,6 @@ static void tp_gen_vec2(int opr) {
     abcreg_stack_depth = 0;
 }
 
-void gen_builtin_vadd(void)     { tp_gen_vec3(TP_OPR_VADDSN); }
-void gen_builtin_vmul(void)     { tp_gen_vec3(TP_OPR_VMULSN); }
-void gen_builtin_vrmsnorm(void) { tp_gen_vec3(TP_OPR_VRMSNORM); }
-void gen_builtin_vsilu(void)    { tp_gen_vec2(TP_OPR_VSILUSN); }
-void gen_builtin_vsoftmax(void) { tp_gen_vec2(TP_OPR_VSOFTMAXSN); }
 
 /* Block rotation (BRQ).  All three take (dst, src, sign_mask) and get their
  * element count from __vsetlen(), like the other vector kernels.  The sign
@@ -5629,9 +5612,6 @@ void gen_builtin_vsoftmax(void) { tp_gen_vec2(TP_OPR_VSOFTMAXSN); }
  *   void __mxqrot  (tvx_mxfp4_block *dst,   const float *src,    unsigned m);
  *   void __mxqrotbf(tvx_mxfp4_block *dst,   const unsigned short *src, unsigned m);
  */
-void gen_builtin_vhad32(void)   { tp_gen_vec3(TP_OPR_VHAD32); }
-void gen_builtin_mxqrot(void)   { tp_gen_vec3(TP_OPR_MXQROT); }
-void gen_builtin_mxqrotbf(void) { tp_gen_vec3(TP_OPR_MXQROTBF); }
 
 /* TVX-GFX - transform & project (T&L geometry).  See transputer/t4/tvx_gfx.h.
  * Like tp_gen_vec3 but the instruction leaves a result (the outcode) in
@@ -5663,18 +5643,15 @@ void gen_builtin_ftsetvp(void) {
 }
 void gen_builtin_ftransp(void)  { tp_gen_vec3_ret(TP_OPR_FTRANSP); }
 void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
-void gen_builtin_fsincos(void)  { tp_gen_vec2(TP_OPR_FSINCOS); }
 void gen_builtin_frsqrtb(void)  { tp_gen_tvx_unary(TP_OPR_FRSQRT); }
 /* unsigned __frecipb(unsigned bits);
  * void __fsincosb(float *dst_pairs, const unsigned short *bams)
  *                                        (angle count from __vsetlen) */
 void gen_builtin_frecipb(void)  { tp_gen_tvx_unary(TP_OPR_FRECIP); }
-void gen_builtin_fsincosb(void) { tp_gen_vec2(TP_OPR_FSINCOSB); }
 /* void __vsetstride(unsigned stride_bytes, unsigned stream_mask);
  * int  __ftcull(unsigned char *dst, const float *xyz, const void *param)
  * int  __tskin(float *dst, const void *joints, const void *param)
  *                                        (vertex count from __vsetlen) */
-void gen_builtin_vsetstride(void) { tp_gen_vec2(TP_OPR_VSETSTRIDE); }
 void gen_builtin_ftcull(void)   { tp_gen_vec3_ret(TP_OPR_FTCULL); }
 void gen_builtin_tskin(void)    { tp_gen_vec3_ret(TP_OPR_TSKIN); }
 /* void __vsetfmt(unsigned fmt);  0 = f32 xyz, 1 = bf16, 2 = f16 */
@@ -5699,7 +5676,6 @@ void gen_builtin_ftsetlit(void) {
 }
 void gen_builtin_flitb(void)   { tp_gen_vec3_ret(TP_OPR_FLITB); }
 void gen_builtin_qgemm(void)   { tp_gen_vec3_ret(TP_OPR_QGEMM); }
-void gen_builtin_vblend8(void) { tp_gen_vec3(TP_OPR_VBLEND8); }
 /* void __vfill(void *dst, unsigned pattern, unsigned nbytes)
  * void __vfill2d(void *dst, unsigned pattern, unsigned width_bytes)
  *                          (rows/stride latched by __move2dinit)
@@ -5708,10 +5684,7 @@ void gen_builtin_vblend8(void) { tp_gen_vec3(TP_OPR_VBLEND8); }
  *                          (rows/strides from __move2dinit, px/row
  *                           from __vsetlen)
  * void __stvxstate(void *save15words) */
-void gen_builtin_vfill(void)    { tp_gen_vec3(TP_OPR_VFILL); }
-void gen_builtin_vfill2d(void)  { tp_gen_vec3(TP_OPR_VFILL2D); }
 void gen_builtin_csumb(void)    { tp_gen_vec3_ret(TP_OPR_CSUM); }
-void gen_builtin_vblend2d(void) { tp_gen_vec3(TP_OPR_VBLEND2D); }
 /* unsigned __csumcpy(void *dst, const void *src, unsigned nbytes)
  * void __vq8k(void *dst_q8_K_blocks, const void *src)
  * void __vq80(void *dst_q8_0_blocks, const void *src)
@@ -5726,10 +5699,6 @@ void gen_builtin_vblend2d(void) { tp_gen_vec3(TP_OPR_VBLEND2D); }
  *                     until all are done; each input's length comes back
  *                     in its entry - see include/t9000.h) */
 void gen_builtin_csumcpy(void)  { tp_gen_vec3_ret(TP_OPR_CSUMCPY); }
-void gen_builtin_vq8k(void)     { tp_gen_vec2(TP_OPR_VQ8K); }
-void gen_builtin_vq80(void)     { tp_gen_vec2(TP_OPR_VQ80); }
-void gen_builtin_vcvt(void)     { tp_gen_vec3(TP_OPR_VCVT); }
-void gen_builtin_vxfer(void)    { tp_gen_vec2(TP_OPR_VXFER); }
 
 /* T9000 configuration space and virtual channel processor (ISM 12.8-12.9,
  * HRM 11 and 15).  `chan` is a virtual channel word - input #80000040+8n,
