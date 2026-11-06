@@ -66,8 +66,13 @@ and do not veto this one. The read loses its reaching definition.
 
 This is **not yet a demonstrated C-source miscompile**: frontend folding and
 address-escape restrictions may prevent this exact emitter shape. The
-raytracer session, which owns scheduler changes, has been asked to investigate
-reachability and conservatively veto readers a rewrite cannot redirect.
+raytracer session committed a conservative guard and host regression as
+**`5a5ef711`**, covering direct, displaced and wrapping indirect reads and a
+non-aliasing control. The coordinator reran the committed host test and it
+passed. The owner also reports scheduler/address/frame checks on T414, T425,
+T800 and T9000, all four raytracer images on one/four nodes, and model 3 on
+16/64 nodes. `TransLocal` remained at 339 modeled cycles per call; this is a
+correctness fix rather than a measured performance improvement.
 [Harness](../logs/compiler-audit-2026-11-06/middle-copyprop-probe.c) ·
 [preconditions/invocation](../logs/compiler-audit-2026-11-06/middle-copyprop-probe.txt) ·
 [exact output](../logs/compiler-audit-2026-11-06/middle-copyprop-probe-output.txt).
@@ -90,9 +95,12 @@ and frame cost against a matching baseline.
 
 The CoreMark session has been assigned the narrowing-cast experiment using
 its new [fixed-seed baseline](tests/bench/coremark-baseline-2026-11-06.md).
-Its first instrumented trial found 16 cast-time cancellations per CoreMark
-build but byte-identical final executables: a later pass may already remove
-those pairs. This is not yet a demonstrated generated-code improvement.
+The completed trial found 16 cast-time cancellations per CoreMark build, but
+the normal scheduler already removes those pairs. Final executables and
+estimated cycles were identical on four targets, with matching CRCs; the
+change was reverted. Six-target cast/alias/volatile/packed/no-code probes
+passed. The rejected trial is recorded in `a361932b` and
+[its report](tests/bench/coremark-cast-trial-2026-11-06.md).
 Backend shift staging is distinct from the already-landed runtime helper
 improvement `8e88385c`.
 
@@ -161,9 +169,10 @@ bounds-related flags can exclude operands from the earlier fast path.
 
 ## Delivery order
 
-Land the packed-load correctness fix first, investigate the scheduler
-counterexample with its current owner, then take one contained performance
-experiment per owner. Refactors should preserve objects/diagnostics before
+The packed-load and scheduler guards are landed. Use those commits as the
+baseline, then take one contained performance experiment per owner, following
+the [current ownership and three-workload gate](COMPILER-COORDINATION.md).
+Refactors should preserve objects/diagnostics before
 changing instruction selection. Record a separate validated commit for each
 group; rejected trials should not be merged merely to keep commits frequent.
 See [coordination](COMPILER-COORDINATION.md) for ownership and

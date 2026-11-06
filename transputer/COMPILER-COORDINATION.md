@@ -9,19 +9,46 @@ describe the current compiler or the active `linux-7` kernel.
 
 | Session title | Owned work | Next evidence to collect |
 | --- | --- | --- |
-| Explain per-architecture libtcc1 builds | Runtime selection and per-target libc links; T414 userspace image placement | Fix the reserved syscall-gate/image overlap using link placement/provenance, not an address-value exemption; then CoreMark component profiles |
-| Review and implement afcc4dfe | Runtime division, its regression/benchmark, review findings; MOVE2D semantic coverage | Signed/unsigned boundaries and cycle estimates; non-square, padded and conditional 2D transfers |
-| Compare raytracer binaries | Frame address/constant cache, binary32 literals, `TransLocal` copy-loop experiments | General three-element copy reproducer, image equality and modeled cycles; preserve alias/volatile semantics |
-| Refactor transputer code layout | Builtin descriptors, operand staging and target diagnostics | Explicit availability metadata replacing table-position gating; equivalent output/diagnostics on six targets |
-| Build per-part uClibc | Doom workspace remapping in the separate `doom-frame-layout` worktree; rectangular-copy experiment | Call-frame/implicit-slot safety, CoreMark CRCs and Doom hashes; integrate without overwriting root changes |
-| Optimize 64-bit division | Currently glyph-fix integration and Linux L/P isolation review, despite the historical title | Review task-private trap ABI, state lifetime, scheduler/fault handling, broad maps and SPINE/T4 differences; propose trap-default acceptance gates |
-| Improve TinyCC Transputer compiler | Coordination, assembler/linker work, protection docs and full backend audit | Three read-only audit agents cover snapshot lines 1–4700, 4701–9400 and 9401–14025; collect session lessons and rank concrete proposals |
+| Explain per-architecture libtcc1 builds | Avenue 2a: `gen_cvt_itof` direct conversion from aligned storage; then avenue 3 constant-pool surviving-reference profitability | Preserve source backing/return-slot eviction and fallbacks; compare three workloads; coordinate cost metadata with the raytracer session |
+| Review and implement afcc4dfe | Avenue 2b: `gen_opl_shift` native high/low/count staging and focused regressions | Reserve result slots first, preserve complex fallback and current shift conventions; compare three workloads before landing |
+| Compare raytracer binaries | Scheduler correctness baseline; avenue 3 loop-weighted slot/cache profitability in `tp_slot_remap` / `tp_gaddr_cache` | Preserve implicit ABI slots, aggregate units, branch targets and relocations; account for initialization/frame costs; leave pool functions to the conversion session |
+| Refactor transputer code layout | Avenue 4: raw symbol-address emission, regular result builtins; separate instruction-effect/workspace-footprint design | Preserve relocation provenance, tracing/history and stack accounting; require object/diagnostic equivalence before changing selection or effect consumers |
+| Build per-part uClibc | Avenue 1: whole-object MOVE in `tp_expand_struct_call_words`, isolated worktree | Resolve fuzz seed 329, preserve aggregate/padding/nested-call ABI, and run the three-workload matrix; no slotmap/purity edits |
+| Optimize 64-bit division | Linux nested-P parent-continuation repair and trap-first validation | Keep P-state/default-policy changes separate from compiler experiments; provide matched kernel boot checks when candidate compilers are ready |
+| Improve TinyCC Transputer compiler | Coordination, regression gate, audit/ownership records | Verify scheduler baseline first, keep experiment ownership separate, review evidence and commit each validated group |
 
 The [full-file audit](COMPILER-AUDIT-2026-11-06.md) is complete. The review
 session fixed its reproduced packed-memcpy purity defect in `0fd07e87`;
-the raytracer session is investigating an indirect-reader copy-propagation
-counterexample; the CoreMark session is testing narrowing-cast spill removal.
-Keep those functions separate from other experiments.
+the scheduler indirect-reader guard and regression landed as `5a5ef711`.
+The coordinator reran `host/run_sched_indirect.sh` successfully; the owner
+reports four-target scheduler/frame checks and raytracer image matches on
+one/four nodes, plus model 3 on 16/64 nodes. The cast trial was rejected and
+recorded in `a361932b`: the normal scheduler already removes its proposed
+spill/reload pairs. Keep the newly assigned functions separate.
+
+## Current experiment gate
+
+The user explicitly requested scheduler correctness first, followed by the four
+avenues above. All five compiler owners acknowledged these assignments.
+
+* Use a baseline containing `5a5ef711` and `0fd07e87`. Capture an isolated
+  compiler snapshot and record its revision/hash; keep runtime archives,
+  emulator, target flags and inputs identical across each comparison.
+* Test whole-struct MOVE and shift staging against **all three workloads**:
+  Doom phase hashes/estimated cycles, fixed-seed CoreMark CRCs/estimated cycles,
+  and raytracer image equality/fixed-work modeled cycles. A synthetic win alone
+  is insufficient. Apply the same checks to other performance candidates.
+* Run the change-specific ABI/alias/volatile/target boundary regressions.
+  For refactors, compare objects, relocations and diagnostics before changing
+  emission decisions. Keep hardware timing estimates distinct from host speed.
+* Whole-struct MOVE has a promising targeted result, but fuzz seed 329 still
+  differs between baseline and trial while both disagree with the host. Resolve
+  defined behavior and the cause of that difference before landing; do not
+  dismiss it merely because the baseline also fails.
+* Commit each validated, useful change separately, with evidence. Keep
+  unprofitable or unresolved experiments out of main and record their result.
+  A source-only `TransLocal` MOVE experiment estimates potential; it is not a
+  compiler optimization until the transformation's preconditions are proven.
 
 Several sessions share one checkout and Git index. Use private source snapshots
 for experiments, keep intermediate shared edits buildable, and commit only
