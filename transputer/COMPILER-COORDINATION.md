@@ -25,9 +25,14 @@ no worker sessions were reopened.
 The chief's [deep POV-Ray analysis](POVRAY-BTL-ANALYSIS-2026-11-06.md)
 records the actual 16-node wiring and process/memory budgets, a reference-exact
 render with separate per-node instruction profiles, and measured FP/workspace
-and root byte-output targets. A TinyCC resident-result-before-sqrt candidate
-is under validation. Replaying the unchanged ICC BTL is explicitly separate
-from validating a renderer rebuilt with that candidate.
+and root byte-output targets. The chief also completed the
+[resident-result-before-sqrt acceptance](tests/bench/fpsqrt-resident-2026-11-06.md):
+all target regressions, hardened Doom, CoreMark, all four ray images at one/
+four nodes and complete rebuilt POV `box`/`basicvue` references pass. The
+full-source [POV gate](tests/bench/povray/README.md) is a generic single-node
+fixture with existing T9000 libc, distinct from the unchanged ICC BTL.
+Historical random-noise compatibility and a TinyCC 16-node runtime remain
+separate work. No archived worker chats were reopened.
 
 ## Closure checkpoint
 

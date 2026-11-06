@@ -206,11 +206,27 @@ macros, sphere intersection and Horner evaluation pass a supplementary
 baseline/candidate T800/T9000 executable. Its T800 fixture saves twelve
 instructions and thirty modeled cycles, including harness overhead.
 
-These facts do not yet establish full TinyCC-built POV image acceptance.
-That requires a suitable math library, initialized libc, allocation and
-host-file adapter. The existing libc archive contains T9000 code, so it
-cannot establish execution on a physical T800. The original 16-node runtime
-is an additional port beyond generic single-node rendering.
+The chief then completed a genuine full-source TinyCC image fixture:
+[runner and scope](tests/bench/povray/README.md). It rebuilds the generic
+renderer and fdlibm, initializes libc and provides a bounded iserver file/
+heap adapter. Baseline and candidate produce complete `box` and `basicvue`
+images byte-identical to their packaged references. The existing libc
+archive contains T9000 code, so these single-node 64 MiB emulator runs use
+`-s9`; they do not establish a physical 4 MiB T800 application. The original
+16-node runtime is an additional port beyond this numerical compiler gate.
+
+The [sqrt acceptance report](tests/bench/fpsqrt-resident-2026-11-06.md)
+records the paired instruction/size results and Doom, CoreMark and ray gates.
+The full rebuilt box removes 504,889 double spill/reload pairs, saving
+2,019,556 decoded instructions and 5,048,890 modeled T800 cycles. This is
+about 0.0881% of that model's total, not a measured hardware speedup.
+
+Procedural scenes need runtime compatibility as well as matching FP code.
+Generic host `glass` differs from its packaged reference before any TinyCC
+change. Source noise initialization uses `srand(0)`/`rand()`, while the BTL
+contains a 55-word additive generator with two wrapping indices. The current
+libc supplies a different sequence. Keep that port issue separate from the
+accepted deterministic-scene compiler tests; do not relax pixel equality.
 
 Input BTL SHA-256:
 `261e056fa3bc03bb9f41454938225703e45f8645d8fff8bc402350eadbf4d831`.

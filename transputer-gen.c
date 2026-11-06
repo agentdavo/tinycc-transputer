@@ -348,6 +348,7 @@ static int tp_fpr_reg = -1;
 static int tp_fpr_off = -1;
 static int tp_fpr_end = -1;
 static int tp_fpr_db;
+static int tp_fpu_take_resident(SValue *sv, int is_db);
 
 /* Same idea, but for the immediately preceding instruction of any kind. Used
  * to fold a constant address adjustment into the following non-local access. */
@@ -5122,7 +5123,18 @@ static void tp_gen_fpu_unary(int t9k_opr, int fpentry_code, int is_sqrt)
         return;
     }
 
-    tp_fpu_operands(1);
+    /* A single-use arithmetic result can still be in FA.  Take back its
+     * unobserved store before save_reg() turns the operand into a spill.
+     * Other live return-slot values must still go through the normal path:
+     * the unary result will overwrite REG_FRET (and its high word). */
+    if (is_sqrt && !tp_reg_live_on_vstack(REG_FRET, vtop) &&
+        (!is_db || !tp_reg_live_on_vstack(REG_FRET + 1, vtop)) &&
+        tp_fpu_take_resident(vtop, is_db)) {
+        abcreg_stack_depth = 0;
+        fpureg_stack_depth = 1;
+    } else {
+        tp_fpu_operands(1);
+    }
 
     if (tp_have_t9000_feat(TP_T9K_FPU)) {
         emit_instr(TP_OP_OPR, t9k_opr);
