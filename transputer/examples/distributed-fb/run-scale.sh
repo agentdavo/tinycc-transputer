@@ -31,10 +31,19 @@ case "$RENDERER" in
     techdemo)
         render_sources=("$ROOT/transputer/examples/dengine-t4/hellknight_material.c" "$ROOT/transputer/examples/dengine-t4/demo_room.c" "$HERE/material_raster.c" "$HERE/gles2_fragment.c" "$HERE/gles2_uber_vertex.c" "$HERE/shadow_map.c"); render_include=(); render_flags=(-DTG_DEMO_ROOM=1)
         if [[ ${ROOM:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_DRAW=1); fi
+        if [[ ${CHAR_SHADOW:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_CHARACTER_SHADOW=1); fi
         if [[ ${ROOM_SHADOW:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_SHADOW=1); fi
         if [[ ${ROOM_BUMP:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_BUMP=1); fi
         if [[ ${ROOM_SPECULAR:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_SPECULAR=1); fi
-        if [[ ${VERTEX_VM:-0} == 1 ]]; then render_flags+=(-DTG_DEMO_VERTEX_VM=1); render_sources+=("$HERE/gles2_uber_vm.c" "$HERE/glsl_vm.c"); fi
+        if [[ ${VERTEX_SOURCE:-0} == uber ]]; then render_flags+=(-DTG_DEMO_VERTEX_SOURCE=1); render_sources+=("$HERE/glsl_uber_vertex_shader.c"); fi
+        if [[ ${VERTEX_VM:-0} == 1 && ${VERTEX_SOURCE:-0} != uber ]]; then render_flags+=(-DTG_DEMO_VERTEX_VM=1); render_sources+=("$HERE/gles2_uber_vm.c"); fi
+        if [[ ${FRAGMENT_SOURCE:-0} == 1 || ${FRAGMENT_SOURCE:-0} == uber ]]; then
+            render_flags+=(-DTG_DEMO_FRAGMENT_SOURCE=1)
+            if [[ ${FRAGMENT_SOURCE:-0} == uber ]]; then render_flags+=(-DTG_DEMO_FRAGMENT_UBER=1); fi
+            render_sources+=("$HERE/glsl_fragment_shader.c")
+        fi
+        if [[ ${VERTEX_SOURCE:-0} == uber || ${FRAGMENT_SOURCE:-0} == 1 || ${FRAGMENT_SOURCE:-0} == uber ]]; then render_sources+=("$HERE/glsl_fragment_compiler.c"); fi
+        if [[ ${VERTEX_SOURCE:-0} == uber || ${VERTEX_VM:-0} == 1 || ${FRAGMENT_SOURCE:-0} == 1 || ${FRAGMENT_SOURCE:-0} == uber ]]; then render_sources+=("$HERE/glsl_vm.c"); fi
         if [[ ${ANIMATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ANIMATION=1); fi ;;
     *) echo 'Unknown RENDERER' >&2; exit 1 ;;
 esac
@@ -54,6 +63,22 @@ if [[ $RENDERER == hellknight || $RENDERER == hellknight-material || $RENDERER =
     render_include+=(-I"$WORK")
     render_flags+=(-DTEST_LARGE_WORKSPACE=1)
     if [[ $RENDERER == techdemo ]]; then PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/transputer/examples/dengine-t4/export_room.py" "$ROOT/transputer/examples/dEngine" "$WORK/room_asset.h"; fi
+    if [[ $RENDERER == techdemo && ${FRAGMENT_SOURCE:-0} == uber ]]; then
+        python3 - "$ROOT/transputer/examples/dEngine/data/shaders/f_uber.glsl" "$WORK/fragment_uber_source.h" <<'PY'
+from pathlib import Path
+import sys
+data=Path(sys.argv[1]).read_bytes()
+Path(sys.argv[2]).write_text('static const char fragment_uber_source[]={'+','.join(map(str,data))+',0};\n')
+PY
+    fi
+    if [[ $RENDERER == techdemo && ${VERTEX_SOURCE:-0} == uber ]]; then
+        python3 - "$ROOT/transputer/examples/dEngine/data/shaders/v_uber.glsl" "$WORK/vertex_uber_source.h" <<'PY'
+from pathlib import Path
+import sys
+data=Path(sys.argv[1]).read_bytes()
+Path(sys.argv[2]).write_text('static const char vertex_uber_source[]={'+','.join(map(str,data))+',0};\n')
+PY
+    fi
 fi
 {
     echo 'Connect HOST to processor 0 link 0'

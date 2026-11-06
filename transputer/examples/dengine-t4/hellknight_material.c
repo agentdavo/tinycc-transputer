@@ -5,6 +5,12 @@
 #ifdef TG_DEMO_ROOM
 #include "demo_room.h"
 #include "../distributed-fb/gles2_uber_vertex.h"
+#ifdef TG_DEMO_VERTEX_SOURCE
+#include "../distributed-fb/glsl_uber_vertex_shader.h"
+#endif
+#ifdef TG_DEMO_FRAGMENT_SOURCE
+#include "../distributed-fb/glsl_fragment_shader.h"
+#endif
 #ifdef TG_DEMO_VERTEX_VM
 #include "../distributed-fb/gles2_uber_vm.h"
 #endif
@@ -13,6 +19,15 @@
 #endif
 #endif
 #include "hellknight_asset.h"
+#ifdef TG_DEMO_FRAGMENT_UBER
+#include "fragment_uber_source.h"
+#endif
+#ifdef TG_DEMO_VERTEX_SOURCE
+#include "vertex_uber_source.h"
+static tg_glsl_fragment_program vertex_program;
+static tg_glsl_uber_vertex_shader vertex_shader;
+static int vertex_ready;
+#endif
 static const int sine[32]={0,50,98,142,181,213,237,251,256,251,237,213,181,142,98,50,0,-50,-98,-142,-181,-213,-237,-251,-256,-251,-237,-213,-181,-142,-98,-50};
 static tg_material_vertex verts[HK_VERTEX_COUNT];
 static tg_shadow_vertex light_verts[HK_VERTEX_COUNT];
@@ -24,6 +39,38 @@ static tg_fragment_texture specular={hk_specular,32,32,TG_FRAG_REPEAT,TG_FRAG_RE
 static tg_fragment_texture shadow={map_pixels,64,64,TG_FRAG_CLAMP,TG_FRAG_CLAMP};
 static tg_fragment_material material;
 static unsigned int previous_frame=~0u;
+#ifdef TG_DEMO_FRAGMENT_SOURCE
+static float square(float x,float exponent);
+static tg_glsl_fragment_program fragment_program;
+static tg_glsl_fragment_shader fragment_shader;
+static int fragment_ready;
+static void init_fragment(void)
+{
+#ifdef TG_DEMO_FRAGMENT_UBER
+    static const float ambient[3]={0.35f,0.35f,0.35f},diffuse[3]={0.75f,0.75f,0.75f};
+    static const float specular_light[3]={0.3f,0.3f,0.3f},mat_spec[3]={0,0,0},shininess[1]={2};
+    if(tg_glsl_compile_fragment_variant(fragment_uber_source,TG_FRAG_BUMP|TG_FRAG_SPEC|TG_FRAG_SHADOW,&fragment_program)) {
+        tg_glsl_shader_init(&fragment_shader,&fragment_program);fragment_shader.vm.pow_fn=square;fragment_shader.vm.clamp_negative_pow=1;
+        fragment_ready=tg_glsl_shader_varying(&fragment_shader,"v_texcoord",TG_GLSL_INPUT_UV) &&
+            tg_glsl_shader_varying(&fragment_shader,"lightVec",TG_GLSL_INPUT_LIGHT) && tg_glsl_shader_varying(&fragment_shader,"halfVec",TG_GLSL_INPUT_HALF) &&
+            tg_glsl_shader_varying(&fragment_shader,"lightPOVPosition",TG_GLSL_INPUT_LIGHT_CLIP) &&
+            tg_glsl_shader_uniform(&fragment_shader,"lightColorAmbient",ambient,3) && tg_glsl_shader_uniform(&fragment_shader,"lightColorDiffuse",diffuse,3) &&
+            tg_glsl_shader_uniform(&fragment_shader,"lightColorSpecular",specular_light,3) && tg_glsl_shader_uniform(&fragment_shader,"matColorSpecular",mat_spec,3) &&
+            tg_glsl_shader_uniform(&fragment_shader,"materialShininess",shininess,1) && tg_glsl_shader_texture(&fragment_shader,"s_baseMap",&base) &&
+            tg_glsl_shader_texture(&fragment_shader,"s_bumpMap",&bump) && tg_glsl_shader_texture(&fragment_shader,"s_specularMap",&specular) &&
+            tg_glsl_shader_texture(&fragment_shader,"s_shadowpMap",&shadow);
+    }
+#else
+    static const char *source="varying vec2 uv; uniform sampler2D map; uniform vec4 tint; void main(){gl_FragColor=texture2D(map,uv)*tint;}";
+    static const float tint[4]={0.6f,0.6f,0.6f,1.0f};
+    if(tg_glsl_compile_fragment(source,&fragment_program)) {
+        tg_glsl_shader_init(&fragment_shader,&fragment_program);
+        fragment_ready=tg_glsl_shader_varying(&fragment_shader,"uv",TG_GLSL_INPUT_UV) &&
+            tg_glsl_shader_uniform(&fragment_shader,"tint",tint,4) && tg_glsl_shader_texture(&fragment_shader,"map",&base);
+    }
+#endif
+}
+#endif
 static float square(float x,float exponent) { (void)exponent; return x*x; }
 #ifdef TG_DEMO_ROOM
 static float shader_root(float x) {
@@ -43,7 +90,16 @@ static void prepare(unsigned int frame)
     float camera_z=(100.0f-HK_CENTER_Z)*HK_WORLD_SCALE;
     static tg_uber_vertex_uniforms shader_uniforms;
     sy=0; cy=1;
-    if(previous_frame==~0u) demo_room_init(HK_CENTER_X,HK_CENTER_Y,HK_CENTER_Z,HK_WORLD_SCALE,camera_x,camera_y,camera_z);
+    if(previous_frame==~0u) {
+        demo_room_init(HK_CENTER_X,HK_CENTER_Y,HK_CENTER_Z,HK_WORLD_SCALE,camera_x,camera_y,camera_z);
+#ifdef TG_DEMO_VERTEX_SOURCE
+        vertex_ready=tg_glsl_compile_vertex_variant(vertex_uber_source,TG_FRAG_BUMP|TG_FRAG_SHADOW,&vertex_program) &&
+            tg_glsl_uber_vertex_init(&vertex_shader,&vertex_program,TG_FRAG_BUMP|TG_FRAG_SHADOW);
+#endif
+#ifdef TG_DEMO_FRAGMENT_SOURCE
+        init_fragment();
+#endif
+    }
     shader_uniforms.mvp[0]=0.9f; shader_uniforms.mvp[5]=1.2f;
     shader_uniforms.mvp[11]=-1.0f; shader_uniforms.mvp[12]=-0.9f*camera_x;
     shader_uniforms.mvp[13]=-1.2f*camera_y; shader_uniforms.mvp[15]=camera_z;
@@ -61,6 +117,9 @@ static void prepare(unsigned int frame)
     material.features=TG_FRAG_BUMP|TG_FRAG_SPEC;
 #else
     material.features=TG_FRAG_SHADOW|TG_FRAG_BUMP|TG_FRAG_SPEC;
+#endif
+#ifdef TG_DISABLE_CHARACTER_SHADOW
+    material.features&=~TG_FRAG_SHADOW;
 #endif
 #ifdef TG_DISABLE_BUMP
     material.features&=~TG_FRAG_BUMP;
@@ -108,7 +167,9 @@ static void prepare(unsigned int frame)
             input.normal[0]=v->varying.normal[0]; input.normal[1]=ny; input.normal[2]=v->varying.normal[2];
             input.tangent[0]=cy*tx+sy*tz; input.tangent[1]=ty; input.tangent[2]=-sy*tx+cy*tz;
             input.uv[0]=hk_uv[i][0]; input.uv[1]=hk_uv[i][1];
-#ifdef TG_DEMO_VERTEX_VM
+#ifdef TG_DEMO_VERTEX_SOURCE
+            if(vertex_ready && tg_glsl_uber_vertex_run(&vertex_shader,&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
+#elif defined(TG_DEMO_VERTEX_VM)
             if(tg_uber_vertex_vm(&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
 #else
             if(tg_uber_vertex(&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
@@ -166,11 +227,21 @@ void cube_render_band(unsigned int *tile,int *depth,int quadrant,unsigned int fr
     if(frame!=previous_frame) prepare(frame);
     c.color=tile; c.depth=depth; c.tile_x=(quadrant&1)*80; c.tile_y=(quadrant>>1)*60;
     c.clip_enabled=1; c.clip_x0=c.tile_x; c.clip_x1=c.tile_x+80; c.clip_y0=c.tile_y+row0; c.clip_y1=c.tile_y+row1;
+#ifdef TG_DEMO_VERTEX_SOURCE
+    if(!vertex_ready)errors++;
+#endif
     tg_clear_band(&c,0xff090e14u,row0,row1);
 #if defined(TG_DEMO_ROOM) && !defined(TG_DISABLE_ROOM_DRAW)
     errors+=demo_room_draw(&c,&shadow,0);
 #endif
-    for(i=0;i<HK_INDEX_COUNT;i+=3) errors+=tg_material_triangle(&c,&verts[hk_indices[i]],&verts[hk_indices[i+1]],&verts[hk_indices[i+2]],&material);
+    for(i=0;i<HK_INDEX_COUNT;i+=3) {
+#ifdef TG_DEMO_FRAGMENT_SOURCE
+        if(fragment_ready)errors+=tg_material_triangle_custom(&c,&verts[hk_indices[i]],&verts[hk_indices[i+1]],&verts[hk_indices[i+2]],tg_glsl_shader_fragment,&fragment_shader);
+        else errors++;
+#else
+        errors+=tg_material_triangle(&c,&verts[hk_indices[i]],&verts[hk_indices[i+1]],&verts[hk_indices[i+2]],&material);
+#endif
+    }
 #if defined(TG_DEMO_ROOM) && !defined(TG_DISABLE_ROOM_DRAW)
     errors+=demo_room_draw(&c,&shadow,1);
 #endif
