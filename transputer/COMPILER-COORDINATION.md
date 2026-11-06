@@ -103,6 +103,17 @@ eight VLA and 384 generated-expression bit comparisons. Full box removes
 (6.73621%); its ELF shrinks 15,632 bytes. Compound-product and dot-product
 loops save 35.26% and 44.15%, preserving logical arithmetic totals.
 
+The [double workspace-unit acceptance](tests/bench/double-slot-units-2026-11-06.md)
+merges known two-word FPU accesses before slot remapping. Units touching the
+outgoing-argument prefix remain entirely pinned, preserving the turbulence
+repair while allowing other units to use shorter workspace addresses. Full
+box saves 60,119,037 prefix bytes and modeled T800 cycles (1.16703%); the ELF
+shrinks 6,072 bytes. Decoded instruction/FPU totals are unchanged. All four
+workload gates pass, including full glass with the recovered RNG, plus 144
+paired target/layout runs, 32 mixed ABI, eight VLA and 384 generated-expression
+bit comparisons. Static checks confirm double adjacency and pinned arguments;
+soft-float fixture objects remain identical. The six worker chats stay closed.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |

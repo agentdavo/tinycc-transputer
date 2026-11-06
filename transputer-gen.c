@@ -8241,7 +8241,7 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
 
     /* Merge what LDLP ties together. */
     for (i = 0; i < n; i++) {
-        int t, recognised;
+        int t, last, recognised, bias = 0, extent = -1;
         if (ins[i].opcode != TP_ENC_LDLP)
             continue;
         if (tp_relax_byte_read(ins, n, i))
@@ -8251,23 +8251,28 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
             ;
         recognised = j < n && (ins[j].opcode == TP_ENC_LDNL ||
                                ins[j].opcode == TP_ENC_STNL);
-        if (!recognised && s >= 0 && s < P && j < n) {
-            int bias, extent = tpg_ldlp_extent(&ins[j], &bias);
-            /* Only the outgoing prefix is pinned.  A double access whose
-             * base lies there may still reach a movable word: remapping
-             * that high word alone would split the FPU's contiguous pair. */
-            if (extent > 1 && (int64_t)s + bias + extent - 1 >= P)
-                goto bail;
-        }
+        if (j < n)
+            extent = tpg_ldlp_extent(&ins[j], &bias);
+        /* A known double access ties both words together, including when
+         * its first word is pinned outgoing storage.  Unknown pseudo-
+         * register escapes retain the conservative path below. */
+        if (extent == 2)
+            recognised = 1;
         if (recognised) {
-            t = s + ins[j].operand;
-            if ((s < 0 || s >= F) != (t < 0 || t >= F)) {
-                if (s < P && t < P)
+            int64_t begin = (int64_t)s + bias;
+            int64_t end = begin + extent - 1;
+            if (begin < INT32_MIN || end > INT32_MAX)
+                goto bail;
+            t = begin;
+            last = end;
+            if ((s < 0 || s >= F) != (t < 0 || t >= F) ||
+                (s < 0 || s >= F) != (last < 0 || last >= F)) {
+                if (s < P && t < P && last < P)
                     continue;               /* staging, which stays put */
                 goto bail;                  /* reaches across the frame edge */
             }
-            if (s >= 0 && s < F && t != s) {
-                int a = s < t ? s : t, b = s < t ? t : s, k;
+            if (s >= 0 && s < F && (t != s || last != s)) {
+                int a = s < t ? s : t, b = s > last ? s : last, k;
                 for (k = a + 1; k <= b; k++)
                     cut[k] = 0;
             }
