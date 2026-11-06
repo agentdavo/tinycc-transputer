@@ -17,6 +17,9 @@ case "$RENDERER" in
         upstream="$ROOT/transputer/examples/dEngine/src/matrix.c"
         [[ -f $upstream ]] || { echo 'dEngine clone missing: see transputer/examples/dengine-t4/README.md' >&2; exit 1; }
         render_sources=("$ROOT/transputer/examples/dengine-t4/cube_glsl.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$upstream" "$ROOT/transputer/examples/dengine-t4/stdio_stub.c") ;;
+    gl-uber)
+        render_sources=("$ROOT/transputer/examples/dengine-t4/uber_gl_array.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$HERE/gles2_vm_bridge.c" "$HERE/gles2_texture.c" "$HERE/glsl_fragment_compiler.c" "$HERE/glsl_fragment_shader.c" "$HERE/glsl_uber_vertex_shader.c" "$HERE/glsl_vm.c" "$HERE/gles2_fragment.c" "$HERE/material_raster.c")
+        render_include=();render_flags=(-DTG_GLES_VM_PROGRAM=1 -DTEST_LARGE_WORKSPACE=1) ;;
     hellknight)
         upstream="$ROOT/transputer/examples/dEngine/src/matrix.c"
         [[ -f $upstream ]] || { echo 'dEngine clone missing: see transputer/examples/dengine-t4/README.md' >&2; exit 1; }
@@ -55,6 +58,30 @@ case "$NODES" in 1|2|4|8|16|32) ;; *) echo 'NODES must be 1, 2, 4, 8, 16, or 32'
 FRAMES=$((10#$FRAMES)); FPS=$((10#$FPS))
 if [[ -n ${WORK:-} ]]; then mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd); WORK=$(mktemp -d "$WORK/scale.XXXXXX"); else WORK=$(mktemp -d); fi
 cd "$WORK"
+if [[ $RENDERER == gl-uber ]]; then
+    python3 - "$ROOT/transputer/examples/dEngine/data/shaders" "$WORK/uber_gl_sources.h" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);lines=[]
+for name,file in [('vertex_uber_source','v_uber.glsl'),('fragment_uber_source','f_uber.glsl')]:
+    lines.append('static const char '+name+'[]={'+','.join(map(str,(p/file).read_bytes()))+',0};')
+Path(sys.argv[2]).write_text('\n'.join(lines)+'\n')
+PY
+    render_include=(-I"$WORK")
+    python3 - "$ROOT/transputer/examples/dEngine/src/renderer_progr.c" "$WORK/upstream_obj_draw.h" <<'PY'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text();marker='void RenderEntitiesOBJ(void* objVoid)'
+start=text.index(marker);opening=text.index('{',start);depth=0
+for i in range(opening,len(text)):
+    if text[i]=='{': depth+=1
+    elif text[i]=='}':
+        depth-=1
+        if depth==0:
+            Path(sys.argv[2]).write_text(text[start:i+1]+'\n');break
+else: raise SystemExit('unterminated upstream OBJ draw function')
+PY
+fi
 if [[ $RENDERER == hellknight || $RENDERER == hellknight-material || $RENDERER == techdemo ]]; then
     texture_args=()
     if [[ $RENDERER == hellknight-material || $RENDERER == techdemo ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png" --normal-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight_local.png" --specular-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellBaronSpec.png" --animation "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight_idle2.md5anim"); fi
