@@ -13,6 +13,8 @@ static int run(void)
     const char *vs[2]={"// vertex\nattribute vec3 p; uniform mat4 m; ","void main(void){gl_Position=m*vec4(p,1.0);}"};
     const char *fs="precision mediump float; uniform vec4 c; void main(){gl_FragColor=c;}";
     const char *unsupported="attribute vec3 p; void main(){gl_Position=vec4(p,1.0);}";
+    const char *conditional="#define USE_MATRIX\n#ifdef MISSING\n#define BAD\n#endif\n#ifdef USE_MATRIX\n#ifndef BAD\n/*\n#else\n*/\nattribute vec3 p; uniform mat4 m;\n#else\nnot valid shader\n#endif\n#else\nnot valid shader\n#endif\nvoid main(){gl_Position=m*vec4(p,1.0);}";
+    const char *broken="#ifdef MISSING\n#else\n#else\n#endif\n";
     GLuint v,f,bad,prog; GLint ok,loc; char log[80]; GLsizei n;
     context.color=tile; context.depth=depth; context.tile_x=context.tile_y=0;
     tgGlesInit(&gl,&context); tgGlesMakeCurrent(&gl);
@@ -22,6 +24,8 @@ static int run(void)
     glShaderSource(bad,1,&unsupported,0); glCompileShader(bad); glGetShaderiv(bad,GL_COMPILE_STATUS,&ok);
     if(ok) return 1;
     glGetShaderInfoLog(bad,sizeof(log),&n,log); if(n<=0 || !log[0]) return 2;
+    glShaderSource(bad,1,&conditional,0); glCompileShader(bad); glGetShaderiv(bad,GL_COMPILE_STATUS,&ok); if(!ok) return 14;
+    glShaderSource(bad,1,&broken,0); glCompileShader(bad); glGetShaderiv(bad,GL_COMPILE_STATUS,&ok); if(ok) return 15;
     glShaderSource(v,2,vs,0); glCompileShader(v); glGetShaderiv(v,GL_COMPILE_STATUS,&ok); if(!ok) return 3;
     glShaderSource(f,1,&fs,0); glCompileShader(f); glGetShaderiv(f,GL_COMPILE_STATUS,&ok); if(!ok) return 4;
     prog=glCreateProgram(); glAttachShader(prog,v); glAttachShader(prog,f);

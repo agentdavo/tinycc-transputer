@@ -82,11 +82,58 @@ static int identifier(lexer *l, char *name)
     if(l->bad || !isletter(l->token[0]) || length(l->token)>=32) return 0;
     copy(name,l->token,32); next(l); return 1;
 }
-static int compile(tg_gles_shader *h)
+/* Small object-like feature-flag preprocessor: no macro substitution,
+ * expressions or function-like macros. Unsupported directives fail closed. */
+static int preprocess(const char *src,char *out,int cap)
+{
+    char names[16][32]; int nname=0,depth=0,active=1,n=0,in_comment=0;
+    unsigned char parent[16],condition[16],seen_else[16];
+    while(*src) {
+        const char *line=src,*end,*p; int directive=0;
+        while(*src && *src!='\n') src++; end=src; if(*src)src++;
+        p=line; while(p<end && (*p==' ' || *p=='\t' || *p=='\r'))p++;
+        if(!in_comment && p<end && *p=='#') {
+            char op[16],name[32]; int k=0,i,found=0; directive=1; p++;
+            while(p<end && (*p==' ' || *p=='\t'))p++;
+            while(p<end && isletter(*p)) { if(k>=15)return 0; op[k++]=*p++; } op[k]=0;
+            while(p<end && (*p==' ' || *p=='\t'))p++;
+            k=0; while(p<end && (isletter(*p) || isdigit0(*p))) { if(k>=31)return 0; name[k++]=*p++; } name[k]=0;
+            while(p<end && (*p==' ' || *p=='\t' || *p=='\r'))p++;
+            if(p<end && !(p+1<end && p[0]=='/' && p[1]=='/'))return 0;
+            for(i=0;i<nname;i++) if(same(names[i],name))found=1;
+            if(same(op,"define")) {
+                if(!isletter(name[0]))return 0;
+                if(active && !found) { if(nname>=16)return 0; copy(names[nname++],name,32); }
+            } else if(same(op,"ifdef") || same(op,"ifndef")) {
+                if(!isletter(name[0]) || depth>=16)return 0;
+                parent[depth]=(unsigned char)active; condition[depth]=(unsigned char)(same(op,"ifdef")?found:!found);
+                seen_else[depth]=0; active=active && condition[depth]; depth++;
+            } else if(same(op,"else")) {
+                if(name[0] || !depth || seen_else[depth-1])return 0;
+                seen_else[depth-1]=1; active=parent[depth-1] && !condition[depth-1];
+            } else if(same(op,"endif")) {
+                if(name[0] || !depth)return 0; depth--; active=parent[depth];
+            } else return 0;
+        }
+        if(!directive) {
+            p=line;
+            while(p<end) {
+                if(!in_comment && p+1<end && p[0]=='/' && p[1]=='/') break;
+                if(!in_comment && p+1<end && p[0]=='/' && p[1]=='*') { if(active) { if(n>=cap-1)return 0; out[n++]=' '; } in_comment=1; p+=2; continue; }
+                if(in_comment && p+1<end && p[0]=='*' && p[1]=='/') { in_comment=0; p+=2; continue; }
+                if(!in_comment && active) { if(n>=cap-1)return 0; out[n++]=*p; }
+                p++;
+            }
+        }
+        if(n>=cap-1)return 0; out[n++]='\n';
+    }
+    if(depth || in_comment)return 0; out[n]=0; return 1;
+}
+static int compile(tg_gles_shader *h,const char *source)
 {
     lexer l; int attr_size=0, have_attr=0, have_uniform=0, wrapped=0;
     char attr[32], uniform[32];
-    l.p=h->source; l.bad=0; next(&l);
+    l.p=source; l.bad=0; next(&l);
     if(same(l.token,"precision")) {
         next(&l); if(!same(l.token,"lowp") && !same(l.token,"mediump") && !same(l.token,"highp")) return 0;
         next(&l); if(!take(&l,"float") || !take(&l,";")) return 0;
@@ -123,10 +170,12 @@ static int compile(tg_gles_shader *h)
 }
 void glCompileShader(GLuint id)
 {
-    tg_gles_program_state *s=state(); tg_gles_shader *h;
+    static char preprocessed[TG_GLES_SHADER_SOURCE_MAX];
+    tg_gles_program_state *s=state(); tg_gles_shader *h; int pp;
     if(!s || !(h=shader(s,id))) return;
-    h->compiled=(!h->overflow && compile(h)) ? GL_TRUE : GL_FALSE;
-    h->log=h->compiled ? "" : (h->overflow ? "shader source exceeds implementation limit" : "unsupported GLSL ES shader syntax or operations");
+    pp=!h->overflow && preprocess(h->source,preprocessed,sizeof(preprocessed));
+    h->compiled=(pp && compile(h,preprocessed)) ? GL_TRUE : GL_FALSE;
+    h->log=h->compiled ? "" : (h->overflow ? "shader source exceeds implementation limit" : (!pp ? "unsupported or malformed shader preprocessor input" : "unsupported GLSL ES shader syntax or operations"));
 }
 void glGetShaderiv(GLuint id, GLenum pname, GLint *params)
 {

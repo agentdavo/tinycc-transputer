@@ -78,6 +78,11 @@ for visibility, not the original camera path or scene light. It does not
 implement room bump/specular maps, transparency, animation-driven skinning
 on T4, or dEngine's actual GLSL renderer. The scene, mesh and texture
 exports are generated from the separate checkout in the run directory.
+The bounded shader compiler now accepts nested `#define`, `#ifdef`, `#ifndef`,
+`#else` and `#endif` feature flags for its existing small GLSL grammar. It
+does not expand macros or implement general preprocessor expressions; the
+full dEngine shaders exceed its 1,024-byte source limit and require much
+broader GLSL syntax and execution support.
 
 ```sh
 RENDERER=techdemo NODES=4 FRAMES=12 CAPTURE=1 \
