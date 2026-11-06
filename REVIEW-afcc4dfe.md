@@ -50,9 +50,9 @@ numbers and line numbers in the original review refer to the older source.
   and switch-table functions still bypass compiler relaxation, dense switch
   tables are opt-in. The 64-bit division runtime uses 32-bit division for
   32-bit dividends and for larger dividends with divisors up to 65535. Larger
-  32-bit power-of-two divisors use shifts. Other 32-bit divisors use 32
-  iterations after dividing the high word. Divisors
-  wider than 32 bits retain the 64-step loop. `test_u64_div_runtime` exercises
+  power-of-two divisors use shifts. Other 32-bit divisors use 32
+  iterations after dividing the high word. Other divisors wider than 32 bits
+  retain the 64-step loop. `test_u64_div_runtime` exercises
   these paths on the T414, T800 and T9000 emulator models, including signed
   limits, negative divisors, zero divisors and divisors with the high bit set.
   `tests/bench/u64_div.sh` measures 100 calls with T4's estimated T800-cycle
@@ -65,6 +65,9 @@ numbers and line numbers in the original review refer to the older source.
   to 168,822 estimated cycles per 100 calls. The `0xffffffff` phase increased
   from 1,729,922 to 1,732,422 cycles and the wide-divisor phase increased
   from 3,056,422 to 3,057,422 cycles.
+  The subsequent 64-bit power-of-two path reduced the `0x100000000` phase
+  from 3,057,422 to 63,222 estimated cycles per 100 calls. The `0xffffffff`
+  phase increased from 1,732,422 to 1,733,222 cycles.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of

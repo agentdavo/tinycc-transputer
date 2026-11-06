@@ -37,7 +37,7 @@ void test_main(void)
     ok &= __umoddi3(high, 0x8000000000000000ULL) == 0x7fffffffffffffffULL;
     ok &= __udivdi3(high, 0) == 0;
     ok &= __umoddi3(high, 0) == 0;
-    for (i = 0; i < 32; i++) {
+    for (i = 0; i < 64; i++) {
         ok &= __udivdi3(high, powers) == (high >> i);
         ok &= __umoddi3(high, powers) == (high & (powers - 1));
         powers <<= 1;
