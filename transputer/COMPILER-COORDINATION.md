@@ -9,12 +9,12 @@ describe the current compiler or the active `linux-7` kernel.
 
 | Session title | Owned work | Next evidence to collect |
 | --- | --- | --- |
-| Explain per-architecture libtcc1 builds | Direct int-to-FPU change integrated as `16e7e460`; avenue 3 pool profitability investigation | Measured workload binaries match the integration snapshot; reject the redundant dead-initializer trial unless another profitable direction is demonstrated |
-| Review and implement afcc4dfe | Seed 329 independently verified in `05b0cc9f`; next, missing MOVE2D transfer timing model | Derive cost/runtime inputs from primary timing tables; coordinate nested T4 ownership and retain target/timing-model distinctions |
-| Compare raytracer binaries | Scheduler correctness baseline; avenue 3 loop-weighted slot/cache profitability in `tp_slot_remap` / `tp_gaddr_cache` | Preserve implicit ABI slots, aggregate units, branch targets and relocations; account for initialization/frame costs; leave pool functions to the conversion session |
-| Refactor transputer code layout | Shared symbol emitter `3628b7e0`, effect design `51c35b4c`, accumulator helper `265309e9`, word-result table `3783a69a` | Keep effect consumers conservative; migrate narrowly after equivalence checks and coordination with scheduler/slot owners |
-| Build per-part uClibc | Scalar64 alignment repair `fc344c0b` landed; rebase and retest separate whole-struct MOVE trial | Rerun fuzz/oracles and matched workload matrix on the repaired baseline, preserving aggregate padding and nested-call behavior |
-| Optimize 64-bit division | Linux continuation repair `cbf812242ba1`; frame ABI `bc2969c2ea63` + root stub `a747d3b2`; HRM descriptor/state audit | Replace physical aliasing, preserve FP/block-move state, isolate remapped FP-load defect; trap-first remains opt-in |
+| Explain per-architecture libtcc1 builds | Direct int-to-FPU `16e7e460`; pool trials rejected; rounding investigation `1dbe953a`; FPUNOROUND semantic audit | Verify manual encoding/operand order and internal precision against primary sources; preserve conversion contracts and software-FP fallback |
+| Review and implement afcc4dfe | Seed verification `05b0cc9f`; MOVE2D timing `8177e21` / `04cb234d`; Doom harness `cabe1fbf`; linker profiling | Find a measured repeated scan/allocation beyond `a1d87275`; require byte/diagnostic equivalence and real-link throughput evidence |
+| Compare raytracer binaries | Scheduler correctness baseline; slot-weight and duplicate-load trials rejected in `55a9da8b` / `e75ac2a2`; hot-sequence profiling | Quantify a real hot-loop instruction/prefix saving before implementation; retain bounds/provenance/volatile/target/relocation guards |
+| Refactor transputer code layout | Symbol/builtin consolidation; shared history overlap `bef52a24`; `tps_dead_after` allocation/traversal profiling | Measure large-function compiler cost before changing storage; preserve rewrite decisions, updated reader facts and copy-chain folding |
+| Build per-part uClibc | Scalar64 repair `fc344c0b`; guarded whole-struct MOVE `c96e1bcd`; exact-tip acceptance report and separate compositor trial | Reconcile measured and integration snapshots, pin corrected emulator, retain volatile fallback and nested-call/padding behavior |
+| Optimize 64-bit division | Linux continuation/frame ABI repairs; T4 FP access repairs `fe000b2` / `2853b29`; per-continuation state preservation | Prove nested FP/block-move clobber first, repair entry/resume wrappers; keep physical alias migration separate and trap-first opt-in |
 | Improve TinyCC Transputer compiler | Coordination, regression gate, audit/ownership records | Verify scheduler baseline first, keep experiment ownership separate, review evidence and commit each validated group |
 
 The [full-file audit](COMPILER-AUDIT-2026-11-06.md) is complete. The review
@@ -84,23 +84,31 @@ commits. A session's title can lag behind its current workload.
   `resetch`, `crcbyte`, `crcword`, `gajw` and `wcnt`. All 256 target/configuration
   object/exit-status/diagnostic comparisons matched; concurrency, process and
   return-register runtime tests passed on default, T414 and T425 models.
-* **Whole-struct MOVE:** the independently inspected Doom phase tables and
-  five-iteration CoreMark logs match; the raytracer image matches. The seed 329
-  alignment repair is committed separately as `fc344c0b`, with a pre-fix-failing
-  source regression in c-testsuite `09118` and direct/nested/indirect/packed
-  scalar-argument tests. The owner is restoring the aggregate trial on top of
-  that fix and will rerun its fuzz and workload gates before committing it.
-  A rebased trial matches all three workloads and seeds 329/367, but integration
-  is held for a qualifier-loss issue: argument casting removes source volatility
-  before backend lowering. Preserve volatile aggregate/member behavior before
-  enabling the one-MOVE path.
-  Exact compilers, ELFs, relocations, disassembly, host oracle and hashes remain
-  preserved in the owner's `codex-struct-results`.
+* **Accumulating builtin table:** `fb93a8d8` routes nine four-argument TVX
+  accumulating builtins through the shared emitter. All 360 target/context
+  cases matched: 288 complete object comparisons and 72 malformed-call
+  diagnostic/status comparisons. Instruction effects and scheduling are unchanged.
+* **Whole-struct MOVE:** `c96e1bcd` stages ordinary aggregates with one MOVE;
+  volatile objects/members retain the original per-word copies. A guarded
+  trial passes 400 seeds at pads 0/1027, three 244-test suites and focused
+  six-target probes; its aggregate benchmark falls 1,854,033 to 1,064,031
+  modeled cycles, with hash `1747770740`. Doom phase hashes/cycles, five-iteration
+  CoreMark CRCs and 25,368,644 whole-run cycles match, as do reference-equal
+  405,061-ray images. The coordinator independently built a snapshot containing
+  the integrated guard and passed `host/test_struct_call_volatile.py`.
+  The measured snapshot predates an unrelated TVX refactor in the integration
+  tree; the owner is repeating exact `c96e1bcd` versus parent acceptance and
+  writing a tracked report. Do not present the earlier matrix as exact-tip
+  evidence. `fc344c0b` remains the separate seed 329 alignment repair.
 * **Pool initializer trial:** source-level dead initialization is real, but
   the normal scheduler also removes it. Current before/after objects and all
   three workload ELFs are identical; the isolated improvement with scheduling
   disabled is not a default-compiler performance win. Do not merge it merely
   because an earlier pass does less work. Report committed as `c6de60f9`.
+  A follow-up candidate-ranking trial fixed synthetic first-six admission bias,
+  but all three workload ELFs stayed byte-identical. Six-target loop/goto/Duff/
+  VLA probes passed. Rejected-trial report: `5b7e89f1`,
+  [pool ranking](tests/bench/pool-ranking-trial-2026-11-06.md).
 * **Loop/block-copy proof:** `6c9b24a9` adds safety coverage. A source-only
   overlapping forward loop changed behavior when replaced with MOVE, so a
   generic lowering still needs a non-overlap proof. Volatility, final index,
@@ -111,6 +119,18 @@ commits. A session's title can lag behind its current workload.
   CoreMark cycles and two Doom fill cycles. All four scenes match at one/four
   nodes for both variants, and seed 329 passes. The small gain and quadratic
   scan did not justify integration. See [report](tests/bench/slot-remap-loop-trial-2026-11-06.md).
+* **Duplicate-load probe:** rejected in `e75ac2a2`. One compiler-owned-slot
+  LDL-to-DUP site in the raytracer saved no modeled cycles and added 81 executed
+  prefix bytes. Local-variable candidates cannot ignore lost volatile qualifiers.
+* **Doom harness:** `cabe1fbf` replaces unexercised function bodies with explicit
+  failure stubs, rejects linker diagnostics and validates complete reference
+  output. All eleven phase hashes match before/after on four targets; a few
+  counts shift 320 cycles with layout. This is harness maintenance, not compiler
+  speedup. The coordinator independently passed its four host tests. See
+  [audit](tests/bench/doom-harness-audit-2026-11-06.md).
+* **History overlap helper:** `bef52a24` shares direct workspace-range checks
+  while retaining each caller's barriers and conservatively handling integer
+  limits. This is maintenance rather than a guest-performance claim.
 
 ## Landed work and measurement limits
 
@@ -180,10 +200,17 @@ TCWG 8.1 and ISM 7.15.1 specify:
   disjoint rectangular copies in `fbwm_shm.c` are candidates; palette lookup,
   texture sampling and format conversion require their own computation.
 
-The Doom session found that the current T4 estimated-cycle path did not charge
-the MOVE2D transfer itself. Until corrected and verified, those estimated-cycle
-results cannot establish a MOVE2D speedup. Keep padded-row/canary correctness
-results, target timing models and host emulator throughput separate.
+The missing MOVE2D transfer cost is repaired in nested T4 `8177e21`, with root
+evidence `04cb234d`. The model charges `(2p + 23) * rows`, where `p` is nominal
+rounded-up words per row; differing alignments/partial rows remain approximate.
+The host arithmetic test and T425/T800/T9000 semantic checks pass, with unchanged
+destination hash. The aligned benchmark estimate rises from 1,151 to 1,910,567
+cycles for 12 copies because omitted work is now counted. The coordinator also
+passed the host arithmetic test independently with native GCC. The shared T4
+executable was not rebuilt by that owner: pin the actual tested binary and use
+this revision or later before interpreting a new MOVE2D comparison. Older
+estimates cannot establish speedup. Keep canary correctness, target timing
+models and host emulator throughput separate.
 
 ### Less common instructions
 
@@ -196,8 +223,11 @@ results, target timing models and host emulator throughput separate.
   polynomial, bit direction, seed and finalization exactly. CoreMark validation
   remains mandatory.
 * `fpunoround`: TCWG 7.9.3 describes REAL64-to-REAL32 conversion without mantissa
-  rounding for normal numbers and zeros, in prescribed INT64 conversion
-  sequences that avoid double rounding. It is not general no-round arithmetic.
+  rounding for normal numbers and zeros. Its prescribed INT64-to-REAL32 recipe
+  is directed toward minus infinity, not nearest rounding. `1dbe953a` records
+  exact-oracle differences and an unresolved T4 discrepancy in that recipe;
+  do not substitute it into the normal conversion path without a separate
+  semantic proof. It is not general no-round arithmetic.
 * `testhardchan`: INMOS's 29 November 1988 Instruction Set Appendix describes
   shifting BReg into a link's internal register stack and returning DBuffReg.
   It requires inactive links and is not a nondestructive DMA-status probe.
@@ -254,8 +284,14 @@ Apply these to Linux, emulator tests and compiler effects descriptions:
   workspace-growth cases and scalar access/device/privilege checks.
 * Hardware P-state saving does not save all state. The supervisor must handle
   floating-point and block-move state when those resources can be clobbered
-  (ISM ch.13). The Linux owner is preserving a failing remapped `FPLDNLSN`
-  case separately from the FP-state preservation investigation.
+  (ISM ch.13). The Linux owner reproduced remapped `FPLDNLSN` and RX `FPSTNLSN`
+  failures separately from state preservation. Nested T4 `fe000b2` fixes FP
+  loads through translated word accessors and preflights wide reads; `2853b29`
+  repairs stores, checks permissions before consuming the FP operand, and
+  preflights wide writes. Denied second-word probes preserve memory/FP state;
+  removing the preflight fails the canary. Host/guest protection and workspace
+  tests pass, and the unchanged Linux frame-ABI image reaches `DESKTOP_LOOP`.
+  Actual Linux per-continuation FP/block state preservation remains separate.
 * Both local text manuals render the null descriptor as `#8000000`, whereas
   implementation code uses `0x80000000`. Verify the printed facsimile before
   changing that literal; OCR alone does not establish a correction.

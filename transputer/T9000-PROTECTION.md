@@ -71,10 +71,21 @@ state handling in Linux.
 
 Those tests exposed two independent emulator defects: `FPLDNLSN` read zero
 instead of relocated `0x3FA00000`, and `FPSTNLSN` to RX memory failed to trap.
-The Linux session owns their repair and related FP-width/boundary checks.
-The retained audit/reproducer is in `logs/p-isa-audit/`; these are local
-captures, not installed test-suite artifacts. Keep this failure baseline
-distinct from any later emulator fix.
+Nested T4 commits `fe000b2` (loads) and `2853b29` (stores) repair these paths
+through guest word accessors. Multiword preflight prevents a denied second
+word from partially writing memory or consuming an FP operand. The committed
+`t4/tests/test_t9000_pmode.c` covers direct/indexed remapping, device-only/RX
+violations, both widths, state loads/stores and framebuffer access. Removing
+only the store preflight fails its first-word canary.
+
+Host/guest protection and workspace-extension checks passed; the unchanged
+Linux frame-ABI image still reaches `DESKTOP_LOOP`, with parent resumption and
+nested child status 23. This is T4 compatibility evidence. It does not repair
+the overlapping Linux regions or add Linux FP/block-state preservation.
+The standard debug build has a pre-existing `Instruction` macro/field
+collision; a private build with only that field renamed passes the debug
+guest suite. The retained audit/reproducer and validation record are local
+captures in `logs/p-isa-audit/`.
 
 ---
 

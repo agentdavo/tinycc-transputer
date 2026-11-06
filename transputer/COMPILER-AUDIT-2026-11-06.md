@@ -97,8 +97,11 @@ verification hashes and results are committed in `05b0cc9f`.
 See [c-testsuite regression](c-testsuite/tests/single-exec/09118.c) and
 [scalar argument tests](tests/test_scalar_arg_alignment.c).
 
-The aggregate-copy optimization remains separate and must repeat its fuzz and
-Doom/CoreMark/raytracer checks on this repaired baseline before landing.
+The separate aggregate-copy optimization landed as `c96e1bcd`, including
+volatile-source/member fallback. Its guarded trial passes 400 fuzz seeds at
+two link pads and the three workload checks. The owner is repeating acceptance
+from the exact integration commit after an unrelated TVX refactor changed the
+source snapshot; see the coordination record for current evidence status.
 
 ## Next performance experiments
 
@@ -150,8 +153,13 @@ Subsequent check-in outcomes:
   scheduler already removes those initializations, leaving all three workload
   ELFs identical. Surviving-reference and admission profitability remain open.
 * The rebased whole-struct trial matches workload outputs and repaired seeds,
-  but argument casting loses source volatility before backend lowering.
-  Integration remains gated on preserving volatile aggregate/member behavior.
+  and `c96e1bcd` preserves source volatility across argument casting before
+  choosing whole-object or original per-word staging. The coordinator also
+  passed the committed code-generation guard in an independent source build.
+* `bef52a24` shares workspace overlap arithmetic in the integer/FPU history
+  predicates while preserving caller barriers. `cabe1fbf` hardens the Doom
+  benchmark against unresolved paths and invalid results; changing that harness
+  shifts some layout-dependent counts, so use matched harnesses for comparisons.
 
 ## Common code worth consolidating
 
@@ -202,11 +210,14 @@ bounds-related flags can exclude operands from the earlier fast path.
 
 ## Deferred or explicitly unproven
 
-* T800 INT64→REAL32 currently has an acknowledged double-rounding difference
-  above 2^53. The regression accepts either adjacent result for a chosen case.
-  This is not a newly established unconditional C violation. If a correctly
-  rounded cross-target contract is required, evaluate the prescribed TCWG
-  `fpunoround` conversion sequence or an exact helper and tighten the oracle.
+* `1dbe953a` quantifies INT64→REAL32 nearest-even differences with 350 exact
+  integer-derived vectors. All emitted results remain one of the two adjacent
+  binary32 values, consistent with the documented C latitude; this does not
+  establish an unconditional C violation. TCWG's `fpunoround` recipe is for
+  round toward minus infinity, not a drop-in nearest-even replacement. Its
+  literal sequence also differs from the directed oracle on T4, requiring
+  separate instruction/representation validation before changing lowering.
+  See [investigation](tests/bench/int64-real32-investigation-2026-11-06.md).
 * `tp_gaddr_cache` changes frame bookkeeping before later relaxation bailouts.
   The audit did not establish emitted-frame corruption; transactional state
   cleanup remains a lower-priority question.
