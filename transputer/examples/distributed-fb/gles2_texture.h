@@ -33,5 +33,6 @@ void glDeleteTextures(GLsizei,const GLuint *);
 void glActiveTexture(GLenum);
 void glBindTexture(GLenum,GLuint);
 void glTexParameteri(GLenum,GLenum,GLint);
+void glTexParameterf(GLenum,GLenum,GLfloat);
 void glTexImage2D(GLenum,GLint,GLint,GLsizei,GLsizei,GLint,GLenum,GLenum,const void *);
 #endif

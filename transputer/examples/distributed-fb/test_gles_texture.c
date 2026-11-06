@@ -13,6 +13,7 @@ static int run(void)
     tgGlesInit(&gl,&target); tgGlesMakeCurrent(&gl); tgGlesInitTextures(&gl,&textures,storage,sizeof(storage));
     glGenTextures(2,ids); if(glGetError()!=GL_NO_ERROR || !ids[0] || ids[0]==ids[1])return 1;
     glBindTexture(GL_TEXTURE_2D,ids[0]); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,(GLfloat)GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,1,0,GL_RGBA,GL_UNSIGNED_BYTE,data);
     if(glGetError()!=GL_NO_ERROR || !(view=tgGlesTextureUnit(0)))return 2;
     vm.texture[0]=view; vm.reg[0][0]=1; vm.reg[0][1]=0;

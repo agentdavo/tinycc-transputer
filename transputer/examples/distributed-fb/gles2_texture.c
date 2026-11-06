@@ -70,6 +70,13 @@ void glTexParameteri(GLenum target,GLenum pname,GLint value)
     if(pname==GL_TEXTURE_WRAP_S)t->view.wrap_s=value==GL_REPEAT?TG_FRAG_REPEAT:TG_FRAG_CLAMP;
     else t->view.wrap_t=value==GL_REPEAT?TG_FRAG_REPEAT:TG_FRAG_CLAMP;
 }
+void glTexParameterf(GLenum target,GLenum pname,GLfloat value)
+{
+    if(value!=(GLfloat)GL_NEAREST && value!=(GLfloat)GL_REPEAT && value!=(GLfloat)GL_CLAMP_TO_EDGE) {
+        if(state())tgGlesSetError(GL_INVALID_ENUM);return;
+    }
+    glTexParameteri(target,pname,(GLint)value);
+}
 void glTexImage2D(GLenum target,GLint level,GLint internal,GLsizei width,GLsizei height,GLint border,GLenum format,GLenum type,const void *pixels)
 {
     tg_gles_texture_state *s=state(); tg_gles_texture *t; unsigned int n,i,slot; unsigned char *dst; const unsigned char *src=pixels;

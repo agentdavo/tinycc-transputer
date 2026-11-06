@@ -239,13 +239,27 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 #ifdef TG_GLES_VM_PROGRAM
     if(s->material_vertex) {
         tg_material_vertex mv[3];GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];
+#ifndef TG_GLES_DISABLE_VM_VERTEX_CACHE
+        tg_material_vertex cached[TG_GLES_VERTEX_CACHE_SIZE];unsigned int cached_index[TG_GLES_VERTEX_CACHE_SIZE];unsigned char valid[TG_GLES_VERTEX_CACHE_SIZE];
+        for(i=0;i<TG_GLES_VERTEX_CACHE_SIZE;i++)valid[i]=0;
+#endif
         if(!s->material_fragment || (s->material_prepare && !s->material_prepare(s->material_user))) { tgGlesSetError(GL_INVALID_OPERATION); return; }
         for(i=0;i+2<count;i+=3) {
             for(j=0;j<3;j++) {
                 unsigned int index;
                 if(width==1)index=p[i+j];else { union { uint16_t value; unsigned char b[2]; } x;x.b[0]=p[(i+j)*2];x.b[1]=p[(i+j)*2+1];index=x.value; }
+#ifndef TG_GLES_DISABLE_VM_VERTEX_CACHE
+                { unsigned int slot=index&(TG_GLES_VERTEX_CACHE_SIZE-1);
+                  if(!valid[slot]||cached_index[slot]!=index) {
+                      if(!load_attributes(s,index,values))return;
+                      if(!s->material_vertex(values,&cached[slot],s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
+                      cached_index[slot]=index;valid[slot]=1;
+                  }
+                  mv[j]=cached[slot]; }
+#else
                 if(!load_attributes(s,index,values))return;
                 if(!s->material_vertex(values,&mv[j],s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
+#endif
             }
             if(tg_material_triangle_custom(c->target,&mv[0],&mv[1],&mv[2],s->material_fragment,s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
         }

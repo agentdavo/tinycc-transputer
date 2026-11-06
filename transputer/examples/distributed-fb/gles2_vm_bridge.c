@@ -80,7 +80,7 @@ int tgGlesVmUniformVector(tg_gles_program *p,int loc,const float *v,int width)
         else if(same(s->name,"cameraPosition"))dst=p->vm_uniforms.camera_position;else return 0;
         for(i=0;i<width;i++)dst[i]=v[i];return 1;
     }
-    if(same(s->name,"materialShininess") && (v[0]<1.0f || v[0]>1024.0f || v[0]!=(float)(unsigned int)v[0]))return 0;
+    if(same(s->name,"materialShininess") && (v[0]!=v[0] || v[0]<1.0f || v[0]>1024.0f || v[0]!=(float)(unsigned int)v[0]))return 0;
     return tg_glsl_shader_uniform(&p->vm_fragment,s->name,v,width);
 }
 int tgGlesVmUniformSampler(tg_gles_program *p,int loc,int value)

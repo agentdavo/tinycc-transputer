@@ -280,7 +280,7 @@ void glLinkProgram(GLuint id)
         }
         for(i=0;i<f->ir.symbol_count;i++) if(f->ir.symbols[i].kind==TG_GLSL_UNIFORM || f->ir.symbols[i].kind==TG_GLSL_SAMPLER) {
             j=tg_glsl_find_symbol(&v->ir,f->ir.symbols[i].name);
-            if(j>=0 && ((v->ir.symbols[j].kind!=f->ir.symbols[i].kind) || (v->ir.symbols[j].width!=f->ir.symbols[i].width))) { p->log="uniform interface mismatch"; return; }
+            if(j>=0) { p->log="shared-stage uniforms are not yet supported"; return; }
         }
         p->vertex_ir=v->ir;p->fragment_ir=f->ir;
         if(!tgGlesVmLink(p)) { p->log="unsupported programmable shader interface";return; }
