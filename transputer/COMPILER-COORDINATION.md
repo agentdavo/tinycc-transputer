@@ -44,8 +44,10 @@ the relevant snapshots and current source checked first.
 
 ### Chat archival record
 
-All six handoffs reviewed; archival pending. Archive the chats only, preserving
-their worktrees and evidence. The chief chat remains open.
+All six handoffs were reviewed and all six chats were **archived successfully
+on 6 November 2026**. The archive tool confirmed `archived: true` for every
+ID below. Worktrees and evidence were preserved; no worker was interrupted
+mid-run. Archival is reversible. The chief chat remains open.
 
 | Session title | Chat ID |
 | --- | --- |
