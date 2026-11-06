@@ -47,9 +47,13 @@ def main():
         for divisor in range(1, 65540):
             dividend = rng.getrandbits(64) | (1 << 63)
             assert (udiv(dividend, divisor), umod(dividend, divisor)) == divmod(dividend, divisor)
+        for i in range(10000):
+            divisor = rng.randrange(1 << 32, 1 << 64)
+            for dividend in (divisor - 1, divisor, min(divisor + 1, MASK)):
+                assert (udiv(dividend, divisor), umod(dividend, divisor)) == divmod(dividend, divisor)
         for fn in (udiv, umod, sdiv, smod):
             assert fn(123, 0) == 0
-    print("100,000 signed and unsigned pairs and 65,539 small divisors passed")
+    print("100,000 signed and unsigned pairs, 65,539 small divisors, and 30,000 wide boundaries passed")
 
 
 if __name__ == "__main__":

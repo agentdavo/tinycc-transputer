@@ -95,6 +95,11 @@ static u64 u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
         result.p.hi = dividend.p.hi / divisor.p.lo;
         remainder.p.lo = dividend.p.hi % divisor.p.lo;
     } else {
+        if (dividend.p.hi < divisor.p.hi ||
+            (dividend.p.hi == divisor.p.hi && dividend.p.lo < divisor.p.lo)) {
+            if (rem_out) *rem_out = dividend;
+            return 0;
+        }
         /* A divisor of at least 2^32 is greater than the initial high word,
          * so the first 32 restoring steps produce no quotient bits. */
         remainder.p.lo = dividend.p.hi;

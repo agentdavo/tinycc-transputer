@@ -68,6 +68,13 @@ defined behavior.
   power-of-two divisors use shifts. Other 32-bit divisors use 32
   iterations after dividing the high word. Other divisors wider than 32 bits
   also use 32 restoring iterations because the high quotient word is zero.
+  For a wide divisor greater than the dividend, the runtime returns zero and
+  the original dividend as remainder without entering that loop. The target
+  regression checks adjacent values on both sides of the boundary; the host
+  differential test checks 30,000 such values. For 100 divisions just below
+  a wide divisor, estimated T800 cycles fell from 443,619 to 38,919. The
+  existing non-power-of-two `0x100000003` phase rose from 542,919 to 545,519
+  cycles in the same compiler snapshot; these are emulator estimates.
   `test_u64_div_runtime` exercises
   these paths on the T414, T800 and T9000 emulator models, including signed
   limits, negative divisors, zero divisors and divisors with the high bit set.

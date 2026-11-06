@@ -52,6 +52,7 @@ void test_main(void)
     bench(0x123456789abcdef0ULL, 0x10000000000ULL);
     bench(0x123456789abcdef0ULL, 0x8000000000000000ULL);
     bench(0x123456789abcdef0ULL, 0x100000003ULL);
+    bench(0x123456789abcdef0ULL, 0x123456789abcfff0ULL);
     bench_signed(-0x123456789abcdef0LL, -65535);
     bench_signed(-0x123456789abcdef0LL, 0x100000003LL);
     bench_shift(0x123456789abcdef0ULL);
