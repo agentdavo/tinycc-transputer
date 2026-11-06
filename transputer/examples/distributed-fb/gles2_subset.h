@@ -24,6 +24,19 @@ typedef int GLsizei;
 #define GL_DEPTH_BUFFER_BIT 0x00000100u
 #define GL_STENCIL_BUFFER_BIT 0x00000400u
 #define GL_COLOR_BUFFER_BIT 0x00004000u
+#ifdef TG_GLES_VM_PROGRAM
+#define GL_DEPTH_TEST 0x0b71
+#define GL_CULL_FACE 0x0b44
+#define GL_BLEND 0x0be2
+#define GL_FRONT 0x0404
+#define GL_BACK 0x0405
+#define GL_FRONT_AND_BACK 0x0408
+#define GL_ZERO 0
+#define GL_ONE 1
+#define GL_SRC_ALPHA 0x0302
+#define GL_ONE_MINUS_SRC_ALPHA 0x0303
+#define GL_VIEWPORT 0x0ba2
+#endif
 typedef struct {
     tg_context *target;
     unsigned int clear_argb, color_write_mask;
@@ -35,6 +48,10 @@ typedef struct {
     struct tg_gles_draw_state *draw;
     struct tg_gles_program_state *programs;
     struct tg_gles_texture_state *textures;
+#ifdef TG_GLES_VM_PROGRAM
+    GLint viewport_x,viewport_y;GLsizei viewport_width,viewport_height;
+    GLboolean depth_enabled,cull_enabled,blend_enabled;GLenum cull_face,blend_src,blend_dst;
+#endif
 } tg_gles_state;
 /* Explicit embedding hook, not part of OpenGL ES or EGL. One current state
  * per transputer address space; call before using the gl* subset. */
@@ -55,4 +72,9 @@ void glGetIntegerv(GLenum pname, GLint *data);
 void glGetFloatv(GLenum pname, GLfloat *data);
 void glClear(GLbitfield mask);
 GLenum glGetError(void);
+#ifdef TG_GLES_VM_PROGRAM
+void glViewport(GLint x,GLint y,GLsizei width,GLsizei height);
+void glCullFace(GLenum mode);
+void glBlendFunc(GLenum source,GLenum destination);
+#endif
 #endif

@@ -9,6 +9,7 @@ typedef struct {
     tg_fragment_varyings varying;
 } tg_material_vertex;
 typedef int (*tg_material_fragment_fn)(void *,const tg_fragment_varyings *,float out[4]);
+typedef struct { int cull,depth_test,depth_write,blend;unsigned int color_mask; } tg_material_draw_options;
 /* Return the number of fragments rejected by the material evaluator. */
 int tg_material_triangle(tg_context *, const tg_material_vertex *,
                          const tg_material_vertex *, const tg_material_vertex *,
@@ -20,4 +21,7 @@ int tg_material_triangle_blended(tg_context *, const tg_material_vertex *,
 /* Caller-provided fragment program; return conventions match TG_FRAGMENT_*. */
 int tg_material_triangle_custom(tg_context *,const tg_material_vertex *,const tg_material_vertex *,
                                 const tg_material_vertex *,tg_material_fragment_fn,void *);
+/* cull: 0 neither, 1 back, 2 front, 3 both; blend: 0 replace, 1 src-alpha. */
+int tg_material_triangle_config(tg_context *,const tg_material_vertex *,const tg_material_vertex *,
+                                const tg_material_vertex *,tg_material_fragment_fn,void *,const tg_material_draw_options *);
 #endif

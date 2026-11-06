@@ -238,12 +238,16 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
     }
 #ifdef TG_GLES_VM_PROGRAM
     if(s->material_vertex) {
-        tg_material_vertex mv[3];GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];
+        tg_material_vertex mv[3];GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];tg_material_draw_options options;
 #ifndef TG_GLES_DISABLE_VM_VERTEX_CACHE
         tg_material_vertex cached[TG_GLES_VERTEX_CACHE_SIZE];unsigned int cached_index[TG_GLES_VERTEX_CACHE_SIZE];unsigned char valid[TG_GLES_VERTEX_CACHE_SIZE];
         for(i=0;i<TG_GLES_VERTEX_CACHE_SIZE;i++)valid[i]=0;
 #endif
         if(!s->material_fragment || (s->material_prepare && !s->material_prepare(s->material_user))) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+        options.cull=c->cull_enabled?(c->cull_face==GL_BACK?1:c->cull_face==GL_FRONT?2:3):0;
+        options.depth_test=c->depth_enabled;options.depth_write=c->depth_write;
+        options.blend=c->blend_enabled && c->blend_src==GL_SRC_ALPHA && c->blend_dst==GL_ONE_MINUS_SRC_ALPHA;
+        options.color_mask=c->color_write_mask;
         for(i=0;i+2<count;i+=3) {
             for(j=0;j<3;j++) {
                 unsigned int index;
@@ -261,7 +265,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
                 if(!s->material_vertex(values,&mv[j],s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
 #endif
             }
-            if(tg_material_triangle_custom(c->target,&mv[0],&mv[1],&mv[2],s->material_fragment,s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
+            if(tg_material_triangle_config(c->target,&mv[0],&mv[1],&mv[2],s->material_fragment,s->material_user,&options)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
         }
         return;
     }

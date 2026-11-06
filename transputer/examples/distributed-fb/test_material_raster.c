@@ -8,6 +8,8 @@ static int depth[TG_TILE_W*TG_TILE_H];
 static float shadow_depth[64]; static unsigned char shadow_rgba[64*4];
 static const unsigned char texels[]={255,0,0,255, 0,255,0,255};
 static float square(float x,float y) { (void)y; return x*x; }
+static int solid(void *user,const tg_fragment_varyings *v,float out[4])
+{ const float *c=user;int i;(void)v;for(i=0;i<4;i++)out[i]=c[i];return TG_FRAGMENT_OK; }
 static int run(void)
 {
     static tg_context c; static tg_material_vertex a,b,d;
@@ -50,6 +52,18 @@ static int run(void)
         a.varying.light_clip[1]=b.varying.light_clip[1]=d.varying.light_clip[1]=0.9f;
         a.depth=b.depth=d.depth=45;
         if(tg_material_triangle(&c,&a,&b,&d,&m) || pixels[2*TG_TILE_W+2]!=0xff00ff00u) return 8;
+    }
+    {
+        static const float red_half[]={1,0,0,0.5f};
+        tg_material_draw_options opt={1,1,1,0,0xffffffffu};
+        pixels[0]=0xff0000ffu;depth[0]=50;a.depth=b.depth=d.depth=51;
+        if(tg_material_triangle_config(&c,&a,&b,&d,solid,(void *)red_half,&opt)||pixels[0]!=0x80ff0000u||depth[0]!=51)return 11;
+        pixels[0]=0xff0000ffu;depth[0]=50;opt.cull=2;
+        if(tg_material_triangle_config(&c,&a,&b,&d,solid,(void *)red_half,&opt)||pixels[0]!=0xff0000ffu||depth[0]!=50)return 12;
+        opt.cull=0;opt.blend=1;opt.depth_write=0;
+        if(tg_material_triangle_config(&c,&a,&b,&d,solid,(void *)red_half,&opt)||pixels[0]!=0xbf80007fu||depth[0]!=50)return 13;
+        opt.blend=0;opt.depth_test=0;opt.color_mask=0x00ff0000u;a.depth=b.depth=d.depth=49;
+        if(tg_material_triangle_config(&c,&a,&b,&d,solid,(void *)red_half,&opt)||pixels[0]!=0xbfff007fu||depth[0]!=50)return 14;
     }
     {
         static const unsigned char translucent[4]={255,0,0,128};

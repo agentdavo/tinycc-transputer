@@ -21,6 +21,9 @@ static int run(void)
 {
     GLuint v,f,p,tex[4];GLint a;int mode;target.color=tile;target.depth=depth;
     tgGlesInit(&gl,&target);tgGlesMakeCurrent(&gl);tgGlesInitDraw(&gl,&draw,0,0,0,0);tgGlesInitPrograms(&gl,&programs);tgGlesInitTextures(&gl,&textures,arena,sizeof(arena));
+    glViewport(0,0,160,120);glEnable(GL_DEPTH_TEST);glEnable(GL_CULL_FACE);glCullFace(GL_BACK);
+    glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    if(!glIsEnabled(GL_DEPTH_TEST)||!glIsEnabled(GL_CULL_FACE)||glIsEnabled(GL_BLEND))return 8;
     glGenTextures(4,tex);
     glActiveTexture(GL_TEXTURE0+0);glBindTexture(GL_TEXTURE_2D,tex[0]);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,red);
     glActiveTexture(GL_TEXTURE0+1);glBindTexture(GL_TEXTURE_2D,tex[1]);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,bump);

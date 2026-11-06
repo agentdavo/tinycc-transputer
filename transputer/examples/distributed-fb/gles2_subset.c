@@ -13,6 +13,10 @@ void tgGlesInit(tg_gles_state *s, tg_context *target)
     s->depth_write=GL_TRUE; s->error=GL_NO_ERROR;
     s->scissor_x=0; s->scissor_y=0; s->scissor_width=160; s->scissor_height=120;
     s->scissor_enabled=GL_FALSE; s->draw=0; s->programs=0; s->textures=0; target->clip_enabled=0;
+#ifdef TG_GLES_VM_PROGRAM
+    s->viewport_x=s->viewport_y=0;s->viewport_width=160;s->viewport_height=120;
+    s->depth_enabled=s->cull_enabled=s->blend_enabled=GL_FALSE;s->cull_face=GL_BACK;s->blend_src=GL_ONE;s->blend_dst=GL_ZERO;
+#endif
 }
 void tgGlesMakeCurrent(tg_gles_state *s) { current=s; if (s) update_clip(); }
 tg_gles_state *tgGlesCurrentState(void) { return current; }
@@ -57,18 +61,33 @@ void glScissor(GLint x, GLint y, GLsizei width, GLsizei height)
 void glEnable(GLenum cap)
 {
     if (!current) return;
+#ifdef TG_GLES_VM_PROGRAM
+    if(cap==GL_DEPTH_TEST){current->depth_enabled=GL_TRUE;return;}
+    if(cap==GL_CULL_FACE){current->cull_enabled=GL_TRUE;return;}
+    if(cap==GL_BLEND){current->blend_enabled=GL_TRUE;return;}
+#endif
     if (cap!=GL_SCISSOR_TEST) { if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM; return; }
     current->scissor_enabled=GL_TRUE; update_clip();
 }
 void glDisable(GLenum cap)
 {
     if (!current) return;
+#ifdef TG_GLES_VM_PROGRAM
+    if(cap==GL_DEPTH_TEST){current->depth_enabled=GL_FALSE;return;}
+    if(cap==GL_CULL_FACE){current->cull_enabled=GL_FALSE;return;}
+    if(cap==GL_BLEND){current->blend_enabled=GL_FALSE;return;}
+#endif
     if (cap!=GL_SCISSOR_TEST) { if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM; return; }
     current->scissor_enabled=GL_FALSE; update_clip();
 }
 GLboolean glIsEnabled(GLenum cap)
 {
     if (!current) return GL_FALSE;
+#ifdef TG_GLES_VM_PROGRAM
+    if(cap==GL_DEPTH_TEST)return current->depth_enabled;
+    if(cap==GL_CULL_FACE)return current->cull_enabled;
+    if(cap==GL_BLEND)return current->blend_enabled;
+#endif
     if (cap!=GL_SCISSOR_TEST) { if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM; return GL_FALSE; }
     return current->scissor_enabled;
 }
@@ -82,6 +101,12 @@ static int get_state(GLenum pname, GLint v[4])
         v[0]=current->scissor_x; v[1]=current->scissor_y;
         v[2]=current->scissor_width; v[3]=current->scissor_height;
         return 4;
+#ifdef TG_GLES_VM_PROGRAM
+    case GL_VIEWPORT:v[0]=current->viewport_x;v[1]=current->viewport_y;v[2]=current->viewport_width;v[3]=current->viewport_height;return 4;
+    case GL_DEPTH_TEST:v[0]=current->depth_enabled;return 1;
+    case GL_CULL_FACE:v[0]=current->cull_enabled;return 1;
+    case GL_BLEND:v[0]=current->blend_enabled;return 1;
+#endif
     case GL_SCISSOR_TEST:
         v[0]=current->scissor_enabled; return 1;
     case GL_DEPTH_WRITEMASK:
@@ -97,6 +122,23 @@ static int get_state(GLenum pname, GLint v[4])
         return 0;
     }
 }
+#ifdef TG_GLES_VM_PROGRAM
+void glViewport(GLint x,GLint y,GLsizei width,GLsizei height)
+{
+    if(!current)return;if(width<0||height<0){tgGlesSetError(GL_INVALID_VALUE);return;}
+    current->viewport_x=x;current->viewport_y=y;current->viewport_width=width;current->viewport_height=height;
+}
+void glCullFace(GLenum mode)
+{
+    if(!current)return;if(mode!=GL_FRONT&&mode!=GL_BACK&&mode!=GL_FRONT_AND_BACK){tgGlesSetError(GL_INVALID_ENUM);return;}current->cull_face=mode;
+}
+void glBlendFunc(GLenum source,GLenum destination)
+{
+    if(!current)return;
+    if(!((source==GL_ONE&&destination==GL_ZERO)||(source==GL_SRC_ALPHA&&destination==GL_ONE_MINUS_SRC_ALPHA))){tgGlesSetError(GL_INVALID_ENUM);return;}
+    current->blend_src=source;current->blend_dst=destination;
+}
+#endif
 void glGetBooleanv(GLenum pname, GLboolean *data)
 {
     GLint v[4]; int i, n=get_state(pname,v);
