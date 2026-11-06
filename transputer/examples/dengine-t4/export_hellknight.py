@@ -7,6 +7,8 @@ reads the local upstream asset and writes only to the requested run directory.
 import argparse
 import math
 import re
+import struct
+import zlib
 from pathlib import Path
 
 NUM = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -32,6 +34,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mesh", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--texture", type=Path)
     args = parser.parse_args()
     lines = args.mesh.read_text().splitlines()
     joints=[]
@@ -73,24 +76,73 @@ def main():
     extent=max(hi[k]-lo[k] for k in range(3))
     if extent<=0: raise SystemExit("empty mesh")
     points=[tuple((p[k]-center[k])*1.7/extent for k in range(3)) for p in points]
+    normals=[[0.0,0.0,0.0] for _ in points]
     buckets=[[] for _ in range(16)]
     for tri in triangles:
         a,b,c=(points[i] for i in tri)
         u=[b[k]-a[k] for k in range(3)]; v=[c[k]-a[k] for k in range(3)]
         n=(u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0])
         mag=math.sqrt(sum(q*q for q in n))
+        for index in tri:
+            for k in range(3): normals[index][k]+=n[k]
         light=max(0.0,(n[0]*-0.3+n[1]*0.7+n[2]*0.64)/mag) if mag else 0.0
         buckets[min(15,int(light*15))].extend(tri)
     out=["/* Generated locally from the cloned dEngine MD5 mesh; bind pose only. */",
          f"#define HK_VERTEX_COUNT {len(points)}", f"#define HK_INDEX_COUNT {len(triangles)*3}",
          "static const short hk_vertices[HK_VERTEX_COUNT][3]={"]
     out += ["{%d,%d,%d}," % tuple(round(x*32767) for x in p) for p in points]
+    out += ["};", "static const short hk_normals[HK_VERTEX_COUNT][3]={"]
+    for n in normals:
+        mag=math.sqrt(sum(q*q for q in n)) or 1.0
+        out.append("{%d,%d,%d}," % tuple(round(x/mag*32767) for x in n))
+    out += ["};", "static const float hk_uv[HK_VERTEX_COUNT][2]={"]
+    out += ["{%s,%s}," % (repr(v[0]),repr(v[1])) for v in vertices]
     out += ["};", "static const unsigned short hk_indices[HK_INDEX_COUNT]={"]
     for bucket in buckets:
         for k in range(0,len(bucket),24): out.append(",".join(map(str,bucket[k:k+24]))+",")
     out += ["};", "static const unsigned short hk_group_counts[16]={"+",".join(str(len(b)) for b in buckets)+"};"]
+    if args.texture:
+        pixels,w,h=read_rgb_png(args.texture)
+        out.append("static const unsigned char hk_diffuse[32*32*4]={")
+        for y in range(32):
+            row=[]
+            for x in range(32):
+                i=((y*h//32)*w+x*w//32)*3
+                row.extend((*pixels[i:i+3],255))
+            out.append(",".join(map(str,row))+",")
+        out.append("};")
     args.output.write_text("\n".join(out)+"\n")
     print(f"Baked {len(joints)} joints, {len(points)} vertices, {len(triangles)} triangles into {args.output}")
+
+
+def read_rgb_png(path):
+    data=path.read_bytes()
+    if data[:8]!=b"\x89PNG\r\n\x1a\n": raise SystemExit("not a PNG")
+    pos=8; compressed=b""; w=h=0
+    while pos<len(data):
+        size=struct.unpack_from(">I",data,pos)[0]; kind=data[pos+4:pos+8]; chunk=data[pos+8:pos+8+size]; pos+=12+size
+        if kind==b"IHDR":
+            w,h,bit,color,compression,flt,interlace=struct.unpack(">IIBBBBB",chunk)
+            if (bit,color,compression,flt,interlace)!=(8,2,0,0,0): raise SystemExit("expected noninterlaced 8-bit RGB PNG")
+        elif kind==b"IDAT": compressed+=chunk
+        elif kind==b"IEND": break
+    raw=zlib.decompress(compressed); stride=w*3; previous=bytearray(stride); result=bytearray()
+    if len(raw)!=(stride+1)*h: raise SystemExit("unexpected PNG size")
+    for y in range(h):
+        mode=raw[y*(stride+1)]; row=bytearray(raw[y*(stride+1)+1:(y+1)*(stride+1)])
+        for i in range(stride):
+            a=row[i-3] if i>=3 else 0; b=previous[i]; c=previous[i-3] if i>=3 else 0
+            if mode==1: v=a
+            elif mode==2: v=b
+            elif mode==3: v=(a+b)//2
+            elif mode==4:
+                p=a+b-c; pa=abs(p-a); pb=abs(p-b); pc=abs(p-c)
+                v=a if pa<=pb and pa<=pc else b if pb<=pc else c
+            elif mode==0: v=0
+            else: raise SystemExit("unknown PNG filter")
+            row[i]=(row[i]+v)&255
+        result.extend(row); previous=row
+    return result,w,h
 
 
 if __name__ == "__main__":

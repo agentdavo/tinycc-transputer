@@ -21,7 +21,10 @@ case "$RENDERER" in
         upstream="$ROOT/transputer/examples/dEngine/src/matrix.c"
         [[ -f $upstream ]] || { echo 'dEngine clone missing: see transputer/examples/dengine-t4/README.md' >&2; exit 1; }
         render_sources=("$ROOT/transputer/examples/dengine-t4/hellknight.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$upstream" "$ROOT/transputer/examples/dengine-t4/stdio_stub.c") ;;
-    *) echo 'RENDERER must be tinygl, glesdraw, dengine, glsl or hellknight' >&2; exit 1 ;;
+    hellknight-material)
+        render_sources=("$ROOT/transputer/examples/dengine-t4/hellknight_material.c" "$HERE/material_raster.c" "$HERE/gles2_fragment.c" "$HERE/shadow_map.c"); render_include=(); render_flags=()
+        if [[ ${SHADOWS:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_SHADOW=1); fi ;;
+    *) echo 'Unknown RENDERER' >&2; exit 1 ;;
 esac
 if [[ $RENDERER == dengine || $RENDERER == glsl || $RENDERER == hellknight ]]; then render_include=(-I"$ROOT/transputer/native-headers"); render_flags=(); fi
 case "$NODES" in 1|2|4|8|16|32) ;; *) echo 'NODES must be 1, 2, 4, 8, 16, or 32' >&2; exit 1;; esac
@@ -31,9 +34,11 @@ case "$NODES" in 1|2|4|8|16|32) ;; *) echo 'NODES must be 1, 2, 4, 8, 16, or 32'
 FRAMES=$((10#$FRAMES)); FPS=$((10#$FPS))
 if [[ -n ${WORK:-} ]]; then mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd); WORK=$(mktemp -d "$WORK/scale.XXXXXX"); else WORK=$(mktemp -d); fi
 cd "$WORK"
-if [[ $RENDERER == hellknight ]]; then
+if [[ $RENDERER == hellknight || $RENDERER == hellknight-material ]]; then
+    texture_args=()
+    if [[ $RENDERER == hellknight-material ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png"); fi
     python3 "$ROOT/transputer/examples/dengine-t4/export_hellknight.py" \
-        "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight.pvr.2bpp.md5mesh" "$WORK/hellknight_asset.h"
+        "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight.pvr.2bpp.md5mesh" "$WORK/hellknight_asset.h" "${texture_args[@]}"
     render_include+=(-I"$WORK")
     render_flags+=(-DTEST_LARGE_WORKSPACE=1)
 fi
