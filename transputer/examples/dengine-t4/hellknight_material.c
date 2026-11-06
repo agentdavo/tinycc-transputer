@@ -108,6 +108,9 @@ static void prepare(unsigned int frame)
     shader_uniforms.light_position[0]=shader_uniforms.light_position[1]=0; shader_uniforms.light_position[2]=4;
     shader_uniforms.camera_position[0]=camera_x; shader_uniforms.camera_position[1]=camera_y; shader_uniforms.camera_position[2]=camera_z;
     shader_uniforms.features=TG_FRAG_BUMP|TG_FRAG_SHADOW; shader_uniforms.sqrt_fn=shader_root;
+#ifdef TG_DEMO_VERTEX_SOURCE
+    if(vertex_ready && !tg_glsl_uber_vertex_uniforms(&vertex_shader,&shader_uniforms))vertex_ready=0;
+#endif
 #endif
 #ifdef TG_DISABLE_ROTATION
     sy=0; cy=1;
@@ -168,7 +171,7 @@ static void prepare(unsigned int frame)
             input.tangent[0]=cy*tx+sy*tz; input.tangent[1]=ty; input.tangent[2]=-sy*tx+cy*tz;
             input.uv[0]=hk_uv[i][0]; input.uv[1]=hk_uv[i][1];
 #ifdef TG_DEMO_VERTEX_SOURCE
-            if(vertex_ready && tg_glsl_uber_vertex_run(&vertex_shader,&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
+            if(vertex_ready && tg_glsl_uber_vertex_run_prepared(&vertex_shader,&input,&output)==TG_FRAGMENT_OK) {
 #elif defined(TG_DEMO_VERTEX_VM)
             if(tg_uber_vertex_vm(&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
 #else

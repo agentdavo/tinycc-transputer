@@ -45,6 +45,9 @@ static int check_vertex(unsigned int mode)
     for(i=0;i<4;i++)if(!near(compiled.clip[i],ref.clip[i]) || !near(compiled.varying.light_clip[i],ref.varying.light_clip[i]))return 0;
     for(i=0;i<3;i++)if(!near(compiled.varying.light[i],ref.varying.light[i]) || !near(compiled.varying.half_vector[i],ref.varying.half_vector[i]) || !near(compiled.varying.normal[i],ref.varying.normal[i]))return 0;
     for(i=0;i<2;i++)if(!near(compiled.varying.uv[i],ref.varying.uv[i]))return 0;
+    u.light_position[0]=4;
+    if(!tg_glsl_uber_vertex_uniforms(&vertex_shader,&u) || tg_glsl_uber_vertex_run_prepared(&vertex_shader,&in,&compiled)!=TG_FRAGMENT_OK || tg_uber_vertex(&in,&u,&ref)!=TG_FRAGMENT_OK)return 0;
+    for(i=0;i<3;i++)if(!near(compiled.varying.light[i],ref.varying.light[i]))return 0;
     return 1;
 }
 static int check_fragment(unsigned int mode)
