@@ -92,12 +92,21 @@ static void prepare(unsigned int frame)
         v->varying.light[1]=v->varying.half_vector[1]=0;
         v->varying.light[2]=v->varying.half_vector[2]=1;
 #endif
-        v->varying.light_clip[0]=rx; v->varying.light_clip[1]=y; v->varying.light_clip[2]=-rz; v->varying.light_clip[3]=1;
+#ifdef TG_DEMO_ROOM
+        v->varying.light_clip[0]=rx*0.25f; v->varying.light_clip[1]=y*0.25f; v->varying.light_clip[2]=-rz*0.25f;
+        light_verts[i].x=(int)((rx*0.25f+1)*32.0f); light_verts[i].y=(int)((y*0.25f+1)*32.0f); light_verts[i].depth=(-rz*0.25f+1)*0.5f;
+#else
+        v->varying.light_clip[0]=rx; v->varying.light_clip[1]=y; v->varying.light_clip[2]=-rz;
         light_verts[i].x=(int)((rx+1)*32.0f); light_verts[i].y=(int)((y+1)*32.0f); light_verts[i].depth=(-rz+1)*0.5f;
+#endif
+        v->varying.light_clip[3]=1;
     }
     tg_shadow_clear(&map);
 #ifndef TG_DISABLE_SHADOW
     for(i=0;i<HK_INDEX_COUNT;i+=3) tg_shadow_triangle(&map,&light_verts[hk_indices[i]],&light_verts[hk_indices[i+1]],&light_verts[hk_indices[i+2]]);
+#if defined(TG_DEMO_ROOM) && !defined(TG_DISABLE_ROOM_SHADOW)
+    demo_room_shadow(&map);
+#endif
 #endif
     previous_frame=frame;
 }

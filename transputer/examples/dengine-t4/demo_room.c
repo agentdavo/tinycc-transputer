@@ -8,6 +8,7 @@ typedef struct { tg_material_vertex v[3]; unsigned short material; } draw_triang
 static draw_triangle projected[MAX_ROOM_TRIANGLES];
 static unsigned int projected_count;
 static tg_fragment_texture textures[ROOM_TEXTURE_COUNT];
+static tg_shadow_vertex room_light[ROOM_VERTEX_COUNT];
 static float cx,cy,cz;
 static float square(float x,float exponent) { (void)exponent; return x*x; }
 static clip_vertex intersect(clip_vertex a,clip_vertex b)
@@ -31,13 +32,18 @@ static void project(tg_material_vertex *v,clip_vertex p,const room_source_triang
         v->varying.light[2]=p.nz;
     } else { v->varying.light[0]=v->varying.light[1]=0; v->varying.light[2]=1; }
     v->varying.half_vector[0]=v->varying.light[0]; v->varying.half_vector[1]=v->varying.light[1]; v->varying.half_vector[2]=v->varying.light[2];
-    v->varying.light_clip[0]=p.x; v->varying.light_clip[1]=p.y;
-    v->varying.light_clip[2]=-p.z; v->varying.light_clip[3]=1;
+    v->varying.light_clip[0]=p.x*0.25f; v->varying.light_clip[1]=p.y*0.25f;
+    v->varying.light_clip[2]=-p.z*0.25f; v->varying.light_clip[3]=1;
 }
 void demo_room_init(float center_x,float center_y,float center_z,float scale,float camera_x,float camera_y,float camera_z)
 {
     unsigned int i,j; cx=camera_x; cy=camera_y; cz=camera_z; projected_count=0;
     for(i=0;i<ROOM_TEXTURE_COUNT;i++) { textures[i].rgba=room_textures[i]; textures[i].width=textures[i].height=16; textures[i].wrap_s=textures[i].wrap_t=TG_FRAG_REPEAT; }
+    for(i=0;i<ROOM_VERTEX_COUNT;i++) {
+        const room_source_vertex *v=&room_vertices[i];
+        float x=(v->x-center_x)*scale,y=(v->y-center_y)*scale,z=(v->z-center_z)*scale;
+        room_light[i].x=(int)((x*0.25f+1)*32.0f); room_light[i].y=(int)((y*0.25f+1)*32.0f); room_light[i].depth=(1-z*0.25f)*0.5f;
+    }
     for(i=0;i<ROOM_TRIANGLE_COUNT;i++) {
         clip_vertex in[3],out[4]; unsigned int n=0; const room_source_triangle *tri=&room_triangles[i];
         unsigned short indexes[3]; indexes[0]=tri->a; indexes[1]=tri->b; indexes[2]=tri->c;
@@ -56,6 +62,17 @@ void demo_room_init(float center_x,float center_y,float center_z,float scale,flo
             draw_triangle *d=&projected[projected_count++];
             project(&d->v[0],out[0],tri); project(&d->v[1],out[j],tri); project(&d->v[2],out[j+1],tri); d->material=tri->material;
         }
+    }
+}
+void demo_room_shadow(tg_shadow_map *map)
+{
+    unsigned int i;
+    for(i=0;i<ROOM_TRIANGLE_COUNT;i++) {
+        const room_source_triangle *t=&room_triangles[i];
+        /* Until alpha-tested shadow maps are available, translucent geometry
+         * is not an opaque shadow caster. */
+        if(!room_materials[t->material].alpha)
+            tg_shadow_triangle(map,&room_light[t->a],&room_light[t->b],&room_light[t->c]);
     }
 }
 int demo_room_draw(tg_context *ctx,const tg_fragment_texture *shadow,int translucent)
