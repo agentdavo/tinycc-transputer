@@ -8193,6 +8193,8 @@ try_copy:
  * Returns 1 if it rewrote anything; new_len then holds each rewritten
  * instruction's width, which may have grown.
  */
+static int tpg_ldlp_extent(const struct tp_relax_insn *c, int *lo);
+
 static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
 {
     static int off = -1, stats = -1;
@@ -8249,6 +8251,14 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
             ;
         recognised = j < n && (ins[j].opcode == TP_ENC_LDNL ||
                                ins[j].opcode == TP_ENC_STNL);
+        if (!recognised && s >= 0 && s < P && j < n) {
+            int bias, extent = tpg_ldlp_extent(&ins[j], &bias);
+            /* Only the outgoing prefix is pinned.  A double access whose
+             * base lies there may still reach a movable word: remapping
+             * that high word alone would split the FPU's contiguous pair. */
+            if (extent > 1 && (int64_t)s + bias + extent - 1 >= P)
+                goto bail;
+        }
         if (recognised) {
             t = s + ins[j].operand;
             if ((s < 0 || s >= F) != (t < 0 || t >= F)) {
@@ -13311,6 +13321,12 @@ static int tp_fpu_take_moved(SValue *sv, int is_db)
         int x;
 
         rseg[i] = *e;
+        /* Moving L's producer after this segment also removes L's store.
+         * An integer copy of either result word (assignment expressions
+         * in particular) must still see that store before it executes. */
+        if (e->kind == TP_HIST_INSTR && tp_is_direct_workspace_op(e->opc) &&
+            tp_hist_workspace_overlap(e, r, is_db ? 2 : 1))
+            return 0;
         if (e->kind == TP_HIST_LOCAL) {
             if (e->opc == TP_OP_STL)
                 for (x = 0; x < nloc; x++)
@@ -13577,8 +13593,9 @@ static int tp_fpu_square_twin(SValue *sv, int is_db)
 /* Can the result of an FP operation go to sv's slot?  When sv is a float
  * value the operation consumes and no other vstack entry names: then
  * get_reg need not spill a live value (`ldl 3; stl 12` and a reload) to find
- * a free one.  Single precision only: a double needs the pair. */
-static int tp_fpu_dst_reusable(SValue *sv)
+ * a free one.  A double must donate its contiguous pair, with neither
+ * word named by any value outside the two operands being consumed. */
+static int tp_fpu_dst_reusable(SValue *sv, int is_db)
 {
     int r = sv->r & VT_VALMASK;
     SValue *p;
@@ -13586,8 +13603,12 @@ static int tp_fpu_dst_reusable(SValue *sv)
     if ((sv->r & (VT_LVAL | VT_SYM)) || r >= VT_CONST ||
         !(reg_classes[r] & RC_FLOAT))
         return 0;
+    if (is_db && (sv->r != r || sv->r2 != r + 1 || r + 1 >= NB_REGS))
+        return 0;
     for (p = vstack; p < vtop - 1; p++)
-        if ((p->r & VT_VALMASK) == r || (p->r2 & VT_VALMASK) == r)
+        if ((p->r & VT_VALMASK) == r || (p->r2 & VT_VALMASK) == r ||
+            (is_db && ((p->r & VT_VALMASK) == r + 1 ||
+                       (p->r2 & VT_VALMASK) == r + 1)))
             return 0;
     return 1;
 }
@@ -13667,9 +13688,9 @@ ST_FUNC void gen_opf(int op) {
             int in_fa = 0;      /* 1: vtop[-1] is already in FA, 2: vtop[0],
                                    3: vtop[-1] in FB and vtop[0] in FA */
 
-            if (!is_db && tp_fpu_dst_reusable(&vtop[0]))
+            if (tp_fpu_dst_reusable(&vtop[0], is_db))
                 rdst = vtop[0].r & VT_VALMASK;
-            else if (!is_db && tp_fpu_dst_reusable(&vtop[-1]))
+            else if (tp_fpu_dst_reusable(&vtop[-1], is_db))
                 rdst = vtop[-1].r & VT_VALMASK;
             else {
                 rdst = get_reg(RC_FLOAT);

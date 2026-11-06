@@ -91,6 +91,18 @@ A new seventeen-case fixture covers loops, aliases, live results, volatile/
 packed destinations, control flow, signed zero and wide frames. Soft-float
 store probes and the negative store controls remain byte-identical.
 
+The [consumed double-pair acceptance](tests/bench/double-pair-reuse-2026-11-06.md)
+reuses contiguous operand pairs whose two words are dead outside the current
+operation. The audit also repairs FP producer motion past a stored-result
+copy and prevents workspace remapping from splitting a double across the
+pinned outgoing-argument prefix. Both have dedicated regressions; the float
+copy bug is reproduced on baseline T800/T9000. The final build passes full
+glass and all workload gates, 128 paired target/layout runs, 32 mixed ABI,
+eight VLA and 384 generated-expression bit comparisons. Full box removes
+163,694,057 decoded instructions and 372,076,234 modeled T800 cycles
+(6.73621%); its ELF shrinks 15,632 bytes. Compound-product and dot-product
+loops save 35.26% and 44.15%, preserving logical arithmetic totals.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
