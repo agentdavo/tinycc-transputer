@@ -489,6 +489,34 @@ static void render_canonical_scene(void)
     fb_draw_cursor(FBWM_FB_WIDTH - 12, FBWM_WORK_H - 16);
 }
 
+static void test_shm_slot_bounds(void)
+{
+    static unsigned int source[400 * 300];
+    volatile unsigned int *boundary =
+        (volatile unsigned int *)(unsigned long)(TPOS_SHM_BASE + TPOS_SHM_SIZE);
+    const unsigned int canary = 0x13579bdfu;
+    int i;
+
+    tpos_shm_reset();
+    for (i = 0; i < 3; i++)
+        CHECK(tpos_shm_claim_slot(320, 240) == i, "first-fit slot order");
+    *boundary = canary;
+    CHECK(wm_shm_prepare_guest(9001, 320, 240, "slot bounds") == 3,
+          "fourth Doom-sized guest uses slot 3");
+    CHECK(*boundary == canary, "guest clear stays inside shared bank");
+    source[400 * 283 + 399] = 0x2468ace0u;
+    tpos_shm_blit_to_slot(3, source, 400, 400, 300);
+    CHECK(*boundary == canary, "surface copy stays inside shared bank");
+    CHECK(tpos_shm_slot_pixels(3)[400 * 283 + 399] == 0x2468ace0u,
+          "surface copy reaches last row of slot 3");
+    tpos_shm_reset();
+    CHECK(tpos_shm_claim_slot(400, 300) == 1, "large surface uses slot 1");
+    CHECK(tpos_shm_claim_slot(400, 300) == -1,
+          "large surface fails when slot 1 is occupied");
+    CHECK(tpos_shm_claim_slot(400, 284) == 3, "slot 3 fits bounded surface");
+    tpos_shm_reset();
+}
+
 int main(void)
 {
     const char *golden;
@@ -521,6 +549,7 @@ int main(void)
     test_window_geometry();
     test_widgets();
     test_retained_surfaces();
+    test_shm_slot_bounds();
     test_shm_compose();
     test_phase2_wm();
     test_phase2_3_4();

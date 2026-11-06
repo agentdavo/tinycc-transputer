@@ -33,7 +33,13 @@
 #define TPOS_SHM_SLOT2_W          320
 #define TPOS_SHM_SLOT2_H          240
 #define TPOS_SHM_SLOT3_W          400
-#define TPOS_SHM_SLOT3_H          300
+#define TPOS_SHM_SLOT3_H          284
+
+#if TPOS_SHM_HEADER_BYTES + 4 * (TPOS_SHM_SLOT0_W * TPOS_SHM_SLOT0_H + \
+    TPOS_SHM_SLOT1_W * TPOS_SHM_SLOT1_H + TPOS_SHM_SLOT2_W * TPOS_SHM_SLOT2_H + \
+    TPOS_SHM_SLOT3_W * TPOS_SHM_SLOT3_H) > TPOS_SHM_SIZE
+#error "Shared surface slots exceed the reserved compositor bank"
+#endif
 
 #define TPOS_SHM_WF_USED          0x0001
 #define TPOS_SHM_WF_MAPPED        0x0002

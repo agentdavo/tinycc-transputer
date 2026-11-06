@@ -35,3 +35,4 @@ env -u DISPLAY T4_EST_CYCLES=1 T4_UART_CONSOLE=0 T4_UART_LOG="$WORK/bench.uart" 
 [ "$status" -ne 124 ] && [ "$status" -ne 137 ] || { cat "$WORK/t4.log" >&2; exit "$status"; }
 tr -d 'SH\000' < "$WORK/bench.uart"
 grep -q '^fail 0' "$WORK/bench.uart"
+grep -q '^slot3_overflow 0' "$WORK/bench.uart"

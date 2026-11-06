@@ -1,4 +1,4 @@
-/* Exercise the actual compositor blit with padded, clipped and out-of-bank
+/* Exercise the actual compositor blit with padded, clipped and bounded
  * surfaces. Compare every destination pixel with an independent reference. */
 #include <stddef.h>
 #include "../../fbwm/fbwm_shm.c"
@@ -74,20 +74,18 @@ void test_main(void)
     reference(&w, 9, 11, 100, 80);
     for (i = 0; i < TPOS_FB_WIDTH * TPOS_FB_HEIGHT; i++)
         if (alternate[i] != expected[i]) bad++;
-    /* Slot 3's advertised maximum extends beyond the reserved SHM bank.
-     * Its rows remain on the fallback; the destination is below the source
-     * tail in framebuffer coordinates, so this case has no per-row overlap. */
-    w.slot = 3; w.surf_w = 400; w.surf_h = 300; w.surf_stride = 400;
+    /* Exercise the full advertised capacity of the last slot. */
+    w.slot = 3; w.surf_w = TPOS_SHM_SLOT3_W;
+    w.surf_h = TPOS_SHM_SLOT3_H; w.surf_stride = TPOS_SHM_SLOT3_W;
     src = tpos_shm_slot_pixels(3);
-    for (i = 0; i < 400 * 300; i++) src[i] = 0x12340000u ^ (u32)i;
+    for (i = 0; i < TPOS_SHM_SLOT3_W * TPOS_SHM_SLOT3_H; i++) src[i] = 0x12340000u ^ (u32)i;
     for (i = 0; i < TPOS_FB_WIDTH * TPOS_FB_HEIGHT; i++)
         expected[i] = fb[i] = 0xabcdef00u ^ (u32)i;
-    reference(&w, 10, 100, 400, 300);
-    blit_surface(fb, &w, 10, 100, 400, 300);
+    reference(&w, 10, 100, TPOS_SHM_SLOT3_W, TPOS_SHM_SLOT3_H);
+    blit_surface(fb, &w, 10, 100, TPOS_SHM_SLOT3_W, TPOS_SHM_SLOT3_H);
     for (i = 0; i < TPOS_FB_WIDTH * TPOS_FB_HEIGHT; i++)
         if (fb[i] != expected[i]) bad++;
-    /* Diagnostic canary for the existing slot layout, not a pass condition
-     * for the compositor copy. Restore the adjacent word after probing it. */
+    /* Check the first word after the bank against the slot capacity. */
     {
         volatile u32 *boundary = (volatile u32 *)(unsigned long)(TPOS_SHM_BASE + TPOS_SHM_SIZE);
         u32 saved = *boundary;
@@ -98,6 +96,7 @@ void test_main(void)
         bank_overflow = (*boundary != 0x13579bdfu);
         *boundary = saved;
     }
+    if (bank_overflow) bad++;
     put("cycles "); num(elapsed); put("\nhash "); num(hash(fb, TPOS_FB_WIDTH * TPOS_FB_HEIGHT));
     put("\n16x16 "); num(t16); put("\n32x16 "); num(t32);
     put("\n64x32 "); num(t64);
