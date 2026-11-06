@@ -197,6 +197,11 @@ estimates, not measured hardware cycles.
   relocation, preserving the repair pass's symbol ordering and handling of
   duplicate local names. Inline-section placement now scans deferred bodies
   only when reachable. The per-call scan of the inline-function list remains.
+  The linker's relocation index now retains each symbol's name bucket and
+  skips repair scans when only the original symbol occupies it. A measured
+  Linux link saved about 1–2 ms at the cost of an extra word per symbol;
+  the [profile and output checks](transputer/tests/bench/linker-reloc-index-2026-11-06.md)
+  include stress cases where no speedup was established.
 
 Verification covered focused compiler, linker and UART regressions. The
 kernel boot, full test corpus, physical hardware, and the historical size

@@ -1385,6 +1385,7 @@ static int tp_iprel_fallback_enabled(void)
 struct tp_reloc_index {
     int *heads;
     int *next;
+    unsigned *bucket;
     unsigned mask;
 };
 
@@ -1410,9 +1411,11 @@ static void tp_reloc_index_init(struct tp_reloc_index *index, Section *symtab)
     index->mask = buckets - 1;
     index->heads = tcc_mallocz(buckets * sizeof(*index->heads));
     index->next = tcc_mallocz((size_t)count * sizeof(*index->next));
+    index->bucket = tcc_mallocz((size_t)count * sizeof(*index->bucket));
     for (i = count - 1; i > 0; i--) {
         const unsigned char *name = symtab->link->data + syms[i].st_name;
         unsigned bucket = tp_reloc_name_hash(name) & index->mask;
+        index->bucket[i] = bucket;
         index->next[i] = index->heads[bucket];
         index->heads[bucket] = i;
     }
@@ -1429,6 +1432,14 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
     if (!tp_reloc_symbol_repair_enabled(type))
         return;
 
+    /* If this is the bucket's only symbol, repair cannot choose a different
+     * definition. Keep the diagnostic path intact, including ambiguous or
+     * undefined local-symbol messages. */
+    if (!reloc_fix_debug &&
+        index->heads[index->bucket[*sym_index_io]] == *sym_index_io &&
+        !index->next[*sym_index_io])
+        return;
+
     if (sym->st_name) {
         const char *rel_name = (const char *)symtab_sec->link->data + sym->st_name;
         int sym_binding = ELFW(ST_BIND)(sym->st_info);
@@ -1443,7 +1454,7 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
             int want_type = (type == R_TRANSPUTER_IPREL32) ? STT_FUNC : STT_OBJECT;
             int j;
 
-            for (j = index->heads[tp_reloc_name_hash((const unsigned char *)rel_name) & index->mask];
+            for (j = index->heads[index->bucket[*sym_index_io]];
                  j; j = index->next[j]) {
                 ElfW(Sym) *cs = &((ElfW(Sym) *)symtab_sec->data)[j];
                 const char *cs_name;
@@ -3685,6 +3696,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                                       iprel_patch_trace, iprel_patch_debug);
         tcc_free(index.heads);
         tcc_free(index.next);
+        tcc_free(index.bucket);
         if (result < 0) {
             tcc_free(image);
             return -1;
