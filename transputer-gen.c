@@ -2468,6 +2468,27 @@ static void tp_bytes_store(int slot, int off, int k, int vslot, int voff)
     }
 }
 
+/* Emit a full-width relocatable address without changing stack tracking.
+ * Callers account for the pushed word and apply any symbol addend. */
+static void tp_emit_sym_reloc(const SValue *sv, const char *kind, int bt)
+{
+    int i;
+
+    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
+    if (kind && tp_gen_sym_filter) {
+        const char *name = get_tok_str(sv->sym->v, NULL);
+        if (name && strstr(name, tp_gen_sym_filter))
+            fprintf(stderr,
+                    "GEN_RELOC: kind=%s sym=%s type=%d bt=0x%x file=%s line=%d\n",
+                    kind, name, R_TRANSPUTER_LDC_ABS, bt,
+                    file ? file->filename : "<unknown>",
+                    file ? file->line_num : -1);
+    }
+    for (i = 0; i < 7; i++)
+        g((TP_OP_PFIX << 4) | 0);
+    g((TP_OP_LDC << 4) | 0);
+}
+
 /* Emit code leaving the ADDRESS of a float operand's storage in AReg,
  * so an FPU non-local load (plain or fused add/mul) can read it
  * directly.  Handles every SValue
@@ -2488,12 +2509,7 @@ static int tp_emit_float_addr(SValue *sv) {
             abcreg_push(1);
         } else if (v == VT_CONST) {
             if (fr & VT_SYM) {
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                for (i = 0; i < 7; i++) {
-                    g((TP_OP_PFIX << 4) | 0);
-                }
-                g((TP_OP_LDC << 4) | 0);
+                tp_emit_sym_reloc(sv, NULL, 0);
                 abcreg_push(1);
                 if (sv->c.i)
                     Tp_ADC(sv->c.i);
@@ -2530,12 +2546,7 @@ static int tp_emit_float_addr(SValue *sv) {
     } else {
         if (v == VT_CONST) {
             if (fr & VT_SYM) {
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                for (i = 0; i < 7; i++) {
-                    g((TP_OP_PFIX << 4) | 0);
-                }
-                g((TP_OP_LDC << 4) | 0);
+                tp_emit_sym_reloc(sv, NULL, 0);
                 abcreg_push(1);
                 if (sv->c.i)
                     Tp_ADC(sv->c.i);
@@ -2689,24 +2700,7 @@ ST_FUNC void load(int r, SValue *sv) {
                 if (sv->r & VT_SYM) {
                     /* Use R_TRANSPUTER_LDC_ABS for loading absolute data addresses.
                      * Eight nibbles (7 PFIX + LDC) cover a full 32-bit address. */
-                    int i;
-                    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                    {
-                        if (tp_gen_sym_filter) {
-                            const char *name = get_tok_str(sv->sym->v, NULL);
-                            if (name && strstr(name, tp_gen_sym_filter)) {
-                                fprintf(stderr,
-                                        "GEN_RELOC: kind=load_lval sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                                        name, R_TRANSPUTER_LDC_ABS, bt,
-                                        file ? file->filename : "<unknown>",
-                                        file ? file->line_num : -1);
-                            }
-                        }
-                    }
-                    for (i = 0; i < 7; i++) {
-                        g((TP_OP_PFIX << 4) | 0);  /* 0x20 = PFIX 0 */
-                    }
-                    g((TP_OP_LDC << 4) | 0);  /* 0x40 = LDC 0 */
+                    tp_emit_sym_reloc(sv, "load_lval", bt);
                     /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
                     if (sv->c.i)
                         Tp_ADC(sv->c.i);
@@ -2829,24 +2823,7 @@ ST_FUNC void load(int r, SValue *sv) {
             if (sv->r & VT_SYM) {
                 /* Load absolute symbol value into Areg. Reserve full-width
                  * prefix space so the linker can patch large addresses. */
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                {
-                    if (tp_gen_sym_filter) {
-                        const char *name = get_tok_str(sv->sym->v, NULL);
-                        if (name && strstr(name, tp_gen_sym_filter)) {
-                            fprintf(stderr,
-                                    "GEN_RELOC: kind=load_imm sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                                    name, R_TRANSPUTER_LDC_ABS, bt,
-                                    file ? file->filename : "<unknown>",
-                                    file ? file->line_num : -1);
-                        }
-                    }
-                }
-                for (i = 0; i < 7; i++) {
-                    g((TP_OP_PFIX << 4) | 0);  /* 0x20 = PFIX 0 */
-                }
-                g((TP_OP_LDC << 4) | 0);  /* 0x40 = LDC 0 */
+                tp_emit_sym_reloc(sv, "load_imm", bt);
                 /* Add byte offset from symbol (e.g. &arr[1] has c.i=1) */
                 if (sv->c.i)
                     Tp_ADC(sv->c.i);
@@ -3131,24 +3108,7 @@ static void gen_store_addr(SValue *v, int bt, int vr, int is_lval)
     if (vr == VT_CONST) {
         if (v->r & VT_SYM) {
             /* Absolute data address: emit LDC with relocation. */
-            int i;
-            greloc(cur_text_section, v->sym, ind, R_TRANSPUTER_LDC_ABS);
-            {
-                if (tp_gen_sym_filter) {
-                    const char *name = get_tok_str(v->sym->v, NULL);
-                    if (name && strstr(name, tp_gen_sym_filter)) {
-                        fprintf(stderr,
-                                "GEN_RELOC: kind=store_addr sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                                name, R_TRANSPUTER_LDC_ABS, bt,
-                                file ? file->filename : "<unknown>",
-                                file ? file->line_num : -1);
-                    }
-                }
-            }
-            for (i = 0; i < 7; i++) {
-                g((TP_OP_PFIX << 4) | 0);  /* 0x20 = PFIX 0 */
-            }
-            g((TP_OP_LDC << 4) | 0);  /* 0x40 = LDC 0 */
+            tp_emit_sym_reloc(v, "store_addr", bt);
             /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
             if (v->c.i)
                 Tp_ADC(v->c.i);
@@ -10560,10 +10520,7 @@ static void tp_push_sv(SValue *sv) {
 
             if (v == VT_CONST) {
                 if (fr & VT_SYM) {
-                    int i;
-                    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                    for (i = 0; i < 7; i++) g((TP_OP_PFIX << 4) | 0);
-                    g((TP_OP_LDC << 4) | 0);
+                    tp_emit_sym_reloc(sv, NULL, 0);
                     abcreg_push(1);
                     if (sv->c.i) Tp_ADC(sv->c.i);
                 } else {
@@ -10625,10 +10582,7 @@ static void tp_push_sv(SValue *sv) {
         /* Rvalue */
         if (v == VT_CONST) {
             if (fr & VT_SYM) {
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                for (i = 0; i < 7; i++) g((TP_OP_PFIX << 4) | 0);
-                g((TP_OP_LDC << 4) | 0);
+                tp_emit_sym_reloc(sv, NULL, 0);
                 abcreg_push(1);
                 if (sv->c.i) Tp_ADC(sv->c.i);
             } else {
@@ -10681,12 +10635,7 @@ static int tp_ptradd_base_ok(const SValue *sv)
  * placeholder the linker rewrites, matching load()/gen_store_addr. */
 static void tp_push_sym_addr(const SValue *sv)
 {
-    int i;
-
-    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-    for (i = 0; i < 7; i++)
-        g((TP_OP_PFIX << 4) | 0);
-    g((TP_OP_LDC << 4) | 0);
+    tp_emit_sym_reloc(sv, NULL, 0);
     abcreg_push(1);
     if (sv->c.i)
         Tp_ADC((int)sv->c.i);
