@@ -21,15 +21,21 @@ RENDERER=hellknight NODES=4 FRAMES=2 CAPTURE=1 \
 RENDERER=hellknight bash transputer/examples/distributed-fb/test-scale.sh
 ```
 
-`RENDERER=hellknight-material` selects a second bind-pose preview. It
+`RENDERER=hellknight-material` selects an animated preview. It
 generates a 32×32 nearest-sampled diffuse texture from the local original
 PNG, interpolates UVs and lighting inputs with perspective correction, and
 generates a 64×64 RGBA-packed shadow map on each node for each frame. The
 light is orthographic and the scene shows self-shadowing; it has no floor or
 other shadow receivers. `SHADOWS=0` disables shadow sampling and generation
 for comparisons. This is an explicit C material path, not GLSL execution or
-the original dEngine renderer. The preview has no normal/specular map,
-skeletal animation, filtering, general clipping or ES framebuffer objects.
+the original dEngine renderer. It reconstructs the 110-joint hierarchy and
+skins eight equally spaced frames of `hellknight_idle2.md5anim` offline, with
+normals recomputed for each pose. The T4 program linearly interpolates those
+pre-skinned poses; it does not calculate skeletal skinning at runtime, and
+vertex interpolation is an approximation to interpolating joint transforms.
+The preview has no normal/specular map, filtering, general clipping or ES
+framebuffer objects. `ANIMATE=0` restores the bind pose and `ROTATE=0` holds
+the camera-facing model rotation fixed.
 Texture PNG decoding uses Python's standard library and expects the bundled
 non-interlaced 8-bit RGB format. Generated model and texture data remain in
 the run directory.

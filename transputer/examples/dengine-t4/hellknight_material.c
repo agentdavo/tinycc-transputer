@@ -1,4 +1,4 @@
-/* Bind-pose preview using the material rasterizer and a per-node shadow pass.
+/* Pre-skinned idle preview using the material rasterizer and a per-node shadow pass.
  * This is a native C material path, not the original dEngine GLSL renderer. */
 #include "../distributed-fb/material_raster.h"
 #include "../distributed-fb/shadow_map.h"
@@ -15,7 +15,11 @@ static unsigned int previous_frame=~0u;
 static float square(float x,float exponent) { (void)exponent; return x*x; }
 static void prepare(unsigned int frame)
 {
-    unsigned int i; float sy=sine[frame&31]/256.0f,cy=sine[(frame+8)&31]/256.0f;
+    unsigned int i, pose=(frame/15)%HK_ANIMATION_FRAMES, next=(pose+1)%HK_ANIMATION_FRAMES;
+    float blend=(float)(frame%15)/15.0f,sy=sine[frame&31]/256.0f,cy=sine[(frame+8)&31]/256.0f;
+#ifdef TG_DISABLE_ROTATION
+    sy=0; cy=1;
+#endif
     material.base=&base; material.shadow=&shadow;
 #ifdef TG_DISABLE_SHADOW
     material.features=0;
@@ -25,14 +29,24 @@ static void prepare(unsigned int frame)
     material.pow_fn=square; material.shininess=2;
     for(i=0;i<3;i++) { material.ambient[i]=0.35f; material.diffuse[i]=0.75f; }
     for(i=0;i<HK_VERTEX_COUNT;i++) {
-        float x=hk_vertices[i][0]/32767.0f,y=hk_vertices[i][1]/32767.0f,z=hk_vertices[i][2]/32767.0f;
+        const short *position=hk_animated[pose][i], *position_next=hk_animated[next][i];
+        const short *normal=hk_animated_normals[pose][i], *normal_next=hk_animated_normals[next][i];
+        float x,y,z,nx,ny,nz;
+#ifdef TG_DISABLE_ANIMATION
+        position=position_next=hk_vertices[i]; normal=normal_next=hk_normals[i];
+#endif
+        x=(position[0]+(position_next[0]-position[0])*blend)/32767.0f;
+        y=(position[1]+(position_next[1]-position[1])*blend)/32767.0f;
+        z=(position[2]+(position_next[2]-position[2])*blend)/32767.0f;
         float rx=cy*x+sy*z,rz=-sy*x+cy*z,w=3.0f-rz;
-        float nx=hk_normals[i][0]/32767.0f,nz=hk_normals[i][2]/32767.0f;
+        nx=(normal[0]+(normal_next[0]-normal[0])*blend)/32767.0f;
+        ny=(normal[1]+(normal_next[1]-normal[1])*blend)/32767.0f;
+        nz=(normal[2]+(normal_next[2]-normal[2])*blend)/32767.0f;
         tg_material_vertex *v=&verts[i];
         v->x=(int)(80.0f+110.0f*rx/w); v->y=(int)(60.0f-110.0f*y/w);
         v->depth=(int)(100000.0f/w); v->inverse_w=1.0f/w;
         v->varying.uv[0]=hk_uv[i][0]; v->varying.uv[1]=hk_uv[i][1];
-        v->varying.normal[0]=cy*nx+sy*nz; v->varying.normal[1]=hk_normals[i][1]/32767.0f; v->varying.normal[2]=-sy*nx+cy*nz;
+        v->varying.normal[0]=cy*nx+sy*nz; v->varying.normal[1]=ny; v->varying.normal[2]=-sy*nx+cy*nz;
         v->varying.light[0]=0; v->varying.light[1]=0; v->varying.light[2]=1;
         v->varying.half_vector[0]=v->varying.half_vector[1]=v->varying.half_vector[2]=0;
         v->varying.light_clip[0]=rx; v->varying.light_clip[1]=y; v->varying.light_clip[2]=-rz; v->varying.light_clip[3]=1;
