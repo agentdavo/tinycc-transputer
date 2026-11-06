@@ -362,6 +362,7 @@ void R_DrawMaskedColumn (column_t* column)
 	
     for ( ; column->topdelta != 0xff ; ) 
     {
+	int floor, ceiling;
 	// calculate unclipped screen coordinates
 	//  for post
 	topscreen = sprtopscreen + spryscale*column->topdelta;
@@ -370,10 +371,12 @@ void R_DrawMaskedColumn (column_t* column)
 	dc_yl = (topscreen+FRACUNIT-1)>>FRACBITS;
 	dc_yh = (bottomscreen-1)>>FRACBITS;
 		
-	if (dc_yh >= mfloorclip[dc_x])
-	    dc_yh = mfloorclip[dc_x]-1;
-	if (dc_yl <= mceilingclip[dc_x])
-	    dc_yl = mceilingclip[dc_x]+1;
+	floor = mfloorclip[dc_x];
+	if (dc_yh >= floor)
+	    dc_yh = floor-1;
+	ceiling = mceilingclip[dc_x];
+	if (dc_yl <= ceiling)
+	    dc_yl = ceiling+1;
 
 	if (dc_yl <= dc_yh)
 	{

@@ -29,6 +29,12 @@
 #define rcsid rcsid_tables
 #include "tables.c"
 #undef rcsid
+#define rcsid rcsid_r_plane
+#include "r_plane.c"
+#undef rcsid
+#define rcsid rcsid_r_things
+#include "r_things.c"
+#undef rcsid
 
 typedef unsigned int u32;
 
@@ -62,10 +68,13 @@ unsigned int __ldtimer(void);
 int centery;
 lighttable_t *colormaps;
 byte *screens[5];
-short floorclip[SCREENWIDTH], ceilingclip[SCREENWIDTH];
-visplane_t *floorplane, *ceilingplane;
 angle_t xtoviewangle[SCREENWIDTH + 1];
 void (*colfunc)(void);
+void (*spanfunc)(void);
+fixed_t viewx, viewy;
+angle_t viewangle;
+lighttable_t *fixedcolormap;
+fixed_t *finecosine = &finesine[FINEANGLES / 4];
 
 void I_Error(char *error, ...)
 {
@@ -240,6 +249,69 @@ static void segloop(void)
     }
 }
 
+/* Two posts per column, with clipped and fully hidden posts.  Draw through
+ * the real column drawer so the callback and its global inputs are exercised. */
+static byte posts[2 * (4 + 32) + 1];
+static void masked(void)
+{
+    int x, i;
+    for (i = 0; i < 2; i++) {
+        byte *p = posts + i * 36;
+        p[0] = 12 + i * 50;
+        p[1] = 32;
+        p[2] = p[35] = 0;
+        for (x = 0; x < 32; x++)
+            p[3 + x] = (x * 17 + i * 29) & 255;
+    }
+    posts[72] = 255;
+    mfloorclip = floorclip;
+    mceilingclip = ceilingclip;
+    spryscale = FRACUNIT;
+    sprtopscreen = 10 * FRACUNIT;
+    dc_iscale = FRACUNIT;
+    dc_colormap = cmaps;
+    colfunc = R_DrawColumn;
+    for (x = 0; x < SCREENWIDTH; x++) {
+        dc_x = x;
+        floorclip[x] = 60 + (x % 100);
+        ceilingclip[x] = (x % 50) - 1;
+        dc_texturemid = 64 * FRACUNIT;
+        R_DrawMaskedColumn((column_t *)posts);
+    }
+}
+
+/* Exercise cache misses and hits, both lighting branches, and the real span
+ * drawer.  Each group reuses rows at one height before changing height. */
+static lighttable_t *planelights[MAXLIGHTZ];
+static void mapplanes(void)
+{
+    int i, y;
+    for (i = 0; i < SCREENWIDTH; i++) {
+        distscale[i] = FRACUNIT + i * 23;
+        xtoviewangle[i] = (angle_t)((SCREENWIDTH / 2 - i) * 0x40000);
+    }
+    for (i = 0; i < VIEWH; i++) {
+        yslope[i] = FRACUNIT + i * 71;
+        cachedheight[i] = -1;
+    }
+    for (i = 0; i < MAXLIGHTZ; i++)
+        planelights[i] = cmaps + (i & 31) * 256;
+    planezlight = planelights;
+    basexscale = FRACUNIT / 2;
+    baseyscale = -FRACUNIT / 3;
+    viewx = 12 * FRACUNIT;
+    viewy = -7 * FRACUNIT;
+    viewangle = ANG90;
+    ds_source = flat;
+    spanfunc = R_DrawSpan;
+    for (i = 0; i < 320; i++) {
+        y = 20 + (i % 80);
+        planeheight = (32 + i / 160) * FRACUNIT;
+        fixedcolormap = (i & 1) ? cmaps : 0;
+        R_MapPlane(y, i % 32, SCREENWIDTH - 1 - i % 32);
+    }
+}
+
 #define NMUL 4096
 static fixed_t ma[NMUL], mb[NMUL];
 
@@ -393,6 +465,8 @@ int main(void)
     screens[0] = screen0;
     colormaps = cmaps;
     centery = VIEWH / 2;
+    viewwidth = SCREENWIDTH;
+    viewheight = VIEWH;
     R_InitBuffer(SCREENWIDTH, VIEWH);
 
     start(); columns(); stop();
@@ -416,6 +490,15 @@ int main(void)
     report("rowcopy", fnv(fbrows, sizeof fbrows, 2166136261u));
     start(); fill(fbfull, 0, 0, FB_W, FB_H, 0xff204060u); stop();
     report("fill", fnv(fbfull, sizeof fbfull, 2166136261u));
+    start(); masked(); stop();
+    report("masked", fnv(screen0, sizeof screen0,
+                         fnv(&dc_texturemid, sizeof dc_texturemid, 2166136261u)));
+    start(); mapplanes(); stop();
+    report("mapplane", fnv(screen0, sizeof screen0,
+                           fnv(cachedxstep, sizeof cachedxstep,
+                               fnv(cachedystep, sizeof cachedystep,
+                                   fnv(cacheddistance, sizeof cacheddistance,
+                                       2166136261u)))));
     check();
     us("done\n");
     return 0;
