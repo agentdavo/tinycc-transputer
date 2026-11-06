@@ -8061,6 +8061,62 @@ try_copy:
         tps_note(7);
     }
 
+    /* A three-word copy loop often computes the indexed destination before
+     * loading the indexed local source, then uses REV for STNL. Both address
+     * calculations only read workspace words. Load the source first, then
+     * compute the destination, so STNL receives them in its natural order.
+     * Restrict this to an empty stack and the exact indexed-local sequence. */
+    for (i = 0; i < n; i++) {
+        int q[9], j, k, order[7] = { 3, 4, 5, 6, 0, 1, 2 };
+        struct tp_relax_insn saved[7];
+        struct tps_ann saved_ann[7];
+
+        if (func_uses_inline_asm || an[i].dead || an[i].depth != 0 ||
+            ins[i].opcode != TP_ENC_LDL)
+            continue;
+        q[0] = i;
+        for (j = 1; j < 9; j++) {
+            q[j] = tps_next(ins, an, n, q[j - 1]);
+            if (q[j] < 0)
+                break;
+        }
+        if (j != 9 || !tps_free(ins, an, i, q[8]))
+            continue;
+        if (ins[q[1]].opcode != TP_ENC_LDL ||
+            ins[q[2]].opcode != TP_ENC_OPR || ins[q[2]].operand != TP_OPR_WSUB ||
+            ins[q[3]].opcode != TP_ENC_LDL || ins[q[3]].operand != ins[i].operand ||
+            ins[q[4]].opcode != TP_ENC_LDLP ||
+            ins[q[5]].opcode != TP_ENC_OPR || ins[q[5]].operand != TP_OPR_WSUB ||
+            ins[q[6]].opcode != TP_ENC_LDNL || ins[q[6]].operand != 0 ||
+            ins[q[7]].opcode != TP_ENC_OPR || ins[q[7]].operand != TP_OPR_REV ||
+            ins[q[8]].opcode != TP_ENC_STNL || ins[q[8]].operand != 0)
+            continue;
+        for (j = 0; j < 9; j++)
+            if (ins[q[j]].synth)
+                break;
+        if (j != 9)
+            continue;
+        for (j = 0; j < 7; j++) {
+            saved[j] = ins[q[j]];
+            saved_ann[j] = an[q[j]];
+        }
+        for (j = 0; j < 7; j++) {
+            k = order[j];
+            ins[q[j]].opcode = saved[k].opcode;
+            ins[q[j]].operand = saved[k].operand;
+            ins[q[j]].old_len = saved[k].old_len;
+            ins[q[j]].new_len = saved[k].new_len;
+            an[q[j]].use = saved_ann[k].use;
+            an[q[j]].def = saved_ann[k].def;
+            an[q[j]].reads = saved_ann[k].reads;
+            an[q[j]].delta = saved_ann[k].delta;
+            an[q[j]].known = saved_ann[k].known;
+        }
+        an[q[7]].dead = 1;
+        removed++;
+        tps_note(7);
+    }
+
     /* ---- 5a''. a CJ that only skips a forward J ----
      *
      *     cj L1 ; j L2 ; L1:      ->      eqc 0 ; cj L2 ; L1:
