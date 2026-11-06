@@ -14,6 +14,13 @@ results, not completion of a secure userspace boundary. The saved
 `logs/06-boot.log` records protection selftest PASS and `/init` P-entry;
 it is not a fresh acceptance run for the current source.
 
+The [6 November Linux isolation review](LINUX-PROTECTION-REVIEW-2026-11-06.md)
+reproduced a trap-first PID 1 panic after nested spawn reused the parent's
+PDS/RODS buffers for a child. Its C-call control reached `DESKTOP_LOOP`.
+Preserving the parent continuation is the first acceptance gate for changing
+the syscall default. The review also identifies the direct-gate mmap helper,
+shared syscall transport, timeslice handling and permission-checking gaps.
+
 ## Model (not a classic page MMU)
 
 | Concept | Role |
@@ -52,6 +59,10 @@ it is not a fresh acceptance run for the current source.
 ```bash
 # Guest protection checks (from the emulator repository)
 cd transputer/t4
+# Host region/device/mode checks; an output path outside the source tree:
+cc -I. -O2 -o /tmp/test-t9000-protect tests/test_t9000_protect.c \
+  t9000_protect.c t9000_pmi.c
+/tmp/test-t9000-protect
 ./tests/run_hello_p.sh
 # On-target: stack extension, device-only regions, fetch/execute
 # permission, move/devmove/move2dall, ps.Eptr (test_t9000_pstack/pmode)
@@ -74,11 +85,12 @@ strings ../../transputer-tcc | grep -xE 'goprot|syscall'
 PASS: hello_p goprot→syscall→trap cause 3, RESULT=0x00000003, A=t.Scall B=et.NoError
 ```
 
-The legacy `test-protect` unit target was reported to fail to link after the
-`cpu_state.h` refactor (`IPtr`/`AReg`/... became `t4cpu->` macros). Restore or
-revalidate that target before counting it as passing coverage. Guest checks
-and the kernel soft-map selftest cover different paths; neither establishes
-that full Linux userspace uses trap syscalls or is isolated from the kernel.
+The current host suite `tests/test_t9000_protect.c` uses `cpu_state.h` and a
+stub `cpu_t`; the earlier claim that it no longer links is stale. On 6 November,
+a direct host build of that test with `t9000_protect.c` and `t9000_pmi.c`
+returned **ALL PASS**. This is region/device/range and mode-switch coverage,
+not a passing nested Linux P-session or trap-only rootfs test. Guest checks
+and the kernel soft-map selftest cover different paths.
 
 ---
 

@@ -17,6 +17,12 @@ describe the current compiler or the active `linux-7` kernel.
 | Optimize 64-bit division | Currently glyph-fix integration and Linux L/P isolation review, despite the historical title | Review task-private trap ABI, state lifetime, scheduler/fault handling, broad maps and SPINE/T4 differences; propose trap-default acceptance gates |
 | Improve TinyCC Transputer compiler | Coordination, assembler/linker work, protection docs and full backend audit | Three read-only audit agents cover snapshot lines 1–4700, 4701–9400 and 9401–14025; collect session lessons and rank concrete proposals |
 
+The [full-file audit](COMPILER-AUDIT-2026-11-06.md) is complete. The review
+session has priority ownership of its reproduced packed-memcpy purity defect;
+the raytracer session is investigating an indirect-reader copy-propagation
+counterexample; the CoreMark session is testing narrowing-cast spill removal.
+Keep those functions separate from other experiments.
+
 Several sessions share one checkout and Git index. Use private source snapshots
 for experiments, keep intermediate shared edits buildable, and commit only
 owned changes. Inspect the staged diff immediately before committing. Separate
@@ -125,6 +131,12 @@ This work is already substantially implemented in the active nested
   isolation are incomplete. [T9000-PROTECTION.md](T9000-PROTECTION.md) now
   distinguishes kernel hard-P entry from the userspace syscall choice and lists
   the remaining rollout tests; inspect source/build flags for each image.
+* The [Linux isolation review](LINUX-PROTECTION-REVIEW-2026-11-06.md)
+  reproduced a trap-first PID 1 panic after nested spawn reused its PDS/RODS
+  state for a child. Its C-call control reached `DESKTOP_LOOP`. Parent
+  continuation preservation is a release blocker for changing the default.
+  The current protection host suite was rechecked and returned ALL PASS;
+  that does not validate nested Linux sessions or strict isolation.
 * Current code includes broad quarter mappings, a Q3 stack mirror, and
   non-SPINE T4-specific cause/leave-P mechanisms. Entering P-mode alone does
   not prove complete process isolation or hardware portability.
