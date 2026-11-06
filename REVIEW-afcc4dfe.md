@@ -34,6 +34,10 @@ numbers and line numbers in the original review refer to the older source.
   the updated linker. The linker conservatively preserves the layout of
   sections referenced through these addends. Label boundaries clear the
   backend's cached register and peephole history.
+- **PC-relative data words.** The assembler and linker handle `.long target - .`
+  and `.long target - anchor` using a distinct 32-bit PC-relative relocation.
+  The relocation regression checks separate objects, both input orders, and a
+  partial link. This also preserves the affected code sections during layout.
 - **§2–§4, implementation and maintenance.** The experimental inliner,
   compaction pass and call-frequency table are gone. Builtin dispatch uses
   descriptors. Environment-controlled code generation, shared-file tracing,

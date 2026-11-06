@@ -89,6 +89,8 @@ fields:
 delta:
 .byte near_target-.
 .short near_target-anchor
+.long near_target-.
+.long near_target-anchor
 """)
     Path("defs.S").write_text("""
 .global byte_base, short_base, negative, near_target
@@ -109,6 +111,8 @@ near_target: .byte 0
         anchor, guard = image_bytes("narrow.elf", "anchor", 1)
         pc, delta = image_bytes("narrow.elf", "delta", 3)
         assert guard == b"\xa5" and struct.unpack("<bh", delta) == (target - pc, target - anchor)
+        _, words = image_bytes("narrow.elf", "delta", 11)
+        assert struct.unpack_from("<ii", words, 3) == (target - (pc + 3), target - anchor)
 
     for field, expr, bits in (("byte", "byte_base+2", 8), ("byte", "negative-2", 8),
                               ("short", "short_base+2", 16), ("short", "_start", 16)):

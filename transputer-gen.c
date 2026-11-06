@@ -4445,10 +4445,11 @@ ST_FUNC void gen_expr32(ExprValue *pe) {
      */
     if (pe->sym) {
         /* Emit relocation for symbol reference */
-        greloc(cur_text_section, pe->sym, ind, R_TRANSPUTER_32);
+        greloc(cur_text_section, pe->sym, ind,
+               pe->pcrel ? R_TRANSPUTER_PC_RELATIVE : R_TRANSPUTER_32);
     }
     /* Always emit 4 bytes and advance instruction pointer */
-    gen_le32(pe->v);
+    gen_le32(pe->v + (pe->pcrel ? ind : 0));
 }
 
 ST_FUNC void ggoto(void) {
@@ -9013,7 +9014,7 @@ static int tp_relax_function(void)
         int end = sec->reloc->data_offset / sizeof(*rel);
         for (i = func_start_nrel; i < end; i++) {
             int type = ELFW(R_TYPE)(rel[i].r_info);
-            if (type == R_TRANSPUTER_INSN || tp_narrow_reloc(type))
+            if (type == R_TRANSPUTER_INSN || tp_data_layout_reloc(type))
                 return tp_relax_bail("asm-addend");
         }
     }

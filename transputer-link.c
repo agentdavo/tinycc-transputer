@@ -18,7 +18,7 @@
 #define RELOCATE_DLLPLT 1
 ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
 ST_FUNC int tp_reloc_width(int type, int executable);
-ST_FUNC int tp_narrow_reloc(int type);
+ST_FUNC int tp_data_layout_reloc(int type);
 #else /* !TARGET_DEFS_ONLY */
 #include "tcc.h"
 #include "transputer-enc.h"  /* Unified prefix encoding */
@@ -1571,7 +1571,7 @@ ST_FUNC int tp_reloc_width(int type, int executable)
     case R_TRANSPUTER_NONE: return 0;
     case R_TRANSPUTER_8: case R_TRANSPUTER_IPREL8: return 1;
     case R_TRANSPUTER_16: case R_TRANSPUTER_IPREL16: return 2;
-    case R_TRANSPUTER_32: return 4;
+    case R_TRANSPUTER_32: case R_TRANSPUTER_PC_RELATIVE: return 4;
     case R_TRANSPUTER_IPREL32: case R_TRANSPUTER_LDC_ABS:
         return executable ? 1 : 4;
     case R_TRANSPUTER_INSN: return TP_ASM_SLOT;
@@ -1579,10 +1579,11 @@ ST_FUNC int tp_reloc_width(int type, int executable)
     }
 }
 
-ST_FUNC int tp_narrow_reloc(int type)
+ST_FUNC int tp_data_layout_reloc(int type)
 {
     return type == R_TRANSPUTER_8 || type == R_TRANSPUTER_16
-        || type == R_TRANSPUTER_IPREL8 || type == R_TRANSPUTER_IPREL16;
+        || type == R_TRANSPUTER_IPREL8 || type == R_TRANSPUTER_IPREL16
+        || type == R_TRANSPUTER_PC_RELATIVE;
 }
 
 static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
@@ -1626,9 +1627,9 @@ static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
             write16le(ptr, (uint16_t)value);
         break;
     }
-    case R_TRANSPUTER_32: {
+    case R_TRANSPUTER_32: case R_TRANSPUTER_PC_RELATIVE: {
         uint32_t old_val = read32le(ptr);
-        uint32_t new_val = old_val + val;
+        uint32_t new_val = old_val + val - (type == R_TRANSPUTER_PC_RELATIVE ? addr : 0);
         if (!(s->sh_flags & SHF_EXECINSTR) && tp_env_enabled("T4_DATA_RELOC_DEBUG")) {
             fprintf(stderr, "R32_DATA: addr=0x%08x sym=%s old=0x%08x val=0x%08x new=0x%08x section=%s"
                     " shndx=%d st_value=0x%lx bind=%d type=%d\n",
@@ -2318,12 +2319,12 @@ static uint8_t *tp_fixed_layout_sections(TCCState *s1)
             int type = ELFW(R_TYPE)(r->r_info);
             /* A narrow field embedded in text is data. For a PC-relative
              * field its addend may also measure back to an earlier label. */
-            if (tp_narrow_reloc(type))
+            if (tp_data_layout_reloc(type))
                 fixed[i] = 1;
             if (si <= 0 || si >= nsym || syms[si].st_shndx >= s1->nb_sections)
                 continue;
             if (ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION
-                || type == R_TRANSPUTER_INSN || tp_narrow_reloc(type))
+                || type == R_TRANSPUTER_INSN || tp_data_layout_reloc(type))
                 fixed[syms[si].st_shndx] = 1;
         }
     }
