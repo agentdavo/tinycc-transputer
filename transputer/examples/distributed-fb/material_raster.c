@@ -5,7 +5,7 @@ static int edge(int ax,int ay,int bx,int by,int x,int y)
 
 static int triangle(tg_context *c,const tg_material_vertex *a,
                          const tg_material_vertex *b,const tg_material_vertex *d,
-                         const tg_fragment_material *material,int blended)
+                         const tg_fragment_material *material,int blended,tg_material_fragment_fn fragment,void *user)
 {
     int area=edge(a->x,a->y,b->x,b->y,d->x,d->y);
     int x0,x1,y0,y1,x,y,i,errors=0,row0,row1,stepx0,stepx1,stepy0,stepy1;
@@ -38,7 +38,7 @@ static int triangle(tg_context *c,const tg_material_vertex *a,
 #define INTERP(field,n) for(i=0;i<(n);i++) v.field[i]=p*a->varying.field[i]+q*b->varying.field[i]+r*d->varying.field[i]
         INTERP(light,3); INTERP(half_vector,3); INTERP(normal,3); INTERP(uv,2); INTERP(light_clip,4);
 #undef INTERP
-        if(tg_fragment_uber(material,&v,out)!=TG_FRAGMENT_OK) { errors++; continue; }
+        if((fragment ? fragment(user,&v,out) : tg_fragment_uber(material,&v,out))!=TG_FRAGMENT_OK) { errors++; continue; }
         if(blended) {
             unsigned int src=tg_fragment_argb(out),dst=c->color[off],alpha=src>>24,inv=255-alpha;
             unsigned int r=(((src>>16)&255)*alpha+((dst>>16)&255)*inv+127)/255;
@@ -52,6 +52,8 @@ static int triangle(tg_context *c,const tg_material_vertex *a,
     return errors;
 }
 int tg_material_triangle(tg_context *c,const tg_material_vertex *a,const tg_material_vertex *b,const tg_material_vertex *d,const tg_fragment_material *m)
-{ return triangle(c,a,b,d,m,0); }
+{ return triangle(c,a,b,d,m,0,0,0); }
 int tg_material_triangle_blended(tg_context *c,const tg_material_vertex *a,const tg_material_vertex *b,const tg_material_vertex *d,const tg_fragment_material *m)
-{ return triangle(c,a,b,d,m,1); }
+{ return triangle(c,a,b,d,m,1,0,0); }
+int tg_material_triangle_custom(tg_context *c,const tg_material_vertex *a,const tg_material_vertex *b,const tg_material_vertex *d,tg_material_fragment_fn fn,void *user)
+{ if(!fn)return 1;return triangle(c,a,b,d,0,0,fn,user); }
