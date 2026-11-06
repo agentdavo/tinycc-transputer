@@ -228,6 +228,56 @@ contains a 55-word additive generator with two wrapping indices. The current
 libc supplies a different sequence. Keep that port issue separate from the
 accepted deterministic-scene compiler tests; do not relax pixel equality.
 
+### Recovered historical random-number contract
+
+The worker-1 BTL paths at `0x800334b8` (`rand`) and `0x8003350b` (`srand`)
+provide a concrete runtime compatibility target. A read-only runtime trace
+and independent reconstruction agree on all 55 initialized state words and
+the first 128 returns after `srand(0)`, crossing both index wrap boundaries.
+The state and seed arithmetic below are unsigned 32-bit, with wraparound:
+
+```c
+/* srand(seed) */
+for (k = 0; k < 55; ++k) {
+    state[k] = seed + (seed >> 16);
+    seed = seed * 69069u + 0x66d619e1u;
+}
+i = 23;
+j = 54;
+/* rand() */
+state[j] += state[i];
+result = state[j] & 0x7fffffffu;
+if (--i == 0) {
+    i = 54;
+    --j;
+} else if (--j == 0) {
+    j = 54;
+}
+```
+
+The zero test is verified in the disassembly: do not silently change it to
+a negative-index test or a conventional 55-element recurrence. Initial
+returns are `383459c0`, `04fd96f3`, `2954935b`, `38d89939`. This is a
+recovered software-library contract, not a special random-number instruction.
+The actual addition uses `bsub` as an unchecked 32-bit add, and the return
+mask is built with `mint; not; and`. This is concrete evidence for using
+instruction semantics and compact encodings beyond their mnemonic names;
+the current TinyCC backend already uses `bsub` for unchecked addition.
+No production PRNG has been changed. Trace, decoding, reconstruction and
+boundary receipts are retained in `povray-deep/RAND-CONTRACT.md` and
+`povray-deep/rand-contract.json` under the audit-log directory below.
+
+A further host-only control overrides `rand`/`srand` with this recovered
+implementation while leaving the generic renderer unchanged. Its complete
+`glass` image is byte-identical to the packaged reference, with zero differing
+bytes/pixels and SHA-256
+`79a805d547b93c68fc81c16e2c476ea09eed23aab17e091712fc8f0d1c9ef54c`.
+This isolates the entire observed host glass-image mismatch to the PRNG
+contract. The override and comparison receipt are in
+`povray-deep/glass-rng-host/`. It is not a TinyCC-target glass acceptance run:
+adding a scoped historical-POV PRNG option and validating target procedural
+images remain follow-up work.
+
 Input BTL SHA-256:
 `261e056fa3bc03bb9f41454938225703e45f8645d8fff8bc402350eadbf4d831`.
 Collector map SHA-256:

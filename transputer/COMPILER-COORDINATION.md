@@ -26,7 +26,8 @@ The chief's [deep POV-Ray analysis](POVRAY-BTL-ANALYSIS-2026-11-06.md)
 records the actual 16-node wiring and process/memory budgets, a reference-exact
 render with separate per-node instruction profiles, and measured FP/workspace
 and root byte-output targets. The chief also completed the
-[resident-result-before-sqrt acceptance](tests/bench/fpsqrt-resident-2026-11-06.md):
+[resident-result-before-sqrt acceptance](tests/bench/fpsqrt-resident-2026-11-06.md)
+in `b70eb63c`, with the reusable POV harness in `0d2aa62b`:
 all target regressions, hardened Doom, CoreMark, all four ray images at one/
 four nodes and complete rebuilt POV `box`/`basicvue` references pass. The
 full-source [POV gate](tests/bench/povray/README.md) is a generic single-node

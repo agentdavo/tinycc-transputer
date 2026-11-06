@@ -64,3 +64,9 @@ host renderer's `glass` scene differs from the packaged image even without a
 TinyCC change; it is therefore not a default compiler gate. Preserve that
 port limitation instead of interpreting a noise-texture difference as an FP
 optimization failure or weakening the exact comparison.
+
+The [BTL analysis](../../../POVRAY-BTL-ANALYSIS-2026-11-06.md#recovered-historical-random-number-contract)
+recovers the historical generator and verifies its state and wrap boundaries.
+A host-only override produces an exact `glass` reference image. This harness
+still uses the existing target libc generator; a target compatibility option
+and full procedural-scene acceptance are separate follow-up work.
