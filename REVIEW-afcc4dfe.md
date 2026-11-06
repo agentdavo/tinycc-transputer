@@ -36,7 +36,7 @@ defined behavior.
   `tp_push_sv_is_pure` now excludes them from direct argument staging and
   inline `memcpy`. The regression covers local and volatile global fields,
   packed pointers, direct and indirect calls, and stacked arguments on T414,
-  T425, T800 and T9000. A code-generation check confirms aligned `memcpy`
+  T425, T800, T805, T9000 and T9000TVX. A code-generation check confirms aligned `memcpy`
   still uses MOVE and the packed-length case calls `memcpy`.
 - **Linker safety.** `310efe5b` validates boot load slots before writing and
   propagates malformed optional-slot errors. Ordinary programs no longer
@@ -99,8 +99,8 @@ defined behavior.
   580,222 cycles, and the 32-bit-dividend unsigned phase fell from 60,422 to
   47,022 cycles per 100 calls.
   The shift helpers likewise initialize their word unions directly. Their new
-  regression checks zero, 1, 31, 32, 33, 63 and overshift counts on T414, T800
-  and T9000. The benchmark's 100 variable logical-right shifts fell from
+  regression checks every count from 0 through 64 on T414, T425, T800, T805,
+  T9000 and T9000TVX. The benchmark's 100 variable logical-right shifts fell from
   24,883 to 17,605 estimated T800 cycles. The logical shift helpers now lower
   to native LSHL/LSHR, reducing that phase to 11,765 cycles. Arithmetic right
   shift still uses word operations. `test_u64_shift_codegen.sh` checks the
