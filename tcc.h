@@ -1930,21 +1930,8 @@ ST_FUNC void tp_cmp_hint_branch_true(int on);
 /* Channel I/O */
 void gen_builtin_outbyte(void);
 void gen_builtin_outword(void);
-void gen_builtin_resetch(void);
 /* Memory operations */
 void gen_builtin_move(void);
-/* T805 CRC */
-void gen_builtin_crcbyte(void);
-void gen_builtin_crcword(void);
-/* Utility */
-void gen_builtin_wcnt(void);
-/* Process/scheduler */
-/* ALT operations */
-void gen_builtin_disc(void);
-void gen_builtin_diss(void);
-void gen_builtin_dist(void);
-/* Workspace */
-void gen_builtin_gajw(void);
 ST_FUNC int gen_transputer_builtin_call(int tok);
 /* T800 pointer arithmetic fast paths */
 ST_DATA int tp_ptr_add_is_addr;       /* final `+` of a pointer computation */

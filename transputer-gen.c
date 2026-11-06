@@ -131,6 +131,7 @@ static void switch_slot_add(int instr_offset, int slot_size, int opcode,
                             int target_addr, int base_addr);
 static void tp_builtin_return_void(void);
 static void tp_gen_flag_result(int opr);
+static void tp_builtin_word_result(void);
 void tp_emit_1op(int opcode);
 void tp_emit_2op(int opcode, int b_idx, int a_idx);
 void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx);
@@ -579,14 +580,16 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1, 0, 0, TP_BUILTIN_ANY },
         { TOK___outword,     "ee",  gen_builtin_outword,     1, 0, 0, TP_BUILTIN_ANY },
         { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN, 0, TP_BUILTIN_ANY },
-        { TOK___resetch,     "e",   gen_builtin_resetch,     0, 0, 0, TP_BUILTIN_ANY },
+        /* RESETCH returns the previous channel word: NotProcess_p if idle,
+         * otherwise the descriptor of the process blocked on it. */
+        { TOK___resetch,     "e",   NULL,     0, TP_OPR_RESETCH, 0, TP_BUILTIN_ANY },
         { TOK___move,        "eee", gen_builtin_move,        1, 0, 0, TP_BUILTIN_ANY },
         { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT, 0, TP_BUILTIN_T425 },
         { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL, 0, TP_BUILTIN_T425 },
         { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO, 0, TP_BUILTIN_T425 },
         { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO, 0, TP_BUILTIN_T425 },
-        { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0, 0, 0, TP_BUILTIN_T425 },
-        { TOK___crcword,     "eee", gen_builtin_crcword,     0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___crcbyte,     "eee", NULL,     0, TP_OPR_CRCBYTE, 0, TP_BUILTIN_T425 },
+        { TOK___crcword,     "eee", NULL,     0, TP_OPR_CRCWORD, 0, TP_BUILTIN_T425 },
         { TOK___ldtimer,     "",    NULL,     0, TP_OPR_LDTIMER, 0, TP_BUILTIN_ANY },
         { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER, 0, TP_BUILTIN_ANY },
         { TOK___mint,        "",    NULL,        0, TP_OPR_MINT, 0, TP_BUILTIN_ANY },
@@ -603,9 +606,9 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC, 0, TP_BUILTIN_ANY },
         { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS, 0, TP_BUILTIN_ANY },
         { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT, 0, TP_BUILTIN_ANY },
-        { TOK___disc,        "eee", gen_builtin_disc,        0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___diss,        "ee",  gen_builtin_diss,        0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___dist,        "eee", gen_builtin_dist,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___disc,        "eee", NULL,        0, TP_OPR_DISC, 0, TP_BUILTIN_ANY },
+        { TOK___diss,        "ee",  NULL,        0, TP_OPR_DISS, 0, TP_BUILTIN_ANY },
+        { TOK___dist,        "eee", NULL,        0, TP_OPR_DIST, 0, TP_BUILTIN_ANY },
         /* saveh/savel write two queue pointers; the st* forms set one. */
         { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH, 0, TP_BUILTIN_ANY },
         { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL, 0, TP_BUILTIN_ANY },
@@ -613,8 +616,9 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB, 0, TP_BUILTIN_ANY },
         { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF, 0, TP_BUILTIN_ANY },
         { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB, 0, TP_BUILTIN_ANY },
-        { TOK___gajw,        "e",   gen_builtin_gajw,        0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___wcnt,        "e",   gen_builtin_wcnt,        0, 0, 0, TP_BUILTIN_ANY },
+        /* GAJW returns the old workspace; WCNT returns the word offset. */
+        { TOK___gajw,        "e",   NULL,        0, TP_OPR_GAJW, 0, TP_BUILTIN_ANY },
+        { TOK___wcnt,        "e",   NULL,        0, TP_OPR_WCNT, 0, TP_BUILTIN_ANY },
         { TOK___seterr, "", NULL, 1, TP_OPR_SETERR, 0, TP_BUILTIN_ANY },
         { TOK___testerr,     "",    NULL,     0, TP_OPR_TESTERR, 0, TP_BUILTIN_ANY },
         { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR, 0, TP_BUILTIN_ANY },
@@ -1027,6 +1031,8 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
         tp_emit_3op(desc->simple_op, 2, 1, 0);
     else
         desc->gen();
+    if (desc->simple_op && desc->args[0] && !desc->returns_void)
+        tp_builtin_word_result();
     if (desc->returns_void)
         tp_builtin_return_void();
     return 1;
@@ -4558,52 +4564,6 @@ void gen_builtin_outword(void) {
  * enable the wrong thing.  That is why link multiplexing could not be
  * expressed here.
  */
-void gen_builtin_disc(void) {
-    /* DISABLE CHANNEL: __disc(code, guard, chan) -> selected
-     * vstack: [-2]=code, [-1]=guard, [0]=chan
-     * eval:   C=chan(2), B=guard(1), A=code(0) */
-    tp_emit_3op(TP_OPR_DISC, 2, 1, 0);
-    abcreg_push(1);   /* tp_emit_3op popped 3; disc leaves 1 -> net pop 2 */
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_dist(void) {
-    /* DISABLE TIMER: __dist(code, guard, time) -> selected
-     * eval: C=time(2), B=guard(1), A=code(0) */
-    tp_emit_3op(TP_OPR_DIST, 2, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_diss(void) {
-    /* DISABLE SKIP: __diss(code, guard) -> selected
-     * eval: B=guard(1), A=code(0) */
-    tp_emit_2op(TP_OPR_DISS, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/* Process operations */
-void gen_builtin_resetch(void) {
-    /* RESET CHANNEL: __resetch(chan) -> previous channel word
-     *
-     * resetch consumes the address in AReg and leaves the word the channel
-     * held in its place - NotProcess_p if idle, otherwise the descriptor of
-     * the process that was blocked on it.  That value is what tells an
-     * aborted ChanIn/ChanOut whether the transfer had already started, so
-     * it is returned rather than dropped. */
-    tp_emit_1op(TP_OPR_RESETCH);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
 
 /* Memory operations */
 void gen_builtin_move(void) {
@@ -4767,51 +4727,15 @@ void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
     abcreg_pop(3);
 }
 
-/* T805 CRC operations */
-void gen_builtin_crcbyte(void) {
-    /* CRCBYTE: __crcbyte(byte, crc, poly) -> new crc
-     * eval: C=poly(2), B=crc(1), A=byte(0) */
-    tp_emit_3op(TP_OPR_CRCBYTE, 2, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_crcword(void) {
-    /* CRCWORD: __crcword(word, crc, poly) -> new crc
-     * eval: C=poly(2), B=crc(1), A=word(0) */
-    tp_emit_3op(TP_OPR_CRCWORD, 2, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_wcnt(void) {
-    /* Return the signed word offset in A. The byte selector in B is unused. */
-    tp_emit_1op(TP_OPR_WCNT);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-
-/* Workspace operations */
-void gen_builtin_gajw(void) {
-    /* GENERAL AJW: __gajw(new_wptr) -> old Wptr */
-    tp_emit_1op(TP_OPR_GAJW);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
 /* Emit a zero-operand instruction whose result is returned as a word. */
 static void tp_gen_flag_result(int opr)
 {
     emit_instr(TP_OP_OPR, opr);
+    tp_builtin_word_result();
+}
+
+static void tp_builtin_word_result(void)
+{
     abcreg_push(1);
     vpushi(0);
     vtop->r = REG_IRET;
