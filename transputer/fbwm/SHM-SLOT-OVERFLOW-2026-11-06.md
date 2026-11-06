@@ -51,8 +51,19 @@ The unmerged four-file repair is preserved as
 [`fbwm-slot-bounds.pending.patch`](fbwm-slot-bounds.pending.patch), SHA-256
 `65378e5da7b9a20aa5a1b84121541d6ca1c925072dd7243167111d84381fc60a`.
 It reduces slot 3 to 400×284, adds a compile-time reservation check and extends
-host/compositor canaries. `git apply --check` succeeds against the checkpoint
-tree; the patch has **not** been applied to production sources.
+host/compositor canaries. The patch has **not** been applied to production
+sources. This checkpoint section was added after the patch's report hunk was
+captured, so apply only the three source/test hunks and merge the proposed
+report update manually:
+
+```sh
+git apply --check --exclude=transputer/fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md \
+  transputer/fbwm/fbwm-slot-bounds.pending.patch
+# In an isolated checkout, repeat without --check to apply the source/test hunks.
+```
+
+That source/test-only check passes against the checkpoint tree. The original
+four-file patch is retained unchanged, with the fingerprint above.
 
 The owner reports a failing-before/passing-after host canary on default and
 SPINE profiles, both retaining canonical frame SHA-256
