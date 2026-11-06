@@ -35,7 +35,7 @@ int tg_glsl_shader_fragment(void *user,const tg_fragment_varyings *v,float out[4
         }
         for(j=0;j<w;j++)s->vm.reg[s->program->symbols[i].slot][j]=in[j];
     }
-    status=tg_glsl_vm_run(&s->vm,s->program->code,s->program->instruction_count);
+    status=tg_glsl_vm_run_from(&s->vm,s->program->code,s->program->instruction_count,s->program->entry_pc);
     if(status!=TG_VM_OK)return status==TG_VM_UNDEFINED?TG_FRAGMENT_UNDEFINED:TG_FRAGMENT_INVALID;
     for(i=0;i<4;i++)out[i]=s->vm.reg[s->program->output_register][i];return TG_FRAGMENT_OK;
 }
