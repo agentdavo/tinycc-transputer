@@ -55,9 +55,8 @@ void test_main(void)
     rectcopy(rect + 7, src + 11, W, 0);
     for (i = 0; i < (int)(sizeof rows / sizeof *rows); i++)
         if (rows[i] != rect[i]) bad++;
-    /* The current t4 estimator does not charge MOVE2DALL for transferred
-     * data. Its timer value is useful for overhead only, not total cycles. */
-    put("rowcopy "); num(rowtime); put("\nmove2d_overhead "); num(recttime);
+    /* T4 8177e21 or later includes nominal MOVE2D transfer costs. */
+    put("rowcopy "); num(rowtime); put("\nmove2d_estimate "); num(recttime);
     put("\nhash "); num(hash(rect, sizeof rect / sizeof *rect));
     put("\nfail "); num(bad); put("\n");
 }

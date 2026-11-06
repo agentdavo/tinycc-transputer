@@ -29,6 +29,21 @@ pair requires fresh setup for each transfer and must not be separated by a
 deschedule. Source and destination overlap is outside the instruction's
 defined behavior.
 
+The separate T4 repository's `8177e21` adds the previously missing MOVE2D
+transfer cost to its T800 estimator. For nonzero valid dimensions it uses
+the INMOS `(2p+23)*rows` formula, rounding the byte width up to a nominal
+word count. Aligned whole-word rows follow the table; partial and unaligned
+rows are estimates because the table does not specify differing source and
+destination alignments. Zero or negative dimensions retain the existing
+generic estimate. This does not change execution, protection checks, or
+the separate T9000 group model. The host timing test checks all three
+transfer opcodes, prefix accounting, boundaries and wide arithmetic. T425,
+T800 and T9000 MOVE2D semantic tests and T414 target diagnostics passed.
+For the aligned 320-by-240 benchmark, the destination hash was unchanged
+at `2559167909`; the MOVE2D estimate changed from 1,151 to 1,910,567 cycles
+per 12 copies because transfer work is now counted. These are emulator
+estimates, not measured hardware cycles.
+
 **Other findings and remaining work**
 
 - **Packed call arguments.** Packed word lvalues can require byte-wise
