@@ -18,7 +18,7 @@ describe the current compiler or the active `linux-7` kernel.
 | Improve TinyCC Transputer compiler | Coordination, assembler/linker work, protection docs and full backend audit | Three read-only audit agents cover snapshot lines 1–4700, 4701–9400 and 9401–14025; collect session lessons and rank concrete proposals |
 
 The [full-file audit](COMPILER-AUDIT-2026-11-06.md) is complete. The review
-session has priority ownership of its reproduced packed-memcpy purity defect;
+session fixed its reproduced packed-memcpy purity defect in `0fd07e87`;
 the raytracer session is investigating an indirect-reader copy-propagation
 counterexample; the CoreMark session is testing narrowing-cast spill removal.
 Keep those functions separate from other experiments.

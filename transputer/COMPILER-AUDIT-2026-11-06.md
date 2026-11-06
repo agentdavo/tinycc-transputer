@@ -40,9 +40,13 @@ clear. Replacing only the count with an aligned parameter reports
 `PACKEDCALL_OK` on T800. See
 [reproducer](../logs/compiler-audit-2026-11-06/back/packed_call.c).
 
-The review session owns a conservative purity-classification fix and packed
-call/memcpy regression. Check all consumers of the predicate, not only memcpy;
-preserve aligned fast paths, volatile access counts and scratch-slot safety.
+The review session subsequently committed the conservative classification fix
+and regressions as **`0fd07e87`**. The pre-fix compiler fails the source test;
+the fixed compiler passes on T414, T425, T800 and T9000 against a host oracle,
+including packed pointer arguments, volatile fields and direct/indirect calls.
+A code-generation check preserves inline MOVE for aligned counts and uses the
+safe call path for packed counts. Check all consumers of the predicate, not
+only memcpy, when extending this model.
 Longer term, describe maximum stack demand and scratch effects explicitly
 instead of relying on one loosely defined purity bit.
 
@@ -86,6 +90,9 @@ and frame cost against a matching baseline.
 
 The CoreMark session has been assigned the narrowing-cast experiment using
 its new [fixed-seed baseline](tests/bench/coremark-baseline-2026-11-06.md).
+Its first instrumented trial found 16 cast-time cancellations per CoreMark
+build but byte-identical final executables: a later pass may already remove
+those pairs. This is not yet a demonstrated generated-code improvement.
 Backend shift staging is distinct from the already-landed runtime helper
 improvement `8e88385c`.
 
