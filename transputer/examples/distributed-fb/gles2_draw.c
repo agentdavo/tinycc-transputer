@@ -1,4 +1,7 @@
 #include "gles2_draw.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#include "gles2_framebuffer.h"
+#endif
 #ifdef __transputer__
 typedef signed char int8_t;
 typedef signed short int16_t;
@@ -216,6 +219,9 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
     tg_gles_draw_state *s=draw(); tg_gles_state *c=tgGlesCurrentState();
     const unsigned char *p; size_t offset, bytes; int i,j,width; tg_screen_vertex v[3];
     if (!s) return;
+#ifdef TG_GLES_FRAMEBUFFER
+    if(c->framebuffers && !tgGlesFramebufferReady(c)){tgGlesSetError(GL_INVALID_FRAMEBUFFER_OPERATION);return;}
+#endif
     if (mode!=GL_TRIANGLES) { tgGlesSetError(GL_INVALID_ENUM); return; }
     if (count<0) { tgGlesSetError(GL_INVALID_VALUE); return; }
     if (type!=GL_UNSIGNED_BYTE && type!=GL_UNSIGNED_SHORT) { tgGlesSetError(GL_INVALID_ENUM); return; }

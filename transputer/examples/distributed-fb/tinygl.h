@@ -14,6 +14,9 @@ typedef struct {
     int matrix[9]; /* Q8 rotation */
     int camera_distance, focal_length; /* Q8 world units, pixels */
     int clip_enabled, clip_x0, clip_y0, clip_x1, clip_y1; /* top-left, exclusive end */
+#ifdef TG_GLES_FRAMEBUFFER
+    int surface_width,surface_height,surface_pitch;
+#endif
 } tg_context;
 void tg_clear(tg_context *ctx, unsigned int color);
 void tg_clear_band(tg_context *ctx, unsigned int color, int row0, int row1);

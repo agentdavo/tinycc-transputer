@@ -1,11 +1,17 @@
 #include "../distributed-fb/gles2_program.h"
 #include "../distributed-fb/gles2_texture.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#include "../distributed-fb/gles2_framebuffer.h"
+#endif
 #include "uber_source.h"
 #ifndef TG_TARGET_TEST
 #include <stdio.h>
 #endif
 static tg_context target;static tg_gles_state gl;static tg_gles_draw_state draw;static tg_gles_program_state programs;
-static tg_gles_texture_state textures;static unsigned int tile[80*60],arena[128];static int depth[80*60];
+static tg_gles_texture_state textures;static unsigned int tile[80*60],arena[8*32*24];static int depth[80*60];
+#ifdef TG_GLES_FRAMEBUFFER
+static tg_gles_framebuffer_state framebuffers;static unsigned int scratch[32*24];static int rb_arena[4*32*24];
+#endif
 static const float pos[][3]={{-0.5f,0.5f,0},{-0.5f,-0.5f,0},{0.5f,0.5f,0}};
 static const float norm[][3]={{0,0,1},{0,0,1},{0,0,1}},uv[][2]={{0,0},{0,0},{0,0}};
 static const float tangent[][3]={{1,0,0},{1,0,0},{1,0,0}};
@@ -21,6 +27,9 @@ static int run(void)
 {
     GLuint v,f,p,tex[4];GLint a;int mode;target.color=tile;target.depth=depth;
     tgGlesInit(&gl,&target);tgGlesMakeCurrent(&gl);tgGlesInitDraw(&gl,&draw,0,0,0,0);tgGlesInitPrograms(&gl,&programs);tgGlesInitTextures(&gl,&textures,arena,sizeof(arena));
+#ifdef TG_GLES_FRAMEBUFFER
+    tgGlesInitFramebuffers(&gl,&framebuffers,scratch,32*24,rb_arena,4*32*24);
+#endif
     glViewport(0,0,160,120);glEnable(GL_DEPTH_TEST);glEnable(GL_CULL_FACE);glCullFace(GL_BACK);
     glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     if(!glIsEnabled(GL_DEPTH_TEST)||!glIsEnabled(GL_CULL_FACE)||glIsEnabled(GL_BLEND))return 8;
@@ -48,6 +57,24 @@ static int run(void)
     if(glGetError()!=GL_NO_ERROR||tile[40*80+50]!=0xffff0000u)return 6;
     glBindTexture(GL_TEXTURE_2D,tex[2]);tg_clear(&target,0xff000000u);glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);
     if(glGetError()!=GL_NO_ERROR||tile[40*80+50]!=0xff0000ffu)return 7;
+#ifdef TG_GLES_FRAMEBUFFER
+    if(mode==0) {
+        GLuint ft,fb,rb;unsigned char pixel[4];const tg_fragment_texture *view;
+        glBindTexture(GL_TEXTURE_2D,tex[0]);glActiveTexture(GL_TEXTURE0+3);glGenTextures(1,&ft);glBindTexture(GL_TEXTURE_2D,ft);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,32,24,0,GL_RGBA,GL_UNSIGNED_BYTE,0);
+        glGenFramebuffers(1,&fb);glBindFramebuffer(GL_FRAMEBUFFER,fb);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,ft,0);
+        glGenRenderbuffers(1,&rb);glBindRenderbuffer(GL_RENDERBUFFER,rb);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,32,24);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,rb);
+        if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)return 9;
+        glViewport(0,0,32,24);glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);glReadPixels(10,15,1,1,GL_RGBA,GL_UNSIGNED_BYTE,pixel);
+        if(glGetError()!=GL_NO_ERROR||pixel[0]!=255||pixel[1]||pixel[2])return 10;
+        glBindFramebuffer(GL_FRAMEBUFFER,0);view=tgGlesTextureUnit(3);
+        if(!view||view->rgba[(15*32+10)*4]!=255)return 11;
+        glDeleteFramebuffers(1,&fb);glDeleteRenderbuffers(1,&rb);glDeleteTextures(1,&ft);glViewport(0,0,160,120);
+        glActiveTexture(GL_TEXTURE0+3);glBindTexture(GL_TEXTURE_2D,tex[3]);
+    }
+#endif
     glUseProgram(0);glDeleteProgram(p);glDeleteShader(v);glDeleteShader(f);
     }
     return 0;

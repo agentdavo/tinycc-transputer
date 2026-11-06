@@ -1,4 +1,13 @@
 #include "tinygl.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#define WIDTH(c) ((c)->surface_width)
+#define HEIGHT(c) ((c)->surface_height)
+#define PITCH(c) ((c)->surface_pitch)
+#else
+#define WIDTH(c) TG_TILE_W
+#define HEIGHT(c) TG_TILE_H
+#define PITCH(c) TG_TILE_W
+#endif
 #if defined(__transputer__) && !defined(TG_SCALAR_CLEAR)
 void __move(void *dest, const void *src, int length);
 static void fill_words(unsigned int *dst, unsigned int value, int n)
@@ -18,9 +27,14 @@ void tg_clear_band(tg_context *c, unsigned int color, int row0, int row1)
 {
     int i, start, count;
     if (row0<0) row0=0;
-    if (row1>TG_TILE_H) row1=TG_TILE_H;
+    if (row1>HEIGHT(c)) row1=HEIGHT(c);
     if (row0>=row1) return;
-    start=row0*TG_TILE_W; count=(row1-row0)*TG_TILE_W;
+    start=row0*PITCH(c); count=(row1-row0)*WIDTH(c);
+#ifdef TG_GLES_FRAMEBUFFER
+    if(PITCH(c)!=WIDTH(c)) {
+        int y,x;for(y=row0;y<row1;y++)for(x=0;x<WIDTH(c);x++){i=y*PITCH(c)+x;c->color[i]=color;c->depth[i]=-2147483647;}return;
+    }
+#endif
 #if defined(__transputer__) && !defined(TG_SCALAR_CLEAR)
     fill_words(c->color+start,color,count);
     fill_words((unsigned int *)c->depth+start,0x80000001u,count);
@@ -33,7 +47,7 @@ void tg_clear_band(tg_context *c, unsigned int color, int row0, int row1)
 }
 void tg_clear(tg_context *c, unsigned int color)
 {
-    tg_clear_band(c,color,0,TG_TILE_H);
+    tg_clear_band(c,color,0,HEIGHT(c));
 }
 
 void tg_transform(const tg_context *c, const tg_vertex *src, tg_screen_vertex *dst, int n)
@@ -80,8 +94,8 @@ static void triangle(tg_context *c, tg_screen_vertex a, tg_screen_vertex b, tg_s
     y1 = a.y > b.y ? a.y : b.y; if (d.y > y1) y1 = d.y;
     if (x0 < c->tile_x) x0 = c->tile_x;
     if (y0 < c->tile_y) y0 = c->tile_y;
-    if (x1 >= c->tile_x + TG_TILE_W) x1 = c->tile_x + TG_TILE_W - 1;
-    if (y1 >= c->tile_y + TG_TILE_H) y1 = c->tile_y + TG_TILE_H - 1;
+    if (x1 >= c->tile_x + WIDTH(c)) x1 = c->tile_x + WIDTH(c) - 1;
+    if (y1 >= c->tile_y + HEIGHT(c)) y1 = c->tile_y + HEIGHT(c) - 1;
     anchor_x=x0; anchor_y=y0;
     if (c->clip_enabled) {
         if (x0 < c->clip_x0) x0=c->clip_x0;
@@ -104,7 +118,7 @@ static void triangle(tg_context *c, tg_screen_vertex a, tg_screen_vertex b, tg_s
     zrow+=zx*dx+zy*dy; urow+=ux*dx+uy*dy; vrow+=vx*dx+vy*dy;
     for (y=y0; y<=y1; ++y) {
         int e0=w0,e1=w1,e2=w2, z=zrow,u=urow,v=vrow;
-        int off=(y-c->tile_y)*TG_TILE_W+x0-c->tile_x;
+        int off=(y-c->tile_y)*PITCH(c)+x0-c->tile_x;
         for (x=x0; x<=x1; ++x,++off) {
             if (e0>=0 && e1>=0 && e2>=0 && z>c->depth[off]) {
                 int q=z>>8;

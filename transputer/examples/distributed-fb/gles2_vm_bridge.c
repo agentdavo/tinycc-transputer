@@ -107,7 +107,11 @@ static int shade_vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_v
     if(tg_glsl_uber_vertex_run_prepared(&p->vm_vertex,&in,&out)!=TG_FRAGMENT_OK)return 0;
     w=out.clip[3];if(w<=0.01f || out.clip[0]<-w || out.clip[0]>w || out.clip[1]<-w || out.clip[1]>w || out.clip[2]<-w || out.clip[2]>w)return 0;
     v->x=(int)(state->viewport_x+(1.0f+out.clip[0]/w)*0.5f*state->viewport_width);
+#ifdef TG_GLES_FRAMEBUFFER
+    v->y=(int)(state->logical_height-state->viewport_y-(1.0f+out.clip[1]/w)*0.5f*state->viewport_height);
+#else
     v->y=(int)(120-state->viewport_y-(1.0f+out.clip[1]/w)*0.5f*state->viewport_height);
+#endif
     v->depth=(int)((1.0f-out.clip[2]/w)*16777216.0f);v->inverse_w=1.0f/w;v->varying=out.varying;return 1;
 }
 static int shade_fragment(void *user,const tg_fragment_varyings *v,float out[4])

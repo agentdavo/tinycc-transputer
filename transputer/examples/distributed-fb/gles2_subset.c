@@ -1,4 +1,14 @@
 #include "gles2_subset.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#include "gles2_framebuffer.h"
+#define TARGET_WIDTH(c) ((c)->surface_width)
+#define TARGET_HEIGHT(c) ((c)->surface_height)
+#define TARGET_PITCH(c) ((c)->surface_pitch)
+#else
+#define TARGET_WIDTH(c) TG_TILE_W
+#define TARGET_HEIGHT(c) TG_TILE_H
+#define TARGET_PITCH(c) TG_TILE_W
+#endif
 static tg_gles_state *current;
 static void update_clip(void);
 static unsigned int channel(GLclampf x)
@@ -13,6 +23,10 @@ void tgGlesInit(tg_gles_state *s, tg_context *target)
     s->depth_write=GL_TRUE; s->error=GL_NO_ERROR;
     s->scissor_x=0; s->scissor_y=0; s->scissor_width=160; s->scissor_height=120;
     s->scissor_enabled=GL_FALSE; s->draw=0; s->programs=0; s->textures=0; target->clip_enabled=0;
+#ifdef TG_GLES_FRAMEBUFFER
+    s->framebuffers=0;s->logical_width=160;s->logical_height=120;
+    target->surface_width=TG_TILE_W;target->surface_height=TG_TILE_H;target->surface_pitch=TG_TILE_W;
+#endif
 #ifdef TG_GLES_VM_PROGRAM
     s->viewport_x=s->viewport_y=0;s->viewport_width=160;s->viewport_height=120;
     s->depth_enabled=s->cull_enabled=s->blend_enabled=GL_FALSE;s->cull_face=GL_BACK;s->blend_src=GL_ONE;s->blend_dst=GL_ZERO;
@@ -35,16 +49,21 @@ static void update_clip(void)
     long long x0=current->scissor_x, y0=current->scissor_y;
     long long x1=x0+current->scissor_width, y1=y0+current->scissor_height;
     tg_context *c=current->target;
+#ifdef TG_GLES_FRAMEBUFFER
+    int logical_width=current->logical_width,logical_height=current->logical_height;
+#else
+    int logical_width=160,logical_height=120;
+#endif
     if (x0<0) x0=0;
-    if (x0>160) x0=160;
+    if (x0>logical_width) x0=logical_width;
     if (x1<0) x1=0;
-    if (x1>160) x1=160;
+    if (x1>logical_width) x1=logical_width;
     if (y0<0) y0=0;
-    if (y0>120) y0=120;
+    if (y0>logical_height) y0=logical_height;
     if (y1<0) y1=0;
-    if (y1>120) y1=120;
+    if (y1>logical_height) y1=logical_height;
     c->clip_x0=(int)x0; c->clip_x1=(int)x1;
-    c->clip_y0=120-(int)y1; c->clip_y1=120-(int)y0;
+    c->clip_y0=logical_height-(int)y1; c->clip_y1=logical_height-(int)y0;
     c->clip_enabled=current->scissor_enabled;
 }
 void glScissor(GLint x, GLint y, GLsizei width, GLsizei height)
@@ -164,6 +183,9 @@ void glClear(GLbitfield mask)
 {
     int i,x,y; tg_context *c; unsigned int bits;
     if (!current) return;
+#ifdef TG_GLES_FRAMEBUFFER
+    if(current->framebuffers && !tgGlesFramebufferReady(current)) { tgGlesSetError(GL_INVALID_FRAMEBUFFER_OPERATION);return; }
+#endif
     if (mask & ~(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT)) {
         if (current->error == GL_NO_ERROR) current->error=GL_INVALID_VALUE;
         return;
@@ -173,17 +195,18 @@ void glClear(GLbitfield mask)
     if ((mask & (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)) == (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
         && bits==0xffffffffu && current->depth_write) {
         if (!c->clip_enabled) { tg_clear(c,current->clear_argb); return; }
-        if (c->clip_x0<=c->tile_x && c->clip_x1>=c->tile_x+TG_TILE_W) {
+        if (c->clip_x0<=c->tile_x && c->clip_x1>=c->tile_x+TARGET_WIDTH(c)) {
             tg_clear_band(c,current->clear_argb,c->clip_y0-c->tile_y,c->clip_y1-c->tile_y);
             return;
         }
     }
-    for (i=0;i<TG_TILE_W*TG_TILE_H;++i) {
-        x=i%TG_TILE_W+c->tile_x; y=i/TG_TILE_W+c->tile_y;
+    for (i=0;i<TARGET_WIDTH(c)*TARGET_HEIGHT(c);++i) {
+        int offset=(i/TARGET_WIDTH(c))*TARGET_PITCH(c)+(i%TARGET_WIDTH(c));
+        x=i%TARGET_WIDTH(c)+c->tile_x; y=i/TARGET_WIDTH(c)+c->tile_y;
         if (c->clip_enabled && (x<c->clip_x0 || x>=c->clip_x1 || y<c->clip_y0 || y>=c->clip_y1)) continue;
         if (mask & GL_COLOR_BUFFER_BIT)
-            c->color[i]=(c->color[i]&~bits)|(current->clear_argb&bits);
+            c->color[offset]=(c->color[offset]&~bits)|(current->clear_argb&bits);
         if ((mask & GL_DEPTH_BUFFER_BIT) && current->depth_write)
-            c->depth[i]=-2147483647;
+            c->depth[offset]=-2147483647;
     }
 }

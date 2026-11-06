@@ -1,4 +1,13 @@
 #include "material_raster.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#define WIDTH(c) ((c)->surface_width)
+#define HEIGHT(c) ((c)->surface_height)
+#define PITCH(c) ((c)->surface_pitch)
+#else
+#define WIDTH(c) TG_TILE_W
+#define HEIGHT(c) TG_TILE_H
+#define PITCH(c) TG_TILE_W
+#endif
 
 static int edge(int ax,int ay,int bx,int by,int x,int y)
 { return (x-ax)*(by-ay)-(y-ay)*(bx-ax); }
@@ -18,8 +27,8 @@ static int triangle(tg_context *c,const tg_material_vertex *a,
     x1=a->x>b->x?a->x:b->x; if(d->x>x1)x1=d->x;
     y0=a->y<b->y?a->y:b->y; if(d->y<y0)y0=d->y;
     y1=a->y>b->y?a->y:b->y; if(d->y>y1)y1=d->y;
-    if(x0<c->tile_x)x0=c->tile_x; if(x1>=c->tile_x+TG_TILE_W)x1=c->tile_x+TG_TILE_W-1;
-    if(y0<c->tile_y)y0=c->tile_y; if(y1>=c->tile_y+TG_TILE_H)y1=c->tile_y+TG_TILE_H-1;
+    if(x0<c->tile_x)x0=c->tile_x; if(x1>=c->tile_x+WIDTH(c))x1=c->tile_x+WIDTH(c)-1;
+    if(y0<c->tile_y)y0=c->tile_y; if(y1>=c->tile_y+HEIGHT(c))y1=c->tile_y+HEIGHT(c)-1;
     if(c->clip_enabled) {
         if(x0<c->clip_x0)x0=c->clip_x0; if(x1>=c->clip_x1)x1=c->clip_x1-1;
         if(y0<c->clip_y0)y0=c->clip_y0; if(y1>=c->clip_y1)y1=c->clip_y1-1;
@@ -33,7 +42,7 @@ static int triangle(tg_context *c,const tg_material_vertex *a,
         int e2=area-e0-e1;
         int off,depth; float p,q,r,sum,out[4]; tg_fragment_varyings v;
         if(e0<0 || e1<0 || e2<0) continue;
-        off=(y-c->tile_y)*TG_TILE_W+x-c->tile_x;
+        off=(y-c->tile_y)*PITCH(c)+x-c->tile_x;
         /* Depth is already in window coordinates and is linear on screen. */
         depth=(int)(((float)e0*a->depth+(float)e1*b->depth+(float)e2*d->depth)/(float)area);
         if((!options || options->depth_test) && depth<=c->depth[off]) continue;

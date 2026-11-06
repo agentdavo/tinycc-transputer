@@ -37,6 +37,9 @@ typedef int GLsizei;
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
 #define GL_VIEWPORT 0x0ba2
 #endif
+#ifdef TG_GLES_FRAMEBUFFER
+#define GL_INVALID_FRAMEBUFFER_OPERATION 0x0506
+#endif
 typedef struct {
     tg_context *target;
     unsigned int clear_argb, color_write_mask;
@@ -48,6 +51,10 @@ typedef struct {
     struct tg_gles_draw_state *draw;
     struct tg_gles_program_state *programs;
     struct tg_gles_texture_state *textures;
+#ifdef TG_GLES_FRAMEBUFFER
+    struct tg_gles_framebuffer_state *framebuffers;
+    int logical_width,logical_height;
+#endif
 #ifdef TG_GLES_VM_PROGRAM
     GLint viewport_x,viewport_y;GLsizei viewport_width,viewport_height;
     GLboolean depth_enabled,cull_enabled,blend_enabled;GLenum cull_face,blend_src,blend_dst;

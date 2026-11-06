@@ -1,4 +1,7 @@
 #include "gles2_texture.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#include "gles2_framebuffer.h"
+#endif
 static tg_gles_texture_state *state(void)
 {
     tg_gles_state *c=tgGlesCurrentState();
@@ -34,6 +37,9 @@ void glDeleteTextures(GLsizei n,const GLuint *names)
     tg_gles_texture_state *s=state(); int i,j,k;
     if(!s)return; if(n<0 || (n && !names)) { tgGlesSetError(GL_INVALID_VALUE); return; }
     for(i=0;i<n;i++)if((j=find(s,names[i]))>=0) {
+#ifdef TG_GLES_FRAMEBUFFER
+        tgGlesFramebufferDetachTexture(tgGlesCurrentState(),names[i]);
+#endif
         for(k=0;k<TG_GLES_TEXTURE_UNITS;k++)if(s->bound[k]==names[i])s->bound[k]=0;
         s->objects[j].reserved=s->objects[j].created=0;
     }
@@ -83,6 +89,9 @@ void glTexImage2D(GLenum target,GLint level,GLint internal,GLsizei width,GLsizei
     if(!s)return; if(target!=GL_TEXTURE_2D || format!=GL_RGBA || internal!=GL_RGBA || type!=GL_UNSIGNED_BYTE) { tgGlesSetError(GL_INVALID_ENUM); return; }
     if(level!=0 || border!=0 || width<0 || height<0 || width>32767 || height>32767) { tgGlesSetError(GL_INVALID_VALUE); return; }
     if(!(t=bound(s)))return;
+#ifdef TG_GLES_FRAMEBUFFER
+    if(tgGlesFramebufferTextureAttached(tgGlesCurrentState(),t->name)){tgGlesSetError(GL_INVALID_OPERATION);return;}
+#endif
     if((unsigned int)width && (unsigned int)height>s->slot_size/4u/(unsigned int)width) { tgGlesSetError(GL_OUT_OF_MEMORY); return; }
     n=(unsigned int)width*(unsigned int)height*4u; slot=(unsigned int)(t-s->objects);
     if(n && !s->arena) { tgGlesSetError(GL_OUT_OF_MEMORY); return; }
@@ -96,3 +105,5 @@ const tg_fragment_texture *tgGlesTextureUnit(unsigned int unit)
     if(!s || unit>=TG_GLES_TEXTURE_UNITS || (i=find(s,s->bound[unit]))<0 || !s->objects[i].view.rgba)return 0;
     return &s->objects[i].view;
 }
+tg_gles_texture *tgGlesTextureObject(GLuint name)
+{ tg_gles_texture_state *s=state();int i;if(!s || !name || (i=find(s,name))<0 || !s->objects[i].created)return 0;return &s->objects[i]; }

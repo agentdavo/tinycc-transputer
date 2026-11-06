@@ -28,6 +28,7 @@ typedef struct tg_gles_texture_state {
 void tgGlesInitTextures(tg_gles_state *,tg_gles_texture_state *,void *arena,unsigned int bytes);
 /* Returns null for an unbound or undefined texture. */
 const tg_fragment_texture *tgGlesTextureUnit(unsigned int unit);
+tg_gles_texture *tgGlesTextureObject(GLuint name);
 void glGenTextures(GLsizei,GLuint *);
 void glDeleteTextures(GLsizei,const GLuint *);
 void glActiveTexture(GLenum);
