@@ -13,7 +13,7 @@ typedef char GLchar;
 #define GL_DELETE_STATUS 0x8b80
 #define TG_GLES_MAX_SHADERS 4
 #define TG_GLES_MAX_PROGRAMS 2
-#define TG_GLES_SHADER_SOURCE_MAX 1024
+#define TG_GLES_SHADER_SOURCE_MAX 8192
 typedef struct {
     GLenum type;
     GLboolean used, compiled, overflow, deleted;
