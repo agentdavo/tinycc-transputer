@@ -202,6 +202,14 @@ Verification covered focused compiler, linker and UART regressions. The
 kernel boot, full test corpus, physical hardware, and the historical size
 and timing measurements were outside this run.
 
+The [Doom benchmark link audit](transputer/tests/bench/doom-harness-audit-2026-11-06.md)
+replaces unexercised source bodies with fail-fast stubs in generated copies,
+rejects linker diagnostics and incomplete or incorrect phase results, and
+documents the former unresolved references. The original and stricter builds
+produced identical phase hashes on T414, T425, T800 and T9000 with matched
+inputs; code layout changed a few cycle estimates, so those timings need a
+fresh common harness for performance comparisons.
+
 ## Historical fix log (2026-11-02)
 
 > **Fix status (2026-11-02).** These are fixed in commits on top of the squashed "transputer" commit:

@@ -17,6 +17,18 @@
  * results that differ from exact references in C (64-bit arithmetic, DOS
  * DOOM's truncating FixedDiv), and must say 0 0.
  */
+/* The generated benchmark-only source replaces unused Doom functions with
+ * calls here. If a phase reaches one, mark the run invalid and stop. */
+static void bench_unreachable(const char *name)
+{
+    const char *s = "unexpected Doom function: ";
+    while (*s) *(volatile unsigned int *)0x10000000u = (unsigned char)*s++;
+    while (*name) *(volatile unsigned int *)0x10000000u = (unsigned char)*name++;
+    *(volatile unsigned int *)0x10000000u = '\n';
+    __seterr();
+    __stoperr();
+    for (;;) {}
+}
 #define rcsid rcsid_m_fixed
 #include "m_fixed.c"
 #undef rcsid
