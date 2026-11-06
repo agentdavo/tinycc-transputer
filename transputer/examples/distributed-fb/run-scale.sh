@@ -20,7 +20,8 @@ case "$RENDERER" in
     gl-uber|gl-uber-fbo)
         render_sources=("$ROOT/transputer/examples/dengine-t4/uber_gl_array.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$HERE/gles2_vm_bridge.c" "$HERE/gles2_texture.c" "$HERE/glsl_fragment_compiler.c" "$HERE/glsl_fragment_shader.c" "$HERE/glsl_uber_vertex_shader.c" "$HERE/glsl_vm.c" "$HERE/gles2_fragment.c" "$HERE/material_raster.c" "$HERE/material_clip.c")
         render_include=();render_flags=(-DTG_GLES_VM_PROGRAM=1 -DTEST_LARGE_WORKSPACE=1)
-        if [[ $RENDERER == gl-uber-fbo ]]; then render_flags+=(-DTG_GLES_FRAMEBUFFER=1);render_sources+=("$HERE/gles2_framebuffer.c");fi ;;
+        if [[ $RENDERER == gl-uber-fbo ]]; then render_flags+=(-DTG_GLES_FRAMEBUFFER=1);render_sources+=("$HERE/gles2_framebuffer.c");fi
+        if [[ ${CLIP_FAST:-1} == 0 ]]; then render_flags+=(-DTG_GLES_NO_CLIP_FAST=1);fi ;;
     hellknight)
         upstream="$ROOT/transputer/examples/dEngine/src/matrix.c"
         [[ -f $upstream ]] || { echo 'dEngine clone missing: see transputer/examples/dengine-t4/README.md' >&2; exit 1; }
@@ -64,7 +65,7 @@ if [[ $RENDERER == gl-uber || $RENDERER == gl-uber-fbo ]]; then
 from pathlib import Path
 import sys
 p=Path(sys.argv[1]);lines=[]
-for name,file in [('vertex_uber_source','v_uber.glsl'),('fragment_uber_source','f_uber.glsl')]:
+for name,file in [('vertex_uber_source','v_uber.glsl'),('fragment_uber_source','f_uber.glsl'),('shadow_vertex_source','v_shadowMapGenerator.glsl'),('shadow_fragment_source','f_shadowMapGenerator.glsl')]:
     lines.append('static const char '+name+'[]={'+','.join(map(str,(p/file).read_bytes()))+',0};')
 Path(sys.argv[2]).write_text('\n'.join(lines)+'\n')
 PY

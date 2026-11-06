@@ -7,9 +7,15 @@
 #endif
 #include "uber_gl_sources.h"
 static tg_context target;static tg_gles_state gl;static tg_gles_draw_state draw;static tg_gles_program_state programs;
-static tg_gles_texture_state textures;static unsigned int arena[256];static GLuint program;static int initialized,failed;
+static tg_gles_texture_state textures;
 #ifdef TG_GLES_FRAMEBUFFER
-static tg_gles_framebuffer_state framebuffers;static unsigned int scratch[4];static int rb_arena[16];
+static unsigned int arena[8*32*24];
+#else
+static unsigned int arena[256];
+#endif
+static GLuint program;static int initialized,failed;
+#ifdef TG_GLES_FRAMEBUFFER
+static tg_gles_framebuffer_state framebuffers;static unsigned int scratch[32*24];static int rb_arena[4*32*24];
 #endif
 /* Minimal ABI matching the fields consumed by dEngine's unmodified OBJ draw
  * function. The function body is extracted from the local checkout at build
@@ -31,18 +37,27 @@ static const unsigned char base_pixels[]={220,90,40,255, 30,170,210,255, 30,170,
 static const unsigned char bump_pixels[]={128,128,255,255},spec_pixels[]={80,80,80,255},shadow_pixels[]={0,0,0,255};
 static const float ambient[]={0.5f,0.5f,0.5f},diffuse[]={0.5f,0.5f,0.5f},specular[]={0.1f,0.1f,0.1f},position[]={0,0,3};
 static const float identity[]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+static void diagnostic(const char *label,GLenum error)
+{
+#ifdef __transputer__
+    volatile unsigned int *uart=(volatile unsigned int *)0x10000000u;int i;while(*label)*uart=(unsigned char)*label++;for(i=12;i>=0;i-=4)*uart="0123456789abcdef"[(error>>i)&15];*uart='\n';
+#else
+    (void)label;(void)error;
+#endif
+}
+static void check_error(const char *label){GLenum error=glGetError();if(error!=GL_NO_ERROR){diagnostic(label,error);failed=1;}}
 static GLuint compile(GLenum type,const char *source)
 {
     static const char *defines[]={"#define BUMP_MAPPING\n#define SPEC_MAPPING\n#define SHADO_MAPPING\n",0};
     const char *strings[2];GLuint id;GLint ok;strings[0]=defines[0];strings[1]=source;
-    id=glCreateShader(type);glShaderSource(id,2,strings,0);glCompileShader(id);glGetShaderiv(id,GL_COMPILE_STATUS,&ok);if(!ok)failed=1;return id;
+    id=glCreateShader(type);glShaderSource(id,2,strings,0);glCompileShader(id);glGetShaderiv(id,GL_COMPILE_STATUS,&ok);if(!ok){failed=1;diagnostic("SHADER COMPILE ",type);}return id;
 }
 static void init(void)
 {
     GLuint v,f,ids[4];GLint ok,a;int i;const unsigned char *pixels[]={base_pixels,bump_pixels,spec_pixels,shadow_pixels};
     tgGlesInit(&gl,&target);tgGlesMakeCurrent(&gl);tgGlesInitDraw(&gl,&draw,0,0,0,0);tgGlesInitPrograms(&gl,&programs);tgGlesInitTextures(&gl,&textures,arena,sizeof(arena));
 #ifdef TG_GLES_FRAMEBUFFER
-    tgGlesInitFramebuffers(&gl,&framebuffers,scratch,4,rb_arena,16);
+    tgGlesInitFramebuffers(&gl,&framebuffers,scratch,32*24,rb_arena,4*32*24);
 #endif
     glEnable(GL_DEPTH_TEST);glEnable(GL_CULL_FACE);glCullFace(GL_BACK);
     v=compile(GL_VERTEX_SHADER,vertex_uber_source);f=compile(GL_FRAGMENT_SHADER,fragment_uber_source);
@@ -59,21 +74,36 @@ static void init(void)
     a=glGetAttribLocation(program,"a_tangent");currentShader->vars[SHADER_ATT_TANGENT]=a;glEnableVertexAttribArray(a);
     a=glGetAttribLocation(program,"a_texcoord0");currentShader->vars[SHADER_ATT_UV]=a;glEnableVertexAttribArray(a);
     glGenTextures(4,ids);for(i=0;i<4;i++){glActiveTexture(GL_TEXTURE0+i);glBindTexture(GL_TEXTURE_2D,ids[i]);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,i?1:2,i?1:2,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels[i]);}
+    check_error("GL BEFORE FBO ");
 #ifdef TG_GLES_FRAMEBUFFER
     {
-        GLuint output,fb,rb;
+        GLuint output,fb,rb,sv,sf,shadow_program;GLint status;float light_matrix[16];int k;GLuint old_vertex=currentShader->vars[SHADER_ATT_VERTEX];
         glActiveTexture(GL_TEXTURE0);glGenTextures(1,&output);glBindTexture(GL_TEXTURE_2D,output);
-        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,0);glBindTexture(GL_TEXTURE_2D,ids[0]);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,32,24,0,GL_RGBA,GL_UNSIGNED_BYTE,0);glBindTexture(GL_TEXTURE_2D,ids[0]);
         glGenFramebuffers(1,&fb);glBindFramebuffer(GL_FRAMEBUFFER,fb);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,output,0);
-        glGenRenderbuffers(1,&rb);glBindRenderbuffer(GL_RENDERBUFFER,rb);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,2,2);
+        glGenRenderbuffers(1,&rb);glBindRenderbuffer(GL_RENDERBUFFER,rb);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,32,24);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,rb);
         if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)failed=1;
-        glViewport(0,0,2,2);glClearColor(0.1f,0.15f,0.2f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-        glUniformMatrix4fv(glGetUniformLocation(program,"modelViewProjectionMatrix"),1,GL_FALSE,identity);RenderEntitiesOBJ(&object);
-        glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,160,120);glBindTexture(GL_TEXTURE_2D,output);
+        check_error("GL FBO ATTACH ");
+        sv=compile(GL_VERTEX_SHADER,shadow_vertex_source);sf=compile(GL_FRAGMENT_SHADER,shadow_fragment_source);
+        shadow_program=glCreateProgram();glAttachShader(shadow_program,sv);glAttachShader(shadow_program,sf);glLinkProgram(shadow_program);
+        glGetProgramiv(shadow_program,GL_LINK_STATUS,&status);if(!status){failed=1;diagnostic("SHADOW LINK ",0);}glUseProgram(shadow_program);
+        check_error("GL SHADOW USE ");
+        glDisableVertexAttribArray(currentShader->vars[SHADER_ATT_NORMAL]);glDisableVertexAttribArray(currentShader->vars[SHADER_ATT_TANGENT]);glDisableVertexAttribArray(currentShader->vars[SHADER_ATT_UV]);
+        currentShader->vars[SHADER_ATT_VERTEX]=glGetAttribLocation(shadow_program,"a_vertex");glEnableVertexAttribArray(currentShader->vars[SHADER_ATT_VERTEX]);
+        for(k=0;k<16;k++)light_matrix[k]=identity[k];light_matrix[14]=-0.5f;
+        glUniformMatrix4fv(glGetUniformLocation(shadow_program,"modelViewProjectionMatrix"),1,GL_FALSE,light_matrix);
+        glViewport(0,0,32,24);glClearColor(1,1,1,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        renderer.isRenderingShadow=1;RenderEntitiesOBJ(&object);renderer.isRenderingShadow=0;
+        check_error("GL SHADOW DRAW ");
+        glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,160,120);glUseProgram(program);
+        glDeleteProgram(shadow_program);glDeleteShader(sv);glDeleteShader(sf);currentShader->vars[SHADER_ATT_VERTEX]=old_vertex;
+        glEnableVertexAttribArray(currentShader->vars[SHADER_ATT_NORMAL]);glEnableVertexAttribArray(currentShader->vars[SHADER_ATT_TANGENT]);glEnableVertexAttribArray(currentShader->vars[SHADER_ATT_UV]);
+        glActiveTexture(GL_TEXTURE0+3);glBindTexture(GL_TEXTURE_2D,output);
+        check_error("GL SHADOW FINISH ");
     }
 #endif
-    if(glGetError()!=GL_NO_ERROR)failed=1;initialized=1;
+    { GLenum error=glGetError();if(error!=GL_NO_ERROR){diagnostic("GL INIT ",error);failed=1;} }initialized=1;
 }
 void cube_render_band(unsigned int *tile,int *depth,int quadrant,unsigned int frame,int row0,int row1)
 {
@@ -84,7 +114,7 @@ void cube_render_band(unsigned int *tile,int *depth,int quadrant,unsigned int fr
     glClearColor(0.035f,0.055f,0.08f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
     for(i=0;i<16;i++)matrix[i]=identity[i];matrix[12]=(frame&1)?0.08f:0;
     glUniformMatrix4fv(glGetUniformLocation(program,"modelViewProjectionMatrix"),1,GL_FALSE,matrix);
-    RenderEntitiesOBJ(&object);if(glGetError()!=GL_NO_ERROR)failed=1;
+    RenderEntitiesOBJ(&object);{ GLenum error=glGetError();if(error!=GL_NO_ERROR){diagnostic("GL DRAW ",error);failed=1;} }
     if(failed){glDisable(GL_SCISSOR_TEST);glClearColor(1,0,1,1);glClear(GL_COLOR_BUFFER_BIT);}
     tgGlesMakeCurrent(0);
 }

@@ -16,6 +16,13 @@ int tg_material_clip_triangle(tg_context *ctx,const tg_material_clip_vertex *a,c
 {
     tg_material_clip_vertex p[12],q[12];tg_material_vertex projected[12];int n=3,plane,i,j,errors=0;
     if(!ctx||!a||!b||!c||!fn||!options)return 1;p[0]=*a;p[1]=*b;p[2]=*c;
+#ifndef TG_GLES_NO_CLIP_FAST
+    {
+        int inside=1;
+        for(plane=0;plane<6 && inside;plane++)for(i=0;i<3;i++)if(!(distance_to_plane(&p[i],plane)>=0)){inside=0;break;}
+        if(inside)goto project;
+    }
+#endif
     for(plane=0;plane<6 && n;plane++) {
         int count=0;
         for(i=0;i<n;i++) {
@@ -28,6 +35,9 @@ int tg_material_clip_triangle(tg_context *ctx,const tg_material_clip_vertex *a,c
         n=count;for(i=0;i<n;i++)p[i]=q[i];
     }
     if(n<3)return 0;
+#ifndef TG_GLES_NO_CLIP_FAST
+project:
+#endif
     for(i=0;i<n;i++) {
         float w=p[i].clip[3];if(!(w>0.000001f))return 0;
         projected[i].x=(int)(viewport_x+(1.0f+p[i].clip[0]/w)*0.5f*viewport_width);

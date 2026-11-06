@@ -16,4 +16,16 @@ for nodes in 1 2 4 8 16 32; do
         fi
     done
 done
+if [[ ${RENDERER:-tinygl} == gl-uber || ${RENDERER:-tinygl} == gl-uber-fbo ]]; then
+    python3 - "$reference" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);a=(p/'screenshot_0.bmp').read_bytes();b=(p/'screenshot_1.bmp').read_bytes()
+offset=int.from_bytes(a[10:14],'little');pixels=[a[i:i+3] for i in range(offset,len(a),3)]
+assert a!=b, 'diagnostic frames are identical'
+assert b'\xff\x00\xff' not in pixels, 'GL diagnostic reported an error'
+assert len(set(pixels))>=3, 'diagnostic image lacks rendered colors'
+print('GL diagnostic image and animation checks OK')
+PY
+fi
 echo "All six node counts matched the two one-node reference frames: $base"
