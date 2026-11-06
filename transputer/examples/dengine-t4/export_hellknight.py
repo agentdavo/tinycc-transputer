@@ -226,7 +226,7 @@ def main():
     print(f"Baked {len(joints)} joints, {len(points)} vertices, {len(triangles)} triangles into {args.output}")
 
 
-def read_rgb_png(path):
+def read_rgba_png(path):
     data=path.read_bytes()
     if data[:8]!=b"\x89PNG\r\n\x1a\n": raise SystemExit("not a PNG")
     pos=8; compressed=b""; w=h=0
@@ -253,11 +253,17 @@ def read_rgb_png(path):
             elif mode==0: v=0
             else: raise SystemExit("unknown PNG filter")
             row[i]=(row[i]+v)&255
-        if channels==3: result.extend(row)
+        if channels==4: result.extend(row)
         else:
-            for x in range(w): result.extend(row[x*4:x*4+3])
+            for x in range(w): result.extend((*row[x*3:x*3+3],255))
         previous=row
     return result,w,h
+
+def read_rgb_png(path):
+    rgba,w,h=read_rgba_png(path)
+    rgb=bytearray()
+    for i in range(0,len(rgba),4): rgb.extend(rgba[i:i+3])
+    return rgb,w,h
 
 
 if __name__ == "__main__":

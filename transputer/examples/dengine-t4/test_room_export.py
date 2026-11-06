@@ -13,7 +13,8 @@ with tempfile.TemporaryDirectory() as d:
     output=Path(d)/'room.h'; export(root,output); data=output.read_text()
     assert '#define ROOM_VERTEX_COUNT 970' in data
     assert '#define ROOM_TRIANGLE_COUNT 653' in data
-    assert '#define ROOM_TEXTURE_COUNT 28' in data
+    assert '#define ROOM_TEXTURE_COUNT 51' in data
+    assert '#define ROOM_MATERIAL_COUNT 29' in data
     # First source vertex (14,46,-8), transformed by demo.map.
     assert '{164.00000000f,126.00000000f,122.00000000f,' in data
 print('demo room export tests OK')

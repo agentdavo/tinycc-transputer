@@ -4,7 +4,7 @@
 #include "room_asset.h"
 #define MAX_ROOM_TRIANGLES (ROOM_TRIANGLE_COUNT*2)
 typedef struct { float x,y,z,nx,ny,nz,u,v; } clip_vertex;
-typedef struct { tg_material_vertex v[3]; unsigned short texture; } draw_triangle;
+typedef struct { tg_material_vertex v[3]; unsigned short material; } draw_triangle;
 static draw_triangle projected[MAX_ROOM_TRIANGLES];
 static unsigned int projected_count;
 static tg_fragment_texture textures[ROOM_TEXTURE_COUNT];
@@ -18,15 +18,19 @@ static clip_vertex intersect(clip_vertex a,clip_vertex b)
 #undef LERP
     return o;
 }
-static void project(tg_material_vertex *v,clip_vertex p)
+static void project(tg_material_vertex *v,clip_vertex p,const room_source_triangle *tri)
 {
     float w=cz-p.z;
     v->x=(int)(80.0f+72.0f*(p.x-cx)/w); v->y=(int)(60.0f-72.0f*(p.y-cy)/w);
     v->depth=(int)(100000.0f/w); v->inverse_w=1.0f/w;
     v->varying.uv[0]=p.u; v->varying.uv[1]=p.v;
     v->varying.normal[0]=p.nx; v->varying.normal[1]=p.ny; v->varying.normal[2]=p.nz;
-    v->varying.light[0]=v->varying.light[1]=0; v->varying.light[2]=1;
-    v->varying.half_vector[0]=v->varying.half_vector[1]=0; v->varying.half_vector[2]=1;
+    if(room_materials[tri->material].bump!=65535) {
+        v->varying.light[0]=tri->tz;
+        v->varying.light[1]=p.nx*tri->ty-p.ny*tri->tx;
+        v->varying.light[2]=p.nz;
+    } else { v->varying.light[0]=v->varying.light[1]=0; v->varying.light[2]=1; }
+    v->varying.half_vector[0]=v->varying.light[0]; v->varying.half_vector[1]=v->varying.light[1]; v->varying.half_vector[2]=v->varying.light[2];
     v->varying.light_clip[0]=p.x; v->varying.light_clip[1]=p.y;
     v->varying.light_clip[2]=-p.z; v->varying.light_clip[3]=1;
 }
@@ -50,7 +54,7 @@ void demo_room_init(float center_x,float center_y,float center_z,float scale,flo
         }
         for(j=1;j+1<n && projected_count<MAX_ROOM_TRIANGLES;j++) {
             draw_triangle *d=&projected[projected_count++];
-            project(&d->v[0],out[0]); project(&d->v[1],out[j]); project(&d->v[2],out[j+1]); d->texture=tri->texture;
+            project(&d->v[0],out[0],tri); project(&d->v[1],out[j],tri); project(&d->v[2],out[j+1],tri); d->material=tri->material;
         }
     }
 }
@@ -58,9 +62,12 @@ int demo_room_draw(tg_context *ctx,const tg_fragment_texture *shadow)
 {
     static tg_fragment_material m; unsigned int i; int errors=0;
     m.shadow=shadow; m.features=TG_FRAG_SHADOW; m.pow_fn=square; m.shininess=2; m.clamp_specular_base=1;
-    for(i=0;i<3;i++) { m.ambient[i]=0.5f; m.diffuse[i]=0.5f; }
+    for(i=0;i<3;i++) { m.ambient[i]=0.5f; m.diffuse[i]=0.5f; m.specular_light[i]=0.3f; }
     for(i=0;i<projected_count;i++) {
-        draw_triangle *t=&projected[i]; m.base=&textures[t->texture];
+        draw_triangle *t=&projected[i]; const room_source_material *mat=&room_materials[t->material];
+        m.base=&textures[mat->base]; m.features=TG_FRAG_SHADOW;
+        if(mat->bump!=65535) { m.bump=&textures[mat->bump]; m.features|=TG_FRAG_BUMP; }
+        if(mat->specular!=65535) { m.specular=&textures[mat->specular]; m.features|=TG_FRAG_SPEC; }
         errors+=tg_material_triangle(ctx,&t->v[0],&t->v[1],&t->v[2],&m);
     }
     return errors;
