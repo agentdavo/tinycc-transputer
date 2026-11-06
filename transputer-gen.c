@@ -139,7 +139,7 @@ struct tp_builtin_desc {
     const char *args;
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
-    unsigned char move2d_op; /* T425+ instruction with arguments in A, B, C */
+    unsigned char simple_op; /* one- or three-operand void instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -163,12 +163,6 @@ static void abcreg_push(int count);
 static int func_start_ind;
 
 /* Forward declarations for builtins defined later in this file */
-void gen_builtin_saveh(void);
-void gen_builtin_savel(void);
-void gen_builtin_sthf(void);
-void gen_builtin_sthb(void);
-void gen_builtin_stlf(void);
-void gen_builtin_stlb(void);
 void gen_builtin_norm(void);
 void gen_builtin_bitcnt(void);
 void gen_builtin_bitrevword(void);
@@ -643,12 +637,13 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___disc,        "eee", gen_builtin_disc,        0 },
         { TOK___diss,        "ee",  gen_builtin_diss,        0 },
         { TOK___dist,        "eee", gen_builtin_dist,        0 },
-        { TOK___saveh,       "e",   gen_builtin_saveh,       1 },
-        { TOK___savel,       "e",   gen_builtin_savel,       1 },
-        { TOK___sthf,        "e",   gen_builtin_sthf,        1 },
-        { TOK___sthb,        "e",   gen_builtin_sthb,        1 },
-        { TOK___stlf,        "e",   gen_builtin_stlf,        1 },
-        { TOK___stlb,        "e",   gen_builtin_stlb,        1 },
+        /* saveh/savel write two queue pointers; the st* forms set one. */
+        { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH },
+        { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL },
+        { TOK___sthf,        "e",   NULL, 1, TP_OPR_STHF },
+        { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB },
+        { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF },
+        { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB },
         { TOK___gajw,        "e",   gen_builtin_gajw,        0 },
         { TOK___wcnt,        "e",   gen_builtin_wcnt,        0 },
         { TOK___seterr,      "",    gen_builtin_seterr,      1 },
@@ -1040,7 +1035,9 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
                       get_tok_str(tok, NULL), tp_target_name(tcc_state));
         }
     }
-    if (tp_t414() && (desc->move2d_op || tok == TOK___crcbyte ||
+    if (tp_t414() && (tok == TOK___move2dinit || tok == TOK___move2dall ||
+                      tok == TOK___move2dnonzero || tok == TOK___move2dzero ||
+                      tok == TOK___crcbyte ||
                       tok == TOK___crcword || tok == TOK___bitrevword ||
                       tok == TOK___bitrevnbits || tok == TOK___lddevid))
         tcc_error("%s is a T425 instruction, not available with -mt414",
@@ -1055,8 +1052,10 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
      * both operands would name the builtin's result.  Spilling after the
      * arguments are parsed also covers an argument that is that result. */
     save_reg(REG_IRET);
-    if (desc->move2d_op)
-        tp_emit_3op(desc->move2d_op, 2, 1, 0);
+    if (desc->simple_op && !desc->args[1])
+        tp_emit_1op(desc->simple_op);
+    else if (desc->simple_op)
+        tp_emit_3op(desc->simple_op, 2, 1, 0);
     else
         desc->gen();
     if (desc->returns_void)
@@ -4956,28 +4955,6 @@ void gen_builtin_mint(void) {
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
 }
-
-/*
- * Scheduler queue registers.
- *
- * saveh/savel take a two-word buffer in AReg and write the front and back
- * pointers of the high/low priority run queue into buf[0] and buf[1].
- * sthf/sthb/stlf/stlb set one queue register each from AReg.
- *
- * The two functions here previously emitted OPR 0x28/0x29, which are not
- * sthf/stlf at all (those are 0x18 and 0x1C - see TP_OPR_STHF/TP_OPR_STLF
- * and the assembler table in transputer-asm.c).  They were unreachable, so
- * the wrong encodings never fired; they are correct now that the tokens
- * exist.
- */
-static void tp_gen_queue_store(int opr) { tp_emit_1op(opr); }
-
-void gen_builtin_saveh(void) { tp_gen_queue_store(TP_OPR_SAVEH); }
-void gen_builtin_savel(void) { tp_gen_queue_store(TP_OPR_SAVEL); }
-void gen_builtin_sthf(void)  { tp_gen_queue_store(TP_OPR_STHF);  }
-void gen_builtin_sthb(void)  { tp_gen_queue_store(TP_OPR_STHB);  }
-void gen_builtin_stlf(void)  { tp_gen_queue_store(TP_OPR_STLF);  }
-void gen_builtin_stlb(void)  { tp_gen_queue_store(TP_OPR_STLB);  }
 
 /* Workspace operations */
 void gen_builtin_gajw(void) {
