@@ -10,6 +10,7 @@
 #define GL_TEXTURE0 0x84c0
 #define GL_RGBA 0x1908
 #define GL_NEAREST 0x2600
+#define GL_LINEAR 0x2601
 #define GL_REPEAT 0x2901
 #define GL_CLAMP_TO_EDGE 0x812f
 #define GL_TEXTURE_WRAP_S 0x2802

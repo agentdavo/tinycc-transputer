@@ -14,6 +14,7 @@ typedef struct {
     const unsigned char *rgba;
     unsigned int width, height;
     int wrap_s, wrap_t;
+    int linear; /* 0 nearest, 1 bilinear; no mipmap/derivative selection. */
 } tg_fragment_texture;
 
 typedef struct {
@@ -35,7 +36,7 @@ typedef struct {
 
 enum { TG_FRAGMENT_OK=0, TG_FRAGMENT_INVALID=1, TG_FRAGMENT_UNDEFINED=2 };
 
-/* Nearest-only texture2D sampling, with CLAMP_TO_EDGE or REPEAT. */
+/* Nearest or bilinear texture2D sampling, with CLAMP_TO_EDGE or REPEAT. */
 int tg_fragment_sample(const tg_fragment_texture *tex, float s, float t, float rgba[4]);
 /* Executes the corresponding f_uber.glsl material formula on interpolated
  * inputs. `pow_fn` must implement GLSL pow for its defined real domain.

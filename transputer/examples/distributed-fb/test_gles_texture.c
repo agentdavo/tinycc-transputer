@@ -18,6 +18,8 @@ static int run(void)
     if(glGetError()!=GL_NO_ERROR || !(view=tgGlesTextureUnit(0)))return 2;
     vm.texture[0]=view; vm.reg[0][0]=1; vm.reg[0][1]=0;
     if(tg_glsl_vm_run(&vm,&sample,1)!=TG_VM_OK || vm.reg[1][1]!=1 || vm.reg[1][3]<0.501f || vm.reg[1][3]>0.502f)return 3;
+    glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,(GLfloat)GL_LINEAR);vm.reg[0][0]=0.5f;
+    if(glGetError()!=GL_NO_ERROR || tg_glsl_vm_run(&vm,&sample,1)!=TG_VM_OK || vm.reg[1][0]!=0.5f || vm.reg[1][1]!=0.5f)return 8;
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,20,20,0,GL_RGBA,GL_UNSIGNED_BYTE,data);
     if(glGetError()!=GL_OUT_OF_MEMORY || tgGlesTextureUnit(0)->width!=2)return 4;
     glActiveTexture(GL_TEXTURE0+1); glBindTexture(GL_TEXTURE_2D,ids[1]);

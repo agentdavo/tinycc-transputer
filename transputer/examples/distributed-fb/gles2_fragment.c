@@ -19,14 +19,35 @@ static int coord(float value, unsigned int size, int wrap, unsigned int *out)
     return 1;
 }
 
+static int linear_coord(float value,unsigned int size,int wrap,unsigned int *a,unsigned int *b,float *mix)
+{
+    int lo,hi,period=(int)size;float pos;
+    if(value!=value||value < -32768.0f||value > 32768.0f || (wrap!=TG_FRAG_CLAMP&&wrap!=TG_FRAG_REPEAT))return 0;
+    if(wrap==TG_FRAG_CLAMP) { if(value<0)value=0;if(value>1)value=1; }
+    else { int whole=(int)value;if((float)whole>value)whole--;value-=(float)whole; }
+    pos=value*(float)size-0.5f;lo=(int)pos;if((float)lo>pos)lo--;hi=lo+1;*mix=pos-(float)lo;
+    if(wrap==TG_FRAG_CLAMP) { if(lo<0)lo=0;if(hi>=period)hi=period-1; }
+    else { if(lo<0)lo+=period;if(hi>=period)hi-=period; }
+    *a=(unsigned int)lo;*b=(unsigned int)hi;return 1;
+}
 int tg_fragment_sample(const tg_fragment_texture *tex, float s, float t, float out[4])
 {
     unsigned int x,y,offset; int i;
     if (!tex || !tex->rgba || !out || !tex->width || !tex->height ||
         tex->width>32767u || tex->height>32767u ||
-        tex->height>0x3fffffffu/tex->width ||
-        !coord(s,tex->width,tex->wrap_s,&x) || !coord(t,tex->height,tex->wrap_t,&y))
+        tex->height>0x3fffffffu/tex->width)
         return TG_FRAGMENT_INVALID;
+    if(tex->linear) {
+        unsigned int x0,x1,y0,y1;float fx,fy;
+        if(!linear_coord(s,tex->width,tex->wrap_s,&x0,&x1,&fx)||!linear_coord(t,tex->height,tex->wrap_t,&y0,&y1,&fy))return TG_FRAGMENT_INVALID;
+        for(i=0;i<4;i++) {
+            float a=tex->rgba[(y0*tex->width+x0)*4u+i],b=tex->rgba[(y0*tex->width+x1)*4u+i];
+            float c=tex->rgba[(y1*tex->width+x0)*4u+i],d=tex->rgba[(y1*tex->width+x1)*4u+i];
+            out[i]=((a+(b-a)*fx)*(1.0f-fy)+(c+(d-c)*fx)*fy)/255.0f;
+        }
+        return TG_FRAGMENT_OK;
+    }
+    if(!coord(s,tex->width,tex->wrap_s,&x) || !coord(t,tex->height,tex->wrap_t,&y))return TG_FRAGMENT_INVALID;
     offset=(y*tex->width+x)*4u;
     for (i=0;i<4;i++) out[i]=(float)tex->rgba[offset+i]/255.0f;
     return TG_FRAGMENT_OK;

@@ -24,6 +24,10 @@ static int run(void)
     grid.wrap_s=TG_FRAG_REPEAT; grid.wrap_t=TG_FRAG_REPEAT;
     if (tg_fragment_sample(&grid,-0.25f,1.25f,out)!=TG_FRAGMENT_OK ||
         out[0]!=0.0f || out[1]!=1.0f || out[2]!=0.0f) return 2;
+    grid.linear=1;
+    if(tg_fragment_sample(&grid,0.5f,0.5f,out)!=TG_FRAGMENT_OK || !close_to(out[0],95.75f/255.0f) || !close_to(out[1],79.75f/255.0f) || !close_to(out[2],71.75f/255.0f))return 15;
+    if(tg_fragment_sample(&grid,0,0,out)!=TG_FRAGMENT_OK || !close_to(out[0],95.75f/255.0f))return 15;
+    grid.linear=0;
     m.base=&base; m.bump=&bump; m.specular=&spec; m.shadow=&shadow;
     m.ambient[0]=m.ambient[1]=m.ambient[2]=0.25f;
     m.diffuse[0]=m.diffuse[1]=m.diffuse[2]=0.5f;

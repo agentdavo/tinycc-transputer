@@ -30,6 +30,7 @@ void glGenTextures(GLsizei n,GLuint *names)
         s->objects[j].name=names[i]=s->next_name++; s->objects[j].reserved=1; s->objects[j].created=0;
         s->objects[j].size=0; s->objects[j].view.rgba=0; s->objects[j].view.width=s->objects[j].view.height=0;
         s->objects[j].view.wrap_s=s->objects[j].view.wrap_t=TG_FRAG_REPEAT;
+        s->objects[j].view.linear=0;
     }
 }
 void glDeleteTextures(GLsizei n,const GLuint *names)
@@ -69,7 +70,10 @@ void glTexParameteri(GLenum target,GLenum pname,GLint value)
     if(!s)return; if(target!=GL_TEXTURE_2D) { tgGlesSetError(GL_INVALID_ENUM); return; }
     if(!(t=bound(s)))return;
     if(pname==GL_TEXTURE_MIN_FILTER || pname==GL_TEXTURE_MAG_FILTER) {
-        if(value!=GL_NEAREST)tgGlesSetError(GL_INVALID_ENUM); return;
+        if(value!=GL_NEAREST && value!=GL_LINEAR){tgGlesSetError(GL_INVALID_ENUM);return;}
+        /* Derivatives and mipmaps are not available: the last selected
+         * nearest/linear filter applies to all lookups. */
+        t->view.linear=value==GL_LINEAR;return;
     }
     if(pname!=GL_TEXTURE_WRAP_S && pname!=GL_TEXTURE_WRAP_T) { tgGlesSetError(GL_INVALID_ENUM); return; }
     if(value!=GL_REPEAT && value!=GL_CLAMP_TO_EDGE) { tgGlesSetError(GL_INVALID_ENUM); return; }
@@ -78,7 +82,7 @@ void glTexParameteri(GLenum target,GLenum pname,GLint value)
 }
 void glTexParameterf(GLenum target,GLenum pname,GLfloat value)
 {
-    if(value!=(GLfloat)GL_NEAREST && value!=(GLfloat)GL_REPEAT && value!=(GLfloat)GL_CLAMP_TO_EDGE) {
+    if(value!=(GLfloat)GL_NEAREST && value!=(GLfloat)GL_LINEAR && value!=(GLfloat)GL_REPEAT && value!=(GLfloat)GL_CLAMP_TO_EDGE) {
         if(state())tgGlesSetError(GL_INVALID_ENUM);return;
     }
     glTexParameteri(target,pname,(GLint)value);
