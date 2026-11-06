@@ -20,6 +20,7 @@ for ((i=0;i<60;++i)); do
     sleep 0.5
 done
 if ! grep -aq 'TINYGL OK' "$WORK/test.uart" 2>/dev/null; then
+    cat "$WORK/test.uart" >&2 2>/dev/null || true
     cat "$WORK/t4.log" >&2; echo 'TINYGL target tests failed' >&2; exit 1
 fi
 echo 'TINYGL target tests OK'

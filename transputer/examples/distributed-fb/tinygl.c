@@ -14,18 +14,26 @@ static void fill_words(unsigned int *dst, unsigned int value, int n)
 }
 #endif
 
-void tg_clear(tg_context *c, unsigned int color)
+void tg_clear_band(tg_context *c, unsigned int color, int row0, int row1)
 {
-    int i;
+    int i, start, count;
+    if (row0<0) row0=0;
+    if (row1>TG_TILE_H) row1=TG_TILE_H;
+    if (row0>=row1) return;
+    start=row0*TG_TILE_W; count=(row1-row0)*TG_TILE_W;
 #if defined(__transputer__) && !defined(TG_SCALAR_CLEAR)
-    fill_words(c->color,color,TG_TILE_W * TG_TILE_H);
-    fill_words((unsigned int *)c->depth,0x80000001u,TG_TILE_W * TG_TILE_H);
+    fill_words(c->color+start,color,count);
+    fill_words((unsigned int *)c->depth+start,0x80000001u,count);
 #else
-    for (i = 0; i < TG_TILE_W * TG_TILE_H; ++i) {
+    for (i = start; i < start+count; ++i) {
         c->color[i] = color;
         c->depth[i] = -2147483647;
     }
 #endif
+}
+void tg_clear(tg_context *c, unsigned int color)
+{
+    tg_clear_band(c,color,0,TG_TILE_H);
 }
 
 void tg_transform(const tg_context *c, const tg_vertex *src, tg_screen_vertex *dst, int n)
@@ -56,7 +64,7 @@ static int edge(int ax, int ay, int bx, int by, int x, int y)
 static void triangle(tg_context *c, tg_screen_vertex a, tg_screen_vertex b, tg_screen_vertex d)
 {
     int area = edge(a.x,a.y,b.x,b.y,d.x,d.y);
-    int x0, x1, y0, y1, x, y;
+    int x0, x1, y0, y1, x, y, anchor_x, anchor_y, dx, dy;
     int w0, w1, w2, wx0, wx1, wx2, wy0, wy1, wy2;
     int zrow, urow, vrow, zx, ux, vx, zy, uy, vy;
     if (!area) return;
@@ -74,16 +82,26 @@ static void triangle(tg_context *c, tg_screen_vertex a, tg_screen_vertex b, tg_s
     if (y0 < c->tile_y) y0 = c->tile_y;
     if (x1 >= c->tile_x + TG_TILE_W) x1 = c->tile_x + TG_TILE_W - 1;
     if (y1 >= c->tile_y + TG_TILE_H) y1 = c->tile_y + TG_TILE_H - 1;
+    anchor_x=x0; anchor_y=y0;
+    if (c->clip_enabled) {
+        if (x0 < c->clip_x0) x0=c->clip_x0;
+        if (y0 < c->clip_y0) y0=c->clip_y0;
+        if (x1 >= c->clip_x1) x1=c->clip_x1-1;
+        if (y1 >= c->clip_y1) y1=c->clip_y1-1;
+    }
     if (x0 > x1 || y0 > y1) return;
     wx0=d.y-b.y; wx1=a.y-d.y; wx2=b.y-a.y;
     wy0=b.x-d.x; wy1=d.x-a.x; wy2=a.x-b.x;
-    w0=edge(b.x,b.y,d.x,d.y,x0,y0); w1=edge(d.x,d.y,a.x,a.y,x0,y0); w2=area-w0-w1;
+    w0=edge(b.x,b.y,d.x,d.y,anchor_x,anchor_y); w1=edge(d.x,d.y,a.x,a.y,anchor_x,anchor_y); w2=area-w0-w1;
 #define GRAD(q,wA,wB,wC) (((wA)*a.q+(wB)*b.q+(wC)*d.q)*256/area)
     zx=GRAD(z,wx0,wx1,wx2); zy=GRAD(z,wy0,wy1,wy2);
     ux=GRAD(u,wx0,wx1,wx2); uy=GRAD(u,wy0,wy1,wy2);
     vx=GRAD(v,wx0,wx1,wx2); vy=GRAD(v,wy0,wy1,wy2);
     zrow=GRAD(z,w0,w1,w2); urow=GRAD(u,w0,w1,w2); vrow=GRAD(v,w0,w1,w2);
 #undef GRAD
+    dx=x0-anchor_x; dy=y0-anchor_y;
+    w0+=wx0*dx+wy0*dy; w1+=wx1*dx+wy1*dy; w2+=wx2*dx+wy2*dy;
+    zrow+=zx*dx+zy*dy; urow+=ux*dx+uy*dy; vrow+=vx*dx+vy*dy;
     for (y=y0; y<=y1; ++y) {
         int e0=w0,e1=w1,e2=w2, z=zrow,u=urow,v=vrow;
         int off=(y-c->tile_y)*TG_TILE_W+x0-c->tile_x;
@@ -107,6 +125,10 @@ void tg_draw_elements(tg_context *c, const tg_screen_vertex *v, const unsigned c
 {
     int i;
     for (i=0; i<triangles; ++i) triangle(c,v[idx[i*3]],v[idx[i*3+1]],v[idx[i*3+2]]);
+}
+void tg_draw_triangle(tg_context *c, const tg_screen_vertex *a, const tg_screen_vertex *b, const tg_screen_vertex *d)
+{
+    triangle(c,*a,*b,*d);
 }
 
 unsigned int tg_checksum(const unsigned int *p, int n)

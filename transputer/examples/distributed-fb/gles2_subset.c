@@ -1,5 +1,6 @@
 #include "gles2_subset.h"
 static tg_gles_state *current;
+static void update_clip(void);
 static unsigned int channel(GLclampf x)
 {
     if (x < 0.0f) x=0.0f;
@@ -10,8 +11,12 @@ void tgGlesInit(tg_gles_state *s, tg_context *target)
 {
     s->target=target; s->clear_argb=0; s->color_write_mask=0xffffffffu;
     s->depth_write=GL_TRUE; s->error=GL_NO_ERROR;
+    s->scissor_x=0; s->scissor_y=0; s->scissor_width=160; s->scissor_height=120;
+    s->scissor_enabled=GL_FALSE; s->draw=0; s->programs=0; target->clip_enabled=0;
 }
-void tgGlesMakeCurrent(tg_gles_state *s) { current=s; }
+void tgGlesMakeCurrent(tg_gles_state *s) { current=s; if (s) update_clip(); }
+tg_gles_state *tgGlesCurrentState(void) { return current; }
+void tgGlesSetError(GLenum error) { if (current && current->error==GL_NO_ERROR) current->error=error; }
 void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a)
 {
     if (current) current->clear_argb=(channel(a)<<24)|(channel(r)<<16)|(channel(g)<<8)|channel(b);
@@ -21,6 +26,92 @@ void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a)
     if (current) current->color_write_mask=(a?0xff000000u:0)|(r?0x00ff0000u:0)|(g?0x0000ff00u:0)|(b?0x000000ffu:0);
 }
 void glDepthMask(GLboolean flag) { if (current) current->depth_write=flag ? GL_TRUE : GL_FALSE; }
+static void update_clip(void)
+{
+    long long x0=current->scissor_x, y0=current->scissor_y;
+    long long x1=x0+current->scissor_width, y1=y0+current->scissor_height;
+    tg_context *c=current->target;
+    if (x0<0) x0=0;
+    if (x0>160) x0=160;
+    if (x1<0) x1=0;
+    if (x1>160) x1=160;
+    if (y0<0) y0=0;
+    if (y0>120) y0=120;
+    if (y1<0) y1=0;
+    if (y1>120) y1=120;
+    c->clip_x0=(int)x0; c->clip_x1=(int)x1;
+    c->clip_y0=120-(int)y1; c->clip_y1=120-(int)y0;
+    c->clip_enabled=current->scissor_enabled;
+}
+void glScissor(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+    if (!current) return;
+    if (width<0 || height<0) {
+        if (current->error==GL_NO_ERROR) current->error=GL_INVALID_VALUE;
+        return;
+    }
+    current->scissor_x=x; current->scissor_y=y;
+    current->scissor_width=width; current->scissor_height=height;
+    update_clip();
+}
+void glEnable(GLenum cap)
+{
+    if (!current) return;
+    if (cap!=GL_SCISSOR_TEST) { if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM; return; }
+    current->scissor_enabled=GL_TRUE; update_clip();
+}
+void glDisable(GLenum cap)
+{
+    if (!current) return;
+    if (cap!=GL_SCISSOR_TEST) { if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM; return; }
+    current->scissor_enabled=GL_FALSE; update_clip();
+}
+GLboolean glIsEnabled(GLenum cap)
+{
+    if (!current) return GL_FALSE;
+    if (cap!=GL_SCISSOR_TEST) { if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM; return GL_FALSE; }
+    return current->scissor_enabled;
+}
+/* Shared query path for the implemented integer and boolean state. All three
+ * ES query types accept these pnames and apply their corresponding conversion. */
+static int get_state(GLenum pname, GLint v[4])
+{
+    if (!current) return 0;
+    switch (pname) {
+    case GL_SCISSOR_BOX:
+        v[0]=current->scissor_x; v[1]=current->scissor_y;
+        v[2]=current->scissor_width; v[3]=current->scissor_height;
+        return 4;
+    case GL_SCISSOR_TEST:
+        v[0]=current->scissor_enabled; return 1;
+    case GL_DEPTH_WRITEMASK:
+        v[0]=current->depth_write; return 1;
+    case GL_COLOR_WRITEMASK:
+        v[0]=(current->color_write_mask & 0x00ff0000u)!=0;
+        v[1]=(current->color_write_mask & 0x0000ff00u)!=0;
+        v[2]=(current->color_write_mask & 0x000000ffu)!=0;
+        v[3]=(current->color_write_mask & 0xff000000u)!=0;
+        return 4;
+    default:
+        if (current->error==GL_NO_ERROR) current->error=GL_INVALID_ENUM;
+        return 0;
+    }
+}
+void glGetBooleanv(GLenum pname, GLboolean *data)
+{
+    GLint v[4]; int i, n=get_state(pname,v);
+    for (i=0;i<n;i++) data[i]=v[i] ? GL_TRUE : GL_FALSE;
+}
+void glGetIntegerv(GLenum pname, GLint *data)
+{
+    GLint v[4]; int i, n=get_state(pname,v);
+    for (i=0;i<n;i++) data[i]=v[i];
+}
+void glGetFloatv(GLenum pname, GLfloat *data)
+{
+    GLint v[4]; int i, n=get_state(pname,v);
+    for (i=0;i<n;i++) data[i]=(GLfloat)v[i];
+}
 GLenum glGetError(void)
 {
     GLenum e;
@@ -29,7 +120,7 @@ GLenum glGetError(void)
 }
 void glClear(GLbitfield mask)
 {
-    int i; tg_context *c; unsigned int bits;
+    int i,x,y; tg_context *c; unsigned int bits;
     if (!current) return;
     if (mask & ~(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT)) {
         if (current->error == GL_NO_ERROR) current->error=GL_INVALID_VALUE;
@@ -39,10 +130,15 @@ void glClear(GLbitfield mask)
     bits=current->color_write_mask;
     if ((mask & (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)) == (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
         && bits==0xffffffffu && current->depth_write) {
-        tg_clear(c,current->clear_argb);
-        return;
+        if (!c->clip_enabled) { tg_clear(c,current->clear_argb); return; }
+        if (c->clip_x0<=c->tile_x && c->clip_x1>=c->tile_x+TG_TILE_W) {
+            tg_clear_band(c,current->clear_argb,c->clip_y0-c->tile_y,c->clip_y1-c->tile_y);
+            return;
+        }
     }
     for (i=0;i<TG_TILE_W*TG_TILE_H;++i) {
+        x=i%TG_TILE_W+c->tile_x; y=i/TG_TILE_W+c->tile_y;
+        if (c->clip_enabled && (x<c->clip_x0 || x>=c->clip_x1 || y<c->clip_y0 || y>=c->clip_y1)) continue;
         if (mask & GL_COLOR_BUFFER_BIT)
             c->color[i]=(c->color[i]&~bits)|(current->clear_argb&bits);
         if ((mask & GL_DEPTH_BUFFER_BIT) && current->depth_write)
