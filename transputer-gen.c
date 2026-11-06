@@ -137,6 +137,15 @@ struct tp_call_words {
     int cap;
 };
 typedef void (*tp_builtin_gen_fn)(void);
+enum {
+    TP_BUILTIN_ANY,
+    TP_BUILTIN_T425,
+    TP_BUILTIN_T805,
+    TP_BUILTIN_FPU,
+    TP_BUILTIN_TVX,
+    TP_BUILTIN_T9000
+};
+
 struct tp_builtin_desc {
     int tok;
     const char *args;
@@ -144,6 +153,7 @@ struct tp_builtin_desc {
     unsigned char returns_void;
     short simple_op; /* simple void instruction */
     short vector_op; /* TVX vector instruction */
+    unsigned char cpu;
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -573,172 +583,171 @@ static void tp_builtin_return_void(void)
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
 {
     static const struct tp_builtin_desc descs[] = {
-        { TOK___out,         "eee", NULL, 1, TP_OPR_OUT },
-        { TOK___in,          "eee", NULL, 1, TP_OPR_IN },
-        { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1 },
-        { TOK___outword,     "ee",  gen_builtin_outword,     1 },
-        { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN },
-        { TOK___resetch,     "e",   gen_builtin_resetch,     0 },
-        { TOK___move,        "eee", gen_builtin_move,        1 },
-        { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT },
-        { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL },
-        { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO },
-        { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO },
-        { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0 },
-        { TOK___crcword,     "eee", gen_builtin_crcword,     0 },
-        { TOK___ldtimer,     "",    gen_builtin_ldtimer,     0 },
-        { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER },
-        { TOK___mint,        "",    gen_builtin_mint,        0 },
-        { TOK___ldpri,       "",    gen_builtin_ldpri,       0 },
-        { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP },
-        { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP },
-        { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP },
-        { TOK___stopp, "", NULL, 1, TP_OPR_STOPP },
-        { TOK___alt, "", NULL, 1, TP_OPR_ALT },
-        { TOK___altwt, "", NULL, 1, TP_OPR_ALTWT },
-        { TOK___altend, "", NULL, 1, TP_OPR_ALTEND },
-        { TOK___talt, "", NULL, 1, TP_OPR_TALT },
-        { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT },
-        { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC },
-        { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS },
-        { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT },
-        { TOK___disc,        "eee", gen_builtin_disc,        0 },
-        { TOK___diss,        "ee",  gen_builtin_diss,        0 },
-        { TOK___dist,        "eee", gen_builtin_dist,        0 },
+        { TOK___out,         "eee", NULL, 1, TP_OPR_OUT, 0, TP_BUILTIN_ANY },
+        { TOK___in,          "eee", NULL, 1, TP_OPR_IN, 0, TP_BUILTIN_ANY },
+        { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___outword,     "ee",  gen_builtin_outword,     1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN, 0, TP_BUILTIN_ANY },
+        { TOK___resetch,     "e",   gen_builtin_resetch,     0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___move,        "eee", gen_builtin_move,        1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT, 0, TP_BUILTIN_T425 },
+        { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL, 0, TP_BUILTIN_T425 },
+        { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO, 0, TP_BUILTIN_T425 },
+        { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO, 0, TP_BUILTIN_T425 },
+        { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___crcword,     "eee", gen_builtin_crcword,     0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___ldtimer,     "",    gen_builtin_ldtimer,     0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER, 0, TP_BUILTIN_ANY },
+        { TOK___mint,        "",    gen_builtin_mint,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___ldpri,       "",    gen_builtin_ldpri,       0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP, 0, TP_BUILTIN_ANY },
+        { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP, 0, TP_BUILTIN_ANY },
+        { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP, 0, TP_BUILTIN_ANY },
+        { TOK___stopp, "", NULL, 1, TP_OPR_STOPP, 0, TP_BUILTIN_ANY },
+        { TOK___alt, "", NULL, 1, TP_OPR_ALT, 0, TP_BUILTIN_ANY },
+        { TOK___altwt, "", NULL, 1, TP_OPR_ALTWT, 0, TP_BUILTIN_ANY },
+        { TOK___altend, "", NULL, 1, TP_OPR_ALTEND, 0, TP_BUILTIN_ANY },
+        { TOK___talt, "", NULL, 1, TP_OPR_TALT, 0, TP_BUILTIN_ANY },
+        { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT, 0, TP_BUILTIN_ANY },
+        { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC, 0, TP_BUILTIN_ANY },
+        { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS, 0, TP_BUILTIN_ANY },
+        { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT, 0, TP_BUILTIN_ANY },
+        { TOK___disc,        "eee", gen_builtin_disc,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___diss,        "ee",  gen_builtin_diss,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___dist,        "eee", gen_builtin_dist,        0, 0, 0, TP_BUILTIN_ANY },
         /* saveh/savel write two queue pointers; the st* forms set one. */
-        { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH },
-        { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL },
-        { TOK___sthf,        "e",   NULL, 1, TP_OPR_STHF },
-        { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB },
-        { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF },
-        { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB },
-        { TOK___gajw,        "e",   gen_builtin_gajw,        0 },
-        { TOK___wcnt,        "e",   gen_builtin_wcnt,        0 },
-        { TOK___seterr, "", NULL, 1, TP_OPR_SETERR },
-        { TOK___testerr,     "",    gen_builtin_testerr,     0 },
-        { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR },
-        { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR },
-        { TOK___testhalterr, "",    gen_builtin_testhalterr, 0 },
-        { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR },
-        { TOK___testpranal,  "",    gen_builtin_testpranal,  0 },
-        { TOK___norm,        "e",   gen_builtin_norm,        0 },
-        { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0 },
-        { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0 },
-        { TOK_builtin_popcountl, "e", gen_builtin_bitcnt,    0 },
-        { TOK___bitrevword,  "e",   gen_builtin_bitrevword,  0 },
-        { TOK___bitrevnbits, "ee",  gen_builtin_bitrevnbits, 0 },
-        { TOK___csub0,       "ee",  gen_builtin_csub0,       0 },
-        { TOK___fmul,        "ee",  gen_builtin_fmul,        0 },
-        { TOK___lddevid,     "",    gen_builtin_lddevid,     0 },
-        { TOK___fpchkerr,    "",    gen_builtin_fpchkerr,    1 },
-        { TOK___fptesterr,   "",    gen_builtin_fptesterr,   0 },
-        { TOK___fpseterr,    "",    gen_builtin_fpseterr,    1 },
-        { TOK___fpclrerr,    "",    gen_builtin_fpclrerr,    1 },
-        { TOK___fpint,       "e",   gen_builtin_fpint,       0 },
-        { TOK___fpintrp,     "e",   gen_builtin_fpintrp,     0 },
-        { TOK___fpintrm,     "e",   gen_builtin_fpintrm,     0 },
-        { TOK___fpintrz,     "e",   gen_builtin_fpintrz,     0 },
-        { TOK___fprem,       "ee",  gen_builtin_fprem,       0 },
-        /* __fpabs stays last: the TVX builtins start after it */
-        { TOK___fpsqrt,      "e",   gen_builtin_fpsqrt,      0 },
-        { TOK___fpabs,       "e",   gen_builtin_fpabs,       0 },
+        { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH, 0, TP_BUILTIN_ANY },
+        { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL, 0, TP_BUILTIN_ANY },
+        { TOK___sthf,        "e",   NULL, 1, TP_OPR_STHF, 0, TP_BUILTIN_ANY },
+        { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB, 0, TP_BUILTIN_ANY },
+        { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF, 0, TP_BUILTIN_ANY },
+        { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB, 0, TP_BUILTIN_ANY },
+        { TOK___gajw,        "e",   gen_builtin_gajw,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___wcnt,        "e",   gen_builtin_wcnt,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___seterr, "", NULL, 1, TP_OPR_SETERR, 0, TP_BUILTIN_ANY },
+        { TOK___testerr,     "",    gen_builtin_testerr,     0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___testhalterr, "",    gen_builtin_testhalterr, 0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR, 0, TP_BUILTIN_ANY },
+        { TOK___testpranal,  "",    gen_builtin_testpranal,  0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___norm,        "e",   gen_builtin_norm,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0, 0, 0, TP_BUILTIN_ANY },
+        { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK_builtin_popcountl, "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bitrevword,  "e",   gen_builtin_bitrevword,  0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___bitrevnbits, "ee",  gen_builtin_bitrevnbits, 0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___csub0,       "ee",  gen_builtin_csub0,       0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___fmul,        "ee",  gen_builtin_fmul,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___lddevid,     "",    gen_builtin_lddevid,     0, 0, 0, TP_BUILTIN_T805 },
+        { TOK___fpchkerr,    "",    gen_builtin_fpchkerr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fptesterr,   "",    gen_builtin_fptesterr,   0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpseterr,    "",    gen_builtin_fpseterr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpclrerr,    "",    gen_builtin_fpclrerr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpint,       "e",   gen_builtin_fpint,       0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrp,     "e",   gen_builtin_fpintrp,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrm,     "e",   gen_builtin_fpintrm,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrz,     "e",   gen_builtin_fpintrz,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fprem,       "ee",  gen_builtin_fprem,       0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpsqrt,      "e",   gen_builtin_fpsqrt,      0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___fpabs,       "e",   gen_builtin_fpabs,       0, 0, 0, TP_BUILTIN_ANY },
         /* TVX (MXFP4 / bfloat16) */
-        { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0 },
-        { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0 },
-        { TOK___bf16pack,    "ee",  gen_builtin_bf16pack,    0 },
-        { TOK___bf16unpkh,   "e",   gen_builtin_bf16unpkh,   0 },
-        { TOK___mxfp4tof32,  "e",   gen_builtin_mxfp4tof32,  0 },
-        { TOK___f32tomxfp4,  "e",   gen_builtin_f32tomxfp4,  0 },
-        { TOK___mxe8m0tof32, "e",   gen_builtin_mxe8m0tof32, 0 },
-        { TOK___mxe8m0of,    "e",   gen_builtin_mxe8m0of,    0 },
-        { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0 },
-        { TOK___bf16dot,     "eeee",gen_builtin_bf16dot,     0 },
-        { TOK___mxfp4gemv,   "eeee",gen_builtin_mxfp4gemv,   0 },
-        { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1 },
-        { TOK___f32tomxfp4x8,"e",   gen_builtin_f32tomxfp4x8,0 },
-        { TOK___bf16mul2,    "ee",  gen_builtin_bf16mul2,    0 },
-        { TOK___bf16add2,    "ee",  gen_builtin_bf16add2,    0 },
-        { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1 },
-        { TOK___mxfp4gemvbf, "eeee",gen_builtin_mxfp4gemvbf, 0 },
-        { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN },
-        { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN },
-        { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN },
-        { TOK___vrmsnorm,    "eee", NULL, 1, 0, TP_OPR_VRMSNORM },
-        { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN },
-        { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0 },
-        { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0 },
-        { TOK___q8dot,       "eeee",gen_builtin_q8dot,       0 },
-        { TOK___q8dotbf,     "eeee",gen_builtin_q8dotbf,     0 },
-        { TOK___iq1mdot,     "eeee",gen_builtin_iq1mdot,     0 },
-        { TOK___iq2xxsdot,   "eeee",gen_builtin_iq2xxsdot,   0 },
-        { TOK___iq3xxsdot,   "eeee",gen_builtin_iq3xxsdot,   0 },
-        { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1 },
-        { TOK___qdot,        "eeee",gen_builtin_qdot,        0 },
-        { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32 },
-        { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT },
-        { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF },
-        { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1 },
-        { TOK___ftransp,     "eee", gen_builtin_ftransp,     0 },
-        { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0 },
-        { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS },
-        { TOK___frsqrtb,     "e",   gen_builtin_frsqrtb,     0 },
-        { TOK___frecipb,     "e",   gen_builtin_frecipb,     0 },
-        { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB },
-        { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE },
-        { TOK___ftcull,      "eee", gen_builtin_ftcull,      0 },
-        { TOK___tskin,       "eee", gen_builtin_tskin,       0 },
-        { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1 },
-        { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1 },
-        { TOK___flitb,       "eee", gen_builtin_flitb,       0 },
-        { TOK___qgemm,       "eee", gen_builtin_qgemm,       0 },
-        { TOK___vblend8,     "eee", NULL, 1, 0, TP_OPR_VBLEND8 },
-        { TOK___vfill,       "eee", NULL, 1, 0, TP_OPR_VFILL },
-        { TOK___vfill2d,     "eee", NULL, 1, 0, TP_OPR_VFILL2D },
-        { TOK___csumb,       "eee", gen_builtin_csumb,       0 },
-        { TOK___vblend2d,    "eee", NULL, 1, 0, TP_OPR_VBLEND2D },
-        { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1 },
-        { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0 },
-        { TOK___vq8k,        "ee",  NULL, 1, 0, TP_OPR_VQ8K },
-        { TOK___vq80,        "ee",  NULL, 1, 0, TP_OPR_VQ80 },
-        { TOK___vcvt,        "eee", NULL, 1, 0, TP_OPR_VCVT },
-        { TOK___vxfer,       "ee",  NULL, 1, 0, TP_OPR_VXFER },
+        { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bf16pack,    "ee",  gen_builtin_bf16pack,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16unpkh,   "e",   gen_builtin_bf16unpkh,   0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4tof32,  "e",   gen_builtin_mxfp4tof32,  0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___f32tomxfp4,  "e",   gen_builtin_f32tomxfp4,  0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxe8m0tof32, "e",   gen_builtin_mxe8m0tof32, 0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxe8m0of,    "e",   gen_builtin_mxe8m0of,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16dot,     "eeee",gen_builtin_bf16dot,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4gemv,   "eeee",gen_builtin_mxfp4gemv,   0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___f32tomxfp4x8,"e",   gen_builtin_f32tomxfp4x8,0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16mul2,    "ee",  gen_builtin_bf16mul2,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16add2,    "ee",  gen_builtin_bf16add2,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4gemvbf, "eeee",gen_builtin_mxfp4gemvbf, 0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN, TP_BUILTIN_TVX },
+        { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN, TP_BUILTIN_TVX },
+        { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN, TP_BUILTIN_TVX },
+        { TOK___vrmsnorm,    "eee", NULL, 1, 0, TP_OPR_VRMSNORM, TP_BUILTIN_TVX },
+        { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN, TP_BUILTIN_TVX },
+        { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___q8dot,       "eeee",gen_builtin_q8dot,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___q8dotbf,     "eeee",gen_builtin_q8dotbf,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___iq1mdot,     "eeee",gen_builtin_iq1mdot,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___iq2xxsdot,   "eeee",gen_builtin_iq2xxsdot,   0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___iq3xxsdot,   "eeee",gen_builtin_iq3xxsdot,   0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qdot,        "eeee",gen_builtin_qdot,        0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32, TP_BUILTIN_TVX },
+        { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT, TP_BUILTIN_TVX },
+        { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF, TP_BUILTIN_TVX },
+        { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftransp,     "eee", gen_builtin_ftransp,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS, TP_BUILTIN_TVX },
+        { TOK___frsqrtb,     "e",   gen_builtin_frsqrtb,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___frecipb,     "e",   gen_builtin_frecipb,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB, TP_BUILTIN_TVX },
+        { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE, TP_BUILTIN_TVX },
+        { TOK___ftcull,      "eee", gen_builtin_ftcull,      0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___tskin,       "eee", gen_builtin_tskin,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___flitb,       "eee", gen_builtin_flitb,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qgemm,       "eee", gen_builtin_qgemm,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vblend8,     "eee", NULL, 1, 0, TP_OPR_VBLEND8, TP_BUILTIN_TVX },
+        { TOK___vfill,       "eee", NULL, 1, 0, TP_OPR_VFILL, TP_BUILTIN_TVX },
+        { TOK___vfill2d,     "eee", NULL, 1, 0, TP_OPR_VFILL2D, TP_BUILTIN_TVX },
+        { TOK___csumb,       "eee", gen_builtin_csumb,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vblend2d,    "eee", NULL, 1, 0, TP_OPR_VBLEND2D, TP_BUILTIN_TVX },
+        { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vq8k,        "ee",  NULL, 1, 0, TP_OPR_VQ8K, TP_BUILTIN_TVX },
+        { TOK___vq80,        "ee",  NULL, 1, 0, TP_OPR_VQ80, TP_BUILTIN_TVX },
+        { TOK___vcvt,        "eee", NULL, 1, 0, TP_OPR_VCVT, TP_BUILTIN_TVX },
+        { TOK___vxfer,       "ee",  NULL, 1, 0, TP_OPR_VXFER, TP_BUILTIN_TVX },
         /* T9000 configuration space and VCP */
-        { TOK___ldconf,      "e",   gen_builtin_ldconf,      0 },
-        { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF },
-        { TOK___initvlcb,      "ee",   NULL, 1, TP_OPR_INITVLCB },
-        { TOK___sethdr,        "eee",  NULL, 1, TP_OPR_SETHDR },
-        { TOK___writehdr,      "eee",  NULL, 1, TP_OPR_WRITEHDR },
-        { TOK___readhdr,       "eee",  NULL, 1, TP_OPR_READHDR },
-        { TOK___setchmode,     "ee",   NULL, 1, TP_OPR_SETCHMODE },
-        { TOK___stopch,        "e",    NULL, 1, TP_OPR_STOPCH },
-        { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0 },
-        { TOK___vin,         "eee", gen_builtin_vin,         0 },
-        { TOK___vout,          "eee",  NULL, 1, TP_OPR_VOUT },
-        { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0 },
-        { TOK___chantype,    "e",   gen_builtin_chantype,    0 },
+        { TOK___ldconf,      "e",   gen_builtin_ldconf,      0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF, 0, TP_BUILTIN_T9000 },
+        { TOK___initvlcb,      "ee",   NULL, 1, TP_OPR_INITVLCB, 0, TP_BUILTIN_T9000 },
+        { TOK___sethdr,        "eee",  NULL, 1, TP_OPR_SETHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___writehdr,      "eee",  NULL, 1, TP_OPR_WRITEHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___readhdr,       "eee",  NULL, 1, TP_OPR_READHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___setchmode,     "ee",   NULL, 1, TP_OPR_SETCHMODE, 0, TP_BUILTIN_T9000 },
+        { TOK___stopch,        "e",    NULL, 1, TP_OPR_STOPCH, 0, TP_BUILTIN_T9000 },
+        { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___vin,         "eee", gen_builtin_vin,         0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___vout,          "eee",  NULL, 1, TP_OPR_VOUT, 0, TP_BUILTIN_T9000 },
+        { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___chantype,    "e",   gen_builtin_chantype,    0, 0, 0, TP_BUILTIN_T9000 },
         /* T9000 semaphores and resource channels */
-        { TOK___semwait,       "e",    NULL, 1, TP_OPR_WAIT },
-        { TOK___semsignal,     "e",    NULL, 1, TP_OPR_SIGNAL },
-        { TOK___mkrc,          "eee",  NULL, 1, TP_OPR_MKRC },
-        { TOK___unmkrc,        "e",    NULL, 1, TP_OPR_UNMKRC },
-        { TOK___grant,         "ee",   NULL, 1, TP_OPR_GRANT },
-        { TOK___enbg,          "ee",   NULL, 1, TP_OPR_ENBG },
-        { TOK___disg,        "eee", gen_builtin_disg,        0 },
-        { TOK___irdsq,         "eee",  NULL, 1, TP_OPR_IRDSQ },
-        { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0 },
-        { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0 },
-        { TOK___stresptr,      "ee",   NULL, 1, TP_OPR_STRESPTR },
+        { TOK___semwait,       "e",    NULL, 1, TP_OPR_WAIT, 0, TP_BUILTIN_T9000 },
+        { TOK___semsignal,     "e",    NULL, 1, TP_OPR_SIGNAL, 0, TP_BUILTIN_T9000 },
+        { TOK___mkrc,          "eee",  NULL, 1, TP_OPR_MKRC, 0, TP_BUILTIN_T9000 },
+        { TOK___unmkrc,        "e",    NULL, 1, TP_OPR_UNMKRC, 0, TP_BUILTIN_T9000 },
+        { TOK___grant,         "ee",   NULL, 1, TP_OPR_GRANT, 0, TP_BUILTIN_T9000 },
+        { TOK___enbg,          "ee",   NULL, 1, TP_OPR_ENBG, 0, TP_BUILTIN_T9000 },
+        { TOK___disg,        "eee", gen_builtin_disg,        0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___irdsq,         "eee",  NULL, 1, TP_OPR_IRDSQ, 0, TP_BUILTIN_T9000 },
+        { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___stresptr,      "ee",   NULL, 1, TP_OPR_STRESPTR, 0, TP_BUILTIN_T9000 },
         /* T9 FPU Temps T0-T7 */
-        { TOK___tld,         "e",   gen_builtin_tld,         0 },
-        { TOK___tst,         "ee",  gen_builtin_tst,         1 },
-        { TOK___tclr,        "e",   gen_builtin_tclr,        1 },
-        { TOK___f2ldm,       "ee",  gen_builtin_f2ldm,       1 },
-        { TOK___f4ldm,       "ee",  gen_builtin_f4ldm,       1 },
-        { TOK___f2ldma,      "ee",  gen_builtin_f2ldma,      1 },
-        { TOK___f2stm,       "ee",  gen_builtin_f2stm,       1 },
-        { TOK___fmvmul4,     "ee",  gen_builtin_fmvmul4,     0 },
-        { TOK___fmvmul4st,   "eee", gen_builtin_fmvmul4st,   1 },
-        { TOK___fpoly3,      "ee",  gen_builtin_fpoly3,      0 },
+        { TOK___tld,         "e",   gen_builtin_tld,         0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___tst,         "ee",  gen_builtin_tst,         1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___tclr,        "e",   gen_builtin_tclr,        1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2ldm,       "ee",  gen_builtin_f2ldm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f4ldm,       "ee",  gen_builtin_f4ldm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2ldma,      "ee",  gen_builtin_f2ldma,      1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2stm,       "ee",  gen_builtin_f2stm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fmvmul4,     "ee",  gen_builtin_fmvmul4,     0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fmvmul4st,   "eee", gen_builtin_fmvmul4st,   1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fpoly3,      "ee",  gen_builtin_fpoly3,      0, 0, 0, TP_BUILTIN_T9000 },
         { 0,                 NULL,  NULL,                    0 }
     };
     const struct tp_builtin_desc *desc;
@@ -978,39 +987,26 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
     desc = tp_find_builtin_desc(tok);
     if (!desc)
         return 0;
-    /* The table lists the T4xx/T8xx builtins up to __fpabs, then the TVX
-     * ones (__bf16tof32 .. __vxfer), then the T9000's VCP and the T9 core's
-     * T&L temps.  TVX takes -mt9000tvx, bar the 16-bit float conversions,
-     * which every other target does in software (their gen functions), and
-     * the builtins software TVX covers, which become calls; the rest takes
-     * a T9000. */
-    if (desc > tp_find_builtin_desc(TOK___fpabs)) {
-        if (desc <= tp_find_builtin_desc(TOK___vxfer)) {
-            if (!tp_tvx() && tok != TOK___bf16tof32 && tok != TOK___f32tobf16
-                && tok != TOK___f16tof32 && tok != TOK___f32tof16) {
-                const struct tp_soft_tvx_desc *soft = tp_find_soft_tvx(tok);
-                if (!soft)
-                    tcc_error("%s is a TVX instruction with no software "
-                              "version, not available without -mt9000tvx",
-                              get_tok_str(tok, NULL));
-                parse_builtin_params(0, desc->args);
-                save_reg(REG_IRET);
-                tp_soft_tvx_call(soft);
-                return 1;
-            }
-        } else if (!tcc_state->tp_t9000) {
-            tcc_error("%s is a T9000 instruction, not available with -m%s",
-                      get_tok_str(tok, NULL), tp_target_name(tcc_state));
-        }
+    /* FPU-only generators diagnose after parsing their operands. */
+    if (desc->cpu == TP_BUILTIN_TVX && !tp_tvx()) {
+        const struct tp_soft_tvx_desc *soft = tp_find_soft_tvx(tok);
+        if (!soft)
+            tcc_error("%s is a TVX instruction with no software "
+                      "version, not available without -mt9000tvx",
+                      get_tok_str(tok, NULL));
+        parse_builtin_params(0, desc->args);
+        save_reg(REG_IRET);
+        tp_soft_tvx_call(soft);
+        return 1;
     }
-    if (tp_t414() && (tok == TOK___move2dinit || tok == TOK___move2dall ||
-                      tok == TOK___move2dnonzero || tok == TOK___move2dzero ||
-                      tok == TOK___crcbyte ||
-                      tok == TOK___crcword || tok == TOK___bitrevword ||
-                      tok == TOK___bitrevnbits || tok == TOK___lddevid))
+    if (desc->cpu == TP_BUILTIN_T9000 && !tcc_state->tp_t9000)
+        tcc_error("%s is a T9000 instruction, not available with -m%s",
+                  get_tok_str(tok, NULL), tp_target_name(tcc_state));
+    if ((desc->cpu == TP_BUILTIN_T425 || desc->cpu == TP_BUILTIN_T805) &&
+        tp_t414())
         tcc_error("%s is a T425 instruction, not available with -mt414",
                   get_tok_str(tok, NULL));
-    if (tcc_state->tp_t800 && tok == TOK___lddevid)
+    if (desc->cpu == TP_BUILTIN_T805 && tcc_state->tp_t800)
         tcc_error("%s is a T805 instruction, not available with -mt800",
                   get_tok_str(tok, NULL));
 
