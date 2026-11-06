@@ -171,6 +171,8 @@ def main():
         buckets[min(15,int(light*15))].extend(tri)
     out=["/* Generated locally from the cloned dEngine MD5 assets. */",
          f"#define HK_VERTEX_COUNT {len(points)}", f"#define HK_INDEX_COUNT {len(triangles)*3}",
+         f"#define HK_CENTER_X ({center[0]:.9f}f)", f"#define HK_CENTER_Y ({center[1]:.9f}f)",
+         f"#define HK_CENTER_Z ({center[2]:.9f}f)", f"#define HK_WORLD_SCALE ({1.7/extent:.12f}f)",
          "static const short hk_vertices[HK_VERTEX_COUNT][3]={"]
     out += ["{%d,%d,%d}," % tuple(round(x*32767) for x in p) for p in points]
     out += ["};", "static const short hk_normals[HK_VERTEX_COUNT][3]={"]
