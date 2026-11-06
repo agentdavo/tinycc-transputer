@@ -61,6 +61,25 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
     int i;
     result.p.hi = 0; result.p.lo = 0;
     remainder.p.hi = 0; remainder.p.lo = 0;
+    if (divisor.p.hi == 0 && dividend.p.hi == 0) {
+        result.p.lo = dividend.p.lo / divisor.p.lo;
+        remainder.p.lo = dividend.p.lo % divisor.p.lo;
+        if (rem_out) *rem_out = remainder;
+        return result;
+    }
+    if (divisor.p.hi == 0 && divisor.p.lo <= 0xffffu) {
+        u32 part;
+        result.p.hi = dividend.p.hi / divisor.p.lo;
+        remainder.p.lo = dividend.p.hi % divisor.p.lo;
+        part = (remainder.p.lo << 16) | (dividend.p.lo >> 16);
+        result.p.lo = (part / divisor.p.lo) << 16;
+        remainder.p.lo = part % divisor.p.lo;
+        part = (remainder.p.lo << 16) | (dividend.p.lo & 0xffffu);
+        result.p.lo |= part / divisor.p.lo;
+        remainder.p.lo = part % divisor.p.lo;
+        if (rem_out) *rem_out = remainder;
+        return result;
+    }
     for (i = 63; i >= 0; i--) {
         remainder = u64_shl1(remainder);
         if (i >= 32)
