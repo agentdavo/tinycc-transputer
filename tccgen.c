@@ -6540,6 +6540,13 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
 {
     int func_type;
     CType type;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* Structure arguments remain lvalues until the backend copies them.
+       Preserve source volatility across the assignment cast until that read. */
+    int tp_struct_volatile = (vtop->r & VT_LVAL) &&
+        (vtop->type.t & VT_BTYPE) == VT_STRUCT &&
+        (vtop->type.t & VT_VOLATILE);
+#endif
 
     func_type = func->f.func_type;
     if (func_type == FUNC_OLD ||
@@ -6580,6 +6587,9 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
         gen_assign_cast(&type);
     }
 #ifdef TCC_TARGET_TRANSPUTER
+    if (tp_struct_volatile && (vtop->r & VT_LVAL) &&
+        (vtop->type.t & VT_BTYPE) == VT_STRUCT)
+        vtop->type.t |= VT_VOLATILE;
     if (!(vtop->r & VT_LVAL) &&
         ((vtop->type.t & VT_BTYPE) == VT_LLONG ||
          (vtop->type.t & VT_BTYPE) == VT_DOUBLE ||

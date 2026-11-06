@@ -9433,6 +9433,21 @@ static void tp_call_words_reserve(struct tp_call_words *cw, int extra_words)
     cw->cap = new_cap;
 }
 
+/* A volatile member of an aggregate is an observable source access too. */
+static int tp_call_type_volatile(CType *type)
+{
+    Sym *field;
+    if (type->t & (VT_VOLATILE | VT_VLA))
+        return 1;
+    if (type->t & VT_ARRAY)
+        return tp_call_type_volatile(pointed_type(type));
+    if ((type->t & VT_BTYPE) == VT_STRUCT)
+        for (field = type->ref->next; field; field = field->next)
+            if (tp_call_type_volatile(&field->type))
+                return 1;
+    return 0;
+}
+
 static void tp_expand_struct_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug)
 {
     int align, size, words, w;
@@ -9458,42 +9473,53 @@ static void tp_expand_struct_call_words(struct tp_call_words *cw, SValue *arg, i
     }
 
     if (arg->r & VT_LVAL) {
-        int spill_base = loc - size;
+        /* Reserve complete ABI words, including the padded final word.
+         * Rounding only (loc - size) can leave its final word overlapping
+         * a narrow local when loc is not word-aligned. */
+        int spill_base = loc - words * 4;
         SValue src_addr = *arg;
+        SValue dst_addr;
 
         spill_base &= ~3;
         loc = spill_base;
         src_addr.r &= ~VT_LVAL;
 
-        for (w = 0; w < words; w++) {
-            int spill_off = spill_base + (w * 4);
-            int copy_size = size - (w * 4);
-            SValue dst_addr;
-
-            if (copy_size > 4)
-                copy_size = 4;
-            if (copy_size < 0)
-                copy_size = 0;
-
-            Tp_LDC(0);
-            emit_local_op(TP_OP_STL, spill_off);
-            abcreg_stack_depth = 0;
-
-            if (copy_size > 0) {
-                dst_addr.type = int_type;
-                dst_addr.r = VT_LOCAL;
-                dst_addr.c.i = spill_off;
-                dst_addr.sym = NULL;
-
+        dst_addr.type = int_type;
+        dst_addr.r = VT_LOCAL;
+        dst_addr.sym = NULL;
+        if (tp_call_type_volatile(&arg->type)) {
+            /* Preserve the original per-word source accesses for volatile
+             * objects, including aggregates with volatile subobjects. */
+            for (w = 0; w < words; w++) {
+                int off = w * 4;
+                int n = size - off < 4 ? size - off : 4;
+                Tp_LDC(0);
+                emit_local_op(TP_OP_STL, spill_base + off);
+                abcreg_stack_depth = 0;
+                dst_addr.c.i = spill_base + off;
                 tp_push_sv(&src_addr);
-                if (w)
-                    Tp_ADC(w * 4);
+                if (off)
+                    Tp_ADC(off);
                 tp_push_sv(&dst_addr);
-                Tp_LDC(copy_size);
+                Tp_LDC(n);
                 Tp_OPR(TP_OPR_MOVE);
                 abcreg_pop(3);
                 abcreg_stack_depth = 0;
             }
+        } else {
+            /* Only the last partial ABI word needs zero padding. */
+            if (size & 3) {
+                Tp_LDC(0);
+                emit_local_op(TP_OP_STL, spill_base + (words - 1) * 4);
+                abcreg_stack_depth = 0;
+            }
+            dst_addr.c.i = spill_base;
+            tp_push_sv(&src_addr);
+            tp_push_sv(&dst_addr);
+            Tp_LDC(size);
+            Tp_OPR(TP_OPR_MOVE);
+            abcreg_pop(3);
+            abcreg_stack_depth = 0;
         }
     } else {
         /* Keep current fallback semantics for struct rvalues during refactor. */
@@ -9504,7 +9530,7 @@ static void tp_expand_struct_call_words(struct tp_call_words *cw, SValue *arg, i
         tp_call_words_reserve(cw, 1);
         cw->words[cw->count] = *arg;
         cw->words[cw->count].type.t =
-            (cw->words[cw->count].type.t & ~(VT_BTYPE | VT_UNSIGNED)) | VT_INT;
+            (cw->words[cw->count].type.t & ~(VT_BTYPE | VT_UNSIGNED | VT_VOLATILE)) | VT_INT;
 
         if (cw->words[cw->count].r & VT_LVAL) {
             cw->words[cw->count].r = VT_LOCAL | VT_LVAL;
