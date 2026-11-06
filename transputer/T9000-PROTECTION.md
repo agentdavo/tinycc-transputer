@@ -15,11 +15,13 @@ results, not completion of a secure userspace boundary. The saved
 it is not a fresh acceptance run for the current source.
 
 The [6 November Linux isolation review](LINUX-PROTECTION-REVIEW-2026-11-06.md)
-reproduced a trap-first PID 1 panic after nested spawn reused the parent's
-PDS/RODS buffers for a child. Its C-call control reached `DESKTOP_LOOP`.
-Preserving the parent continuation is the first acceptance gate for changing
-the syscall default. The review also identifies the direct-gate mmap helper,
-shared syscall transport, timeslice handling and permission-checking gaps.
+records the original trap-first PID 1 panic. Nested Linux commit `cbf812242ba1`
+repairs parent continuation preservation across nested spawn, including maps
+and workspace state. Linux `bc2969c2ea63` and root stub `a747d3b2` replace the
+shared syscall transport with caller-owned frames and register results,
+including the packed mmap helper. The owner reports nested trap-path boots
+reaching `DESKTOP_LOOP` and mixed-version compatibility checks. These repairs
+do not complete isolation, FP/block-move state preservation or trap policy.
 
 ## Model (not a classic page MMU)
 
@@ -30,8 +32,17 @@ shared syscall transport, timeslice handling and permission-checking gaps.
 | **G in port boot comments** | Global-error/null-THDS starting state; ISM §10.1.3 specifies a processor halt on a null trap, not an independently scheduled recovery process |
 | **goprot** | Privileged: A=PDS, B=RODS → enter P (OReg **−6**, bytes `60 FA`) |
 | **syscall** | Trap to supervisor (OReg **−8**, bytes `60 F8`) |
-| **4 regions** | LA bits 31:30 select region; size 2^n (n≥8); phys relocate |
+| **4 regions** | LA bits 31:30 select region; size 2^n (8≤n≤30); aligned physical relocation; translated regions must not overlap |
 | **PMI** | Physical bank map (`T4_PMI=1`) |
+
+HRM §5 requires checking all P-process reads, writes and instruction fetches,
+including region write/execute permissions and device-only restrictions.
+ISM §9.2 calls the instructions forbidden in P-mode **privileged**; the
+permitted subset is unprivileged. A trap returns to the supervisor after
+`goprot`; software determines the recovery policy.
+
+The local OCR renders the null descriptor as `#8000000`; code uses
+`0x80000000`. Verify the printed facsimile before changing the literal.
 
 ---
 
@@ -48,8 +59,8 @@ shared syscall transport, timeslice handling and permission-checking gaps.
 | **6 Soft enforce** | **Done** | Per-task `thread.soft_mm`; quarter-identity maps; cmdline `t9k_enforce`; boot selftest |
 | **7 Hard P-process** | **Done** | `t9k_enter_userspace` → `goprot`; trap loop; SPAWN_EXIT leave_p; goprot re-enter leave |
 | **8 Process-local maps / compatibility bridge** | Implemented; isolation incomplete | Per-task soft maps, NULL rejection, PMI default ON, trap arguments and soft-mm teardown. C-call compatibility still permits broad kernel/device access under P. |
-| **9 Split RX/RW bFLT** | Partial: Q3 stack mirror implemented | `flat_q3.c` publishes WPtr→Q3 via **full Q2 mirror** (`LA = phys + 0x40000000`, RODS 1 GiB). Historical hard-P + Q3 boots reached `DESKTOP_READY`. This mirror does not isolate a task's data or enforce a complete RX/RW image split. Sub-window mapping and T4 `leave_p` compatibility remain constraints. |
-| **10 Concurrent P** | Partial: map rebind implemented | Per-task soft RX/private spans and RODS rebind exist. `soft_pds_buf` / `soft_rods_buf` and the syscall staging/return bridge remain shared; concurrent/nested sessions need review. PMI text-write and foreign-private checks are opt-in, and shared exceptions remain broad. Trap-first syscall code is opt-in. |
+| **9 Split RX/RW bFLT** | Compatibility only; physical alias violates HRM §5.2.2 | `flat_q3.c` publishes WPtr→Q3 via **full Q2 mirror** (`LA = phys + 0x40000000`, RODS 1 GiB). With the simultaneous Q2 identity descriptor, two logical regions map the same physical GiB: behavior is architecturally undefined. Historical T4 desktop boots do not establish T9000 conformance. Disjoint code/data/workspace mappings remain required. |
+| **10 Concurrent P** | Partial: per-context continuation repair and frame ABI implemented | Per-task PDS/RODS and nested-spawn context save/restore replace shared continuation buffers. Syscall arguments are caller-owned and results return in A. Concurrent state, FP/block-move preservation and strict isolation still need review. PMI text-write and foreign-private checks remain opt-in. Trap-first syscall code remains opt-in. |
 | **11 Data quarter / trap default** | Partial | Soft RX via `end_code`; stack Q3 mirror. Full data-LA rewrite + trap-only default still experimental. |
 
 ---
@@ -107,19 +118,22 @@ and the kernel soft-map selftest cover different paths.
 | `t9k_run_user_until_exit(...)` | Loop: goprot → on syscall trap dispatch `__transputer_syscall` → restart |
 | `t9k_asm_goprot` / `t9k_asm_syscall` | `t9000_goprot.S` raw encodings (`60 FA` / `60 F8`) |
 
-**Current syscall compatibility bridge (P-process trap):**
+**Current version-1 syscall ABI (P-process trap):**
 
-The opt-in stub writes seven words (number and six arguments) through the
-kernel-published pointer at `0x8000006C`, executes `syscall`, and reads its
-result at `0x80000068`. The supervisor dispatches the shared staging array
-first. This is a bring-up bridge, not a task-private trap ABI.
+The opt-in stub checks the capability tag `0x54504601` at `0x8000006C`.
+It passes the syscall number in A and a pointer to six aligned caller-owned
+words in B, then executes `syscall`. The supervisor validates the complete
+private mapped argument range and copies all six words before dispatch.
+It writes the signed result into saved A; the assembly leaf returns it
+directly after resumption. Packed mmap uses this transport too. The former
+seven-word kernel-BSS staging pointer and global result slot are retired.
 
 | PDS field | Content |
 |-----------|---------|
-| `ps.sAreg` | Number fallback when staged number is invalid; supervisor also writes the result here |
-| `ps.sBreg` / `ps.sCreg` | Argument 1 / 2 in the register fallback |
-| user workspace | Number and six-argument fallback only when the register number is also invalid; SPLIT addresses are translated |
-| `0x80000068` | Result read by the current opt-in userspace stub |
+| `ps.sAreg` | Syscall number on entry; signed result on resume |
+| `ps.sBreg` | Pointer to six aligned caller-owned argument words |
+| caller frame | Six arguments copied before dispatch, after complete-range validation |
+| `0x8000006C` | ABI capability tag, not an argument pointer |
 
 **Trap resume (supervisor side).** T4 reports a P-trap two ways, so both
 kernel builds work on it:
@@ -139,11 +153,12 @@ Before T4 loaded A/B, a SPINE-configured kernel booted on T4 with
 **Userspace dual path** (`tests/syscall_stub.c`):
 
 - Default (`TP_USE_T9K_SYSCALL=0`): C-call gate, including hard-P boots.
-- Opt-in (`TP_USE_T9K_SYSCALL=1`): when the published hard-P flag is set,
-  stage arguments and execute `60 F8`; return the trap result without also
-  calling the gate. When the flag is clear, retain the C-call path.
-- If the opt-in trap path has no staging pointer, it returns `-ENOSYS`;
-  it does not retry through the gate.
+- Opt-in (`TP_USE_T9K_SYSCALL=1`): when the version-1 capability tag matches,
+  pass the caller frame and execute `60 F8`; return the result in A.
+  Without that tag, retain the C-call path.
+- The legacy flag at `0x80000064` is forced to zero so older clients fall back
+  to the gate instead of using the retired shared-buffer ABI. New clients on
+  older kernels likewise use the gate when the version-1 tag is absent.
 
 **uaccess:** `access_ok` consults soft-mm when `T9K_SOFT_FL_ACTIVE`.
 
@@ -159,11 +174,11 @@ Before T4 loaded A/B, a SPINE-configured kernel booted on T4 with
 | `T4_PMI=1` (default) | Emulator PMI bank checks; not complete task isolation |
 | `T4_PMI_TEXT_ROM` / `T4_PMI_PRIV` | Opt-in text-write / foreign-private checks in T4; currently enabled by variable presence, even with value `0`. Leave unset to disable. Shared exceptions still apply. |
 | `TP_USE_T9K_SYSCALL=0` (source default) | Userspace C-call gate |
-| `TP_USE_T9K_SYSCALL=1` (compile override) | Opt-in trap path when the published hard-P flag is set; rebuild each application using the stub |
+| `TP_USE_T9K_SYSCALL=1` (compile override) | Opt-in trap path when the version-1 capability tag matches; rebuild each application using the stub |
 | Fixed `0x80000060` | Gate pointer |
-| Fixed `0x80000064` | hard_p flag (1 if `t9k_hard_p`) |
-| Fixed `0x80000068` | Trap syscall return value |
-| Fixed `0x8000006C` | Pointer to 7×u32 arg staging (kernel BSS) |
+| Fixed `0x80000064` | Legacy trap flag, forced to zero for old-client compatibility |
+| Fixed `0x80000068` | Retired global result slot; unused by version 1 |
+| Fixed `0x8000006C` | `TP_TRAP_ABI_V1` (`0x54504601`) when hard-P is enabled; zero otherwise |
 | Kernel cmdline `t9k_enforce` | Soft-mm `ACTIVE` on every exec (access_ok enforced) |
 | Kernel cmdline `t9k_hard_p` | Enter user via **goprot** (implies enforce) |
 | Compile `T9K_SOFT_ENFORCE_DEFAULT=1` | Enables enforcement without cmdline; source fallback is `0` |
@@ -193,19 +208,24 @@ Before T4 loaded A/B, a SPINE-configured kernel booted on T4 with
 The Linux session owns the detailed source review and rollout order. These are
 required review/test areas, not claims that every case currently fails:
 
-1. Define a task-private syscall ABI for the number, all six arguments and the
-   result. Remove dependence on user-writable kernel BSS/global return slots.
-   Check negative errno, 64-bit argument packing and return-register clobbers.
-2. Verify PDS/RODS, integer/FPU and block-move state across concurrent tasks,
-   nested spawn/exec and supervisor re-entry; review shared staging buffers.
+1. Extend acceptance of the implemented caller-frame ABI: negative errno,
+   64-bit argument packing, return-register clobbers, misaligned/wrapping/bad
+   pointers, complete-range checks and old/new kernel-client combinations.
+2. Verify per-context PDS/RODS and integer state across concurrent tasks,
+   nested spawn/exec and supervisor re-entry. Hardware P-state saving does not
+   preserve FP registers; supervisor FP and block-move save/restore is required
+   where those resources can be clobbered (ISM ch.13).
 3. Handle timeslice, signals/restarts, exit and access/privilege faults with
    explicit policy. The current loop dispatches syscall traps, returns other
    causes, and the entry wrapper calls `do_exit`; it is not a complete scheduler
    or Linux signal/restart implementation for protected userspace.
-4. Deny direct access to kernel/other-task memory and unauthorized MMIO while
+4. Replace the overlapping Q2/Q3 descriptors with physically disjoint mappings
+   (HRM §5.2.2; ISM §9.4). Deny kernel/other-task memory and unauthorized MMIO while
    preserving permitted shared surfaces. Exercise ordinary loads/stores,
    fetch/execute, uaccess read/write checks, and MOVE/DEVMOVE/MOVE2D boundaries.
    Soft uaccess validation alone does not constrain arbitrary P-mode accesses.
+   Exercise restartable CALL/AJW/GAJW workspace growth separately from ordinary
+   illegal accesses, which are not normally restartable (HRM §5.1).
 5. Keep ISM trap reason/error and saved control-word semantics correct on
    SPINE. Identify and remove reliance on T4 cause slots, leave-P/RODS MMIO
    backdoors or permissive privileged-instruction behavior for a hardware path.
@@ -254,9 +274,9 @@ reason/error return and must preserve the saved P control word.
 
 **Verified:** HARD P + Q3 WPtr (full Q2 mirror) + `DESKTOP_READY` (e.g. `/tmp/lp-boot51.uart`). Phase 10 soft RX/private + RODS rebind on switch.
 
-**Trap syscall args:** The shared seven-word array is tried first; the register
-and workspace paths are fallbacks as described above. C-call remains the source
-default for applications using `tests/syscall_stub.c`.
+**Trap syscall args:** Version 1 uses A for the number/result and B for the
+six-word caller frame. C-call remains the source default for applications using
+`tests/syscall_stub.c`.
 
 ### Phase 10 concurrent model
 

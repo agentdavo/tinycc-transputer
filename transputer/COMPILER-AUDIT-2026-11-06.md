@@ -77,11 +77,35 @@ correctness fix rather than a measured performance improvement.
 [preconditions/invocation](../logs/compiler-audit-2026-11-06/middle-copyprop-probe.txt) ·
 [exact output](../logs/compiler-audit-2026-11-06/middle-copyprop-probe-output.txt).
 
+### 3. Fuzz seed 329: scalar64 argument spill alignment — fixed
+
+The whole-struct experiment exposed a pre-existing failure even when the
+reduced caller made no aggregate calls. The lead and two read-only reviewers
+traced it to `tp_expand_scalar_call_words`: reserving eight bytes from a
+non-word-aligned `loc` caused word-addressed stores to round down, then
+byte-accurate temporary reloads to read two bytes into the stored halves.
+The 64-bit shift count was correct; its operand was already corrupted before
+`__ashrdi3`. Unrelated function layout changed the wrong result.
+
+**`fc344c0b`** aligns the reservation before deriving either half's address.
+Original fuzz seeds 329 and 367, both failing before, now agree with host
+UBSan/O2 oracles. The reduced source regression passes six targets at link
+pads 0, 1027 and 4096; three full C suites pass 244 tests each. A separate
+reviewer rebuilt exact revision `fc344c0b` and confirmed the original seed
+against its preserved oracle on strict T414/T425, T800 and T9000. The
+verification hashes and results are committed in `05b0cc9f`.
+See [c-testsuite regression](c-testsuite/tests/single-exec/09118.c) and
+[scalar argument tests](tests/test_scalar_arg_alignment.c).
+
+The aggregate-copy optimization remains separate and must repeat its fuzz and
+Doom/CoreMark/raytracer checks on this repaired baseline before landing.
+
 ## Next performance experiments
 
-None of the savings below is a measured workload improvement yet. Measure
-instruction/encoding changes first, then fixed-work guest cycles, hashes/CRCs
-and frame cost against a matching baseline.
+The table records the original audit candidates; subsequent outcomes are
+listed below and in the [coordination record](COMPILER-COORDINATION.md).
+Measure instruction/encoding changes first, then fixed-work guest cycles,
+hashes/CRCs and frame cost against a matching baseline.
 
 | Priority | Candidate and snapshot anchors | Intended benefit | Required limits and checks |
 | --- | --- | --- | --- |
@@ -103,6 +127,31 @@ passed. The rejected trial is recorded in `a361932b` and
 [its report](tests/bench/coremark-cast-trial-2026-11-06.md).
 Backend shift staging is distinct from the already-landed runtime helper
 improvement `8e88385c`.
+
+Subsequent check-in outcomes:
+
+* Direct int-to-FPU storage conversion is integrated as `16e7e460`, with
+  six-target probes and a matched Doom/CoreMark/raytracer comparison. Doom and
+  CoreMark were unchanged; the reference-equal raytracer saved 781,344 modeled
+  T800 cycles (about 0.021%). See the
+  [full report](tests/bench/itof-direct-2026-11-06.md).
+* The backend shift-staging trial also produced no application-level gain on
+  the three requested workloads and remains unmerged. `24e467f2` retains its
+  boundary regression and review evidence.
+* Whole-struct MOVE exposed the scalar64 temporary-alignment defect described
+  above. Its repair `fc344c0b` is separate from the aggregate optimization;
+  passing workload images alone did not clear that correctness gate.
+* Symbol-address emission is consolidated in `3628b7e0`; shared instruction
+  effects have a separate design in `51c35b4c`; four-argument TVX accumulator
+  staging is consolidated in `265309e9`; word-result builtin dispatch is
+  table-driven in `3783a69a`. These are equivalence/maintenance
+  results, not new guest-performance claims.
+* The dead pool-initializer trial is rejected in `c6de60f9`: the production
+  scheduler already removes those initializations, leaving all three workload
+  ELFs identical. Surviving-reference and admission profitability remain open.
+* The rebased whole-struct trial matches workload outputs and repaired seeds,
+  but argument casting loses source volatility before backend lowering.
+  Integration remains gated on preserving volatile aggregate/member behavior.
 
 ## Common code worth consolidating
 
