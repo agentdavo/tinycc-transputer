@@ -1708,19 +1708,17 @@ static void resolve_inline_sections(TCCState *s)
 {
     InlineSectionNode *nodes;
     int *by_token;
+    unsigned char *scanned;
     int changed, i, j;
 
     nodes = tcc_mallocz(s->nb_inline_fns * sizeof *nodes);
     by_token = tcc_mallocz(tok_ident * sizeof *by_token);
+    scanned = tcc_mallocz(s->nb_inline_fns);
     for (i = 0; i < s->nb_inline_fns; ++i) {
         InlineFunc *fn = s->inline_fns[i];
         if (fn->sym && fn->sym->v >= TOK_IDENT && fn->sym->v < tok_ident)
             by_token[fn->sym->v] = i + 1;
     }
-    for (i = 0; i < s->nb_inline_fns; ++i)
-        scan_inline_section_edges(s, nodes, by_token, i);
-    tcc_free(by_token);
-
     for (i = 0; i < s->nb_inline_fns; ++i) {
         InlineFunc *fn = s->inline_fns[i];
         Sym *sym = fn->sym;
@@ -1746,6 +1744,10 @@ static void resolve_inline_sections(TCCState *s)
 
             if (!caller->reachable || !caller->placement)
                 continue;
+            if (!scanned[i]) {
+                scan_inline_section_edges(s, nodes, by_token, i);
+                scanned[i] = 1;
+            }
             for (j = 0; j < caller->nb_edges; ++j) {
                 InlineSectionEdge *edge = &caller->edges[j];
                 InlineSectionNode *callee = &nodes[edge->callee];
@@ -1775,6 +1777,8 @@ static void resolve_inline_sections(TCCState *s)
             }
         }
     } while (changed);
+    tcc_free(scanned);
+    tcc_free(by_token);
 
     for (i = 0; i < s->nb_inline_fns; ++i) {
         InlineFunc *fn = s->inline_fns[i];
@@ -2476,7 +2480,10 @@ ST_FUNC int gv(int rc)
         }
         r = gv(rc);
     } else {
-        if (is_float(vtop->type.t) && 
+        if (is_float(vtop->type.t) &&
+#ifdef TCC_TARGET_TRANSPUTER
+            (vtop->type.t & VT_BTYPE) != VT_FLOAT &&
+#endif
             (vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
             /* CPUs usually cannot use float constants, so we store them
                generically in data segment */

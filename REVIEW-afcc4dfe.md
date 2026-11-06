@@ -52,7 +52,8 @@ numbers and line numbers in the original review refer to the older source.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of
-  duplicate local names. The per-call scan of the inline-function list remains.
+  duplicate local names. Inline-section placement now scans deferred bodies
+  only when reachable. The per-call scan of the inline-function list remains.
 
 Verification covered focused compiler, linker and UART regressions. The
 kernel boot, full test corpus, physical hardware, and the historical size
