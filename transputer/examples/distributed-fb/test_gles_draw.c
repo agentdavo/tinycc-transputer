@@ -71,6 +71,17 @@ static int run(void)
     if(glGetError()!=GL_INVALID_ENUM) return 8;
     glDrawElements(GL_TRIANGLES,7,GL_UNSIGNED_SHORT,0);
     if(glGetError()!=GL_INVALID_OPERATION) return 9;
+    /* Persistent caching must be invalidated when captured vertex data changes. */
+    ds.persistent_cache=GL_TRUE;
+    tgGlesInvalidateVertexCache(&ds); calls=0;
+    glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_SHORT,0);
+    if(glGetError()!=GL_NO_ERROR || calls!=4) return 10;
+    calls=0; glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_SHORT,0);
+    if(glGetError()!=GL_NO_ERROR || calls!=0) return 11;
+    glBindBuffer(GL_ARRAY_BUFFER,names[0]);
+    glBufferSubData(GL_ARRAY_BUFFER,0,sizeof(vertices[0].xyz),vertices[0].xyz);
+    calls=0; glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_SHORT,0);
+    if(glGetError()!=GL_NO_ERROR || calls!=4) return 12;
     glDeleteBuffers(2,names);
     tgGlesMakeCurrent(0);
     return 0;

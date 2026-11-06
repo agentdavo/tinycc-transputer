@@ -255,13 +255,15 @@ void glUseProgram(GLuint id)
     if(!s) return;
     if(!c->draw) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     if(!id) {
-        old=s->current_program; s->current_program=0; c->draw->vertex=0;
+        old=s->current_program; s->current_program=0; c->draw->vertex=0; c->draw->persistent_cache=0;
+        tgGlesInvalidateVertexCache(c->draw);
         if(old && s->programs[old-1].deleted) release_program(s,old);
         return;
     }
     p=program(s,id); if(!p) return;
     if(!p->linked) { tgGlesSetError(GL_INVALID_OPERATION); return; }
-    old=s->current_program; s->current_program=id; c->draw->vertex=program_vertex; c->draw->vertex_user=p; c->target->texture=p->texture;
+    old=s->current_program; s->current_program=id; c->draw->vertex=program_vertex; c->draw->vertex_user=p; c->draw->persistent_cache=1; c->target->texture=p->texture;
+    tgGlesInvalidateVertexCache(c->draw);
     if(old && old!=id && s->programs[old-1].deleted) release_program(s,old);
 }
 GLint glGetAttribLocation(GLuint id, const GLchar *name)
@@ -287,6 +289,7 @@ void glUniformMatrix4fv(GLint loc, GLsizei count, GLboolean transpose, const GLf
     if(loc==-1 || !count) return;
     if(loc!=0 || count!=1 || !value) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     p=&s->programs[s->current_program-1]; for(i=0;i<16;i++) p->matrix[i]=value[i];
+    tgGlesInvalidateVertexCache(tgGlesCurrentState()->draw);
 }
 static unsigned int color_channel(GLfloat x)
 {

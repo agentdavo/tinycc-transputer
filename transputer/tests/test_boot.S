@@ -30,7 +30,11 @@ _start:
      * Use AJW +0x4000 words = +0x10000 bytes (64 KiB) to avoid
      * stack/image overlap on larger test binaries.
      */
+#ifdef TEST_LARGE_WORKSPACE
+    .byte 0x28, 0x20, 0x20, 0x20, 0xB0 /* ajw 0x80000 words: 2 MiB */
+#else
     .byte 0x24, 0x20, 0x20, 0x20, 0xB0  /* ajw 0x4000 */
+#endif
 
     /*
      * === Phase 2: Initialize processor state ===

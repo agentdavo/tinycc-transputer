@@ -50,7 +50,8 @@ void tgGlesInitDraw(tg_gles_state *c, tg_gles_draw_state *s, void *arena,
 {
     int i;
     s->arena=(unsigned char *)arena; s->slot_size=(arena_size/TG_GLES_MAX_BUFFERS)&~3u;
-    s->array_buffer=s->element_buffer=0; s->vertex=vertex; s->vertex_user=user;
+    s->array_buffer=s->element_buffer=0; s->vertex=vertex; s->vertex_user=user; s->persistent_cache=GL_FALSE;
+    tgGlesInvalidateVertexCache(s);
     for (i=0;i<TG_GLES_MAX_BUFFERS;i++) {
         s->buffers[i].name=0; s->buffers[i].size=0; s->buffers[i].usage=GL_STATIC_DRAW;
         s->buffers[i].reserved=s->buffers[i].created=0;
@@ -61,6 +62,10 @@ void tgGlesInitDraw(tg_gles_state *c, tg_gles_draw_state *s, void *arena,
         s->attributes[i].normalized=s->attributes[i].enabled=GL_FALSE;
     }
     c->draw=s;
+}
+void tgGlesInvalidateVertexCache(tg_gles_draw_state *s)
+{
+    int i; for(i=0;i<TG_GLES_VERTEX_CACHE_SIZE;i++) s->cache[i].valid=0;
 }
 void glGenBuffers(GLsizei n, GLuint *out)
 {
@@ -91,6 +96,7 @@ void glDeleteBuffers(GLsizei n, const GLuint *names)
         }
         s->buffers[slot].reserved=s->buffers[slot].created=0; s->buffers[slot].size=0;
     }
+    tgGlesInvalidateVertexCache(s);
 }
 void glBindBuffer(GLenum target, GLuint name)
 {
@@ -123,6 +129,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage
         for (i=0;i<(unsigned int)size;i++) dst[i]=src[i];
     }
     s->buffers[slot].size=(unsigned int)size; s->buffers[slot].usage=usage;
+    tgGlesInvalidateVertexCache(s);
 }
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data)
 {
@@ -136,6 +143,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
     if (!src) { tgGlesSetError(GL_INVALID_VALUE); return; }
     dst=s->arena+(unsigned int)slot*s->slot_size+(unsigned int)offset;
     for (i=0;i<(unsigned int)size;i++) dst[i]=src[i];
+    tgGlesInvalidateVertexCache(s);
 }
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer)
 {
@@ -145,18 +153,21 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean norm
     if (!type_size(type)) { tgGlesSetError(GL_INVALID_ENUM); return; }
     a=&s->attributes[index]; a->size=size; a->type=type; a->normalized=normalized ? GL_TRUE : GL_FALSE;
     a->stride=stride; a->pointer=pointer; a->buffer=s->array_buffer;
+    tgGlesInvalidateVertexCache(s);
 }
 void glEnableVertexAttribArray(GLuint i)
 {
     tg_gles_draw_state *s=draw(); if (!s) return;
     if (i>=TG_GLES_MAX_ATTRIBUTES) { tgGlesSetError(GL_INVALID_VALUE); return; }
     s->attributes[i].enabled=GL_TRUE;
+    tgGlesInvalidateVertexCache(s);
 }
 void glDisableVertexAttribArray(GLuint i)
 {
     tg_gles_draw_state *s=draw(); if (!s) return;
     if (i>=TG_GLES_MAX_ATTRIBUTES) { tgGlesSetError(GL_INVALID_VALUE); return; }
     s->attributes[i].enabled=GL_FALSE;
+    tgGlesInvalidateVertexCache(s);
 }
 /* Values are native-endian and may be unaligned; byte copies avoid alignment
  * traps on transputers while preserving the host/guest representation. */
@@ -198,7 +209,6 @@ static int vertex(tg_gles_draw_state *s, unsigned int index, tg_screen_vertex *o
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
     tg_gles_draw_state *s=draw(); tg_gles_state *c=tgGlesCurrentState();
-    struct cache_entry { unsigned int index; int valid; tg_screen_vertex value; } cache[16];
     const unsigned char *p; size_t offset, bytes; int i,j,width; tg_screen_vertex v[3];
     if (!s) return;
     if (mode!=GL_TRIANGLES) { tgGlesSetError(GL_INVALID_ENUM); return; }
@@ -217,20 +227,27 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
         if (!indices) { tgGlesSetError(GL_INVALID_OPERATION); return; }
         p=(const unsigned char *)indices;
     }
-    for (i=0;i<16;i++) cache[i].valid=0;
+    /* Client arrays and arbitrary external callbacks can mutate without a GL
+     * command. Keep their cache only within this draw; the GLSL program path
+     * opts in to cross-draw caching when every enabled attribute is a VBO. */
+    if (!s->persistent_cache) tgGlesInvalidateVertexCache(s);
+    else for(i=0;i<TG_GLES_MAX_ATTRIBUTES;i++)
+        if(s->attributes[i].enabled && !s->attributes[i].buffer) { tgGlesInvalidateVertexCache(s); break; }
     for (i=0;i+2<count;i+=3) {
         for (j=0;j<3;j++) {
             unsigned int index;
             if (width==1) index=p[i+j];
             else { union { uint16_t value; unsigned char b[2]; } x; x.b[0]=p[(i+j)*2]; x.b[1]=p[(i+j)*2+1]; index=x.value; }
 #ifdef TG_DISABLE_VERTEX_CACHE
-            cache[index&15].valid=0;
-#endif
-            if (!cache[index&15].valid || cache[index&15].index!=index) {
-                if (!vertex(s,index,&cache[index&15].value)) return;
-                cache[index&15].index=index; cache[index&15].valid=1;
+            if (!vertex(s,index,&v[j])) return;
+#else
+            if (!s->cache[index&(TG_GLES_VERTEX_CACHE_SIZE-1)].valid || s->cache[index&(TG_GLES_VERTEX_CACHE_SIZE-1)].index!=index) {
+                tg_gles_vertex_cache_entry *entry=&s->cache[index&(TG_GLES_VERTEX_CACHE_SIZE-1)];
+                if (!vertex(s,index,&entry->value)) return;
+                entry->index=index; entry->valid=1;
             }
-            v[j]=cache[index&15].value;
+            v[j]=s->cache[index&(TG_GLES_VERTEX_CACHE_SIZE-1)].value;
+#endif
         }
         tg_draw_triangle(c->target,&v[0],&v[1],&v[2]);
     }
