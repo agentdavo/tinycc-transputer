@@ -1,9 +1,11 @@
 #include "material_raster.h"
+#include "shadow_map.h"
 #ifndef TG_TARGET_TEST
 #include <stdio.h>
 #endif
 static unsigned int pixels[TG_TILE_W*TG_TILE_H];
 static int depth[TG_TILE_W*TG_TILE_H];
+static float shadow_depth[64]; static unsigned char shadow_rgba[64*4];
 static const unsigned char texels[]={255,0,0,255, 0,255,0,255};
 static float square(float x,float y) { (void)y; return x*x; }
 static int run(void)
@@ -27,6 +29,28 @@ static int run(void)
     c.clip_enabled=1; c.clip_x0=4; c.clip_x1=8; c.clip_y0=0; c.clip_y1=8;
     a.depth=b.depth=d.depth=43;
     if(tg_material_triangle(&c,&a,&b,&d,&m) || depth[2*TG_TILE_W+2]!=42 || depth[4]!=43) return 4;
+    {
+        tg_shadow_map sm={8,8,shadow_depth,shadow_rgba};
+        tg_shadow_vertex s0={0,0,0.25f},s1={0,7,0.25f},s2={7,0,0.25f};
+        tg_fragment_texture st={shadow_rgba,8,8,TG_FRAG_CLAMP,TG_FRAG_CLAMP};
+        if(!tg_shadow_clear(&sm)) return 5;
+        tg_shadow_triangle(&sm,&s0,&s1,&s2);
+        if(shadow_depth[2*8+2]!=0.25f || shadow_depth[7*8+7]!=1.0f) return 6;
+        m.shadow=&st; m.features=TG_FRAG_SHADOW;
+        m.ambient[0]=m.ambient[1]=m.ambient[2]=0;
+        m.diffuse[0]=m.diffuse[1]=m.diffuse[2]=1;
+        a.varying.light[2]=b.varying.light[2]=d.varying.light[2]=1;
+        a.varying.light_clip[0]=b.varying.light_clip[0]=d.varying.light_clip[0]=-0.5f;
+        a.varying.light_clip[1]=b.varying.light_clip[1]=d.varying.light_clip[1]=-0.5f;
+        a.varying.light_clip[2]=b.varying.light_clip[2]=d.varying.light_clip[2]=0.0f;
+        a.varying.light_clip[3]=b.varying.light_clip[3]=d.varying.light_clip[3]=1.0f;
+        c.clip_enabled=0; a.depth=b.depth=d.depth=44;
+        if(tg_material_triangle(&c,&a,&b,&d,&m) || pixels[2*TG_TILE_W+2]!=0xff000000u) return 7;
+        a.varying.light_clip[0]=b.varying.light_clip[0]=d.varying.light_clip[0]=0.9f;
+        a.varying.light_clip[1]=b.varying.light_clip[1]=d.varying.light_clip[1]=0.9f;
+        a.depth=b.depth=d.depth=45;
+        if(tg_material_triangle(&c,&a,&b,&d,&m) || pixels[2*TG_TILE_W+2]!=0xff00ff00u) return 8;
+    }
     return 0;
 }
 #ifdef TG_TARGET_TEST
