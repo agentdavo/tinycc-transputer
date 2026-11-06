@@ -7,6 +7,13 @@ reviewed the handoffs and preserved the unfinished patch. Archive completion
 is recorded below. `STATUS.md` contains historical baselines, not the current
 compiler or `linux-7` state.
 
+**Post-archive follow-up:** the chief completed the slot-3 bounds repair in
+`685532a4` on 6 November 2026. All twelve target/profile runs report zero
+overflow and failures; both host profiles retain the canonical frame hash.
+See [bounds acceptance](fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md). FBWM and all
+guest clients must be rebuilt together; the commit is local and no complete
+rootfs deployment is claimed. The six worker chats remain archived.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
@@ -16,7 +23,7 @@ compiler or `linux-7` state.
 | Compare raytracer binaries | `681cbe51`, acceptance `f2997503`: exact parent/commit save 8,980,996 modeled T800 cycles (0.2965%) on model 3. All four images match at one/four nodes; hardened Doom and CoreMark unchanged; volatile/cast/alias/stack/target/relocation tests and seeds 329/367 pass. | TransLocal loop-to-MOVE proof remains open. Retained `.tmp-rayaccept/` snapshots/logs/histograms; [tracked report](tests/bench/indexed-fp-address-reuse-2026-11-06.md). No live process. |
 | Refactor transputer code layout | `84d7e632`: shared direct workspace opcode classification. 294 comparisons across six targets/options: 252 identical objects, 42 matching diagnostic failures. Independent Linux wrapper source review found no blocker. | `_wsop_private_7204/` retained. S10/`tps_dead_after` is reachable; profiling did not justify changing allocations. No pending edits/process/worktree owned. |
 | Explain per-architecture libtcc1 builds (FPU lane) | Direct conversion `16e7e460`; investigations `1dbe953a` / `15c7037b`; no speculative FPUNOROUND fix. Read-only Linux image-size/order review completed. | T4 `fpstall` rounding postcondition, native exception flags and FPUNOROUND transient representation need separate tests. Unary FP resident-operand/sqrt reuse is only a candidate. Detached worktree and `_fp_noround_audit/`/earlier untracked probes retained. |
-| Build per-part uClibc (aggregate/compositor lane) | Seed repair `fc344c0b`; aggregate `c96e1bcd`, exact acceptance `b0e8dc23`; compositor `bc3c780c`, bank canary `f873c42b`. Guarded compositor shows about 9% fewer modeled cycles in its real-blit test. | Slot-3 overflow is still live. Four-file 400×284 repair is saved unapplied as [pending patch](fbwm/fbwm-slot-bounds.pending.patch), with host checks passed and target `slot3_overflow 0` still required. Original detached worktree/results remain intact. |
+| Build per-part uClibc (aggregate/compositor lane) | Seed repair `fc344c0b`; aggregate `c96e1bcd`, acceptance `b0e8dc23`; compositor `bc3c780c`, bank canary `f873c42b`. Chief follow-up `685532a4` fixes slot 3 at 400×284: twelve target/profile runs and both host profiles pass. | Rebuild FBWM and guests together; older binaries retain unsafe capacity. The [original patch](fbwm/fbwm-slot-bounds.pending.patch) and detached worktree/results remain as superseded historical evidence, not a pending repair. |
 
 All sessions report no remaining live build/emulator process. No new task
 should be inferred from the candidate list. Resume only a selected lane with
@@ -34,7 +41,9 @@ the relevant snapshots and current source checked first.
   reproducing measurements.
 * Compositor branch `codex/fbwm-move2d` was pushed with `ed29c40e` / `31379af7`,
   equivalent to the local main canary/compositor files. Its detached worktree
-  contains the uncommitted bounds repair; do not discard it.
+  contains the original uncommitted bounds proposal; it is superseded by
+  local-main repair `685532a4`. The existing published compositor commits
+  alone are not evidence of a build containing that follow-up repair.
 * Shared `.gitignore` scratch-directory additions, untracked `transputer/examples/`,
   Python caches, Linux `framebuffer.bmp`, T4 `CODEGEN.md` edits and
   `t4.pre-2e44501` remain untouched. The closure commit does not sweep them in.
@@ -66,7 +75,7 @@ mid-run. Archival is reversible. The chief chat remains open.
 | Review and implement afcc4dfe | Seed verification `05b0cc9f`; MOVE2D timing `8177e21` / `04cb234d`; Doom harness `cabe1fbf`; linker profiling | Find a measured repeated scan/allocation beyond `a1d87275`; require byte/diagnostic equivalence and real-link throughput evidence |
 | Compare raytracer binaries | Scheduler correctness baseline; slot-weight and duplicate-load trials rejected in `55a9da8b` / `e75ac2a2`; hot-sequence profiling | Quantify a real hot-loop instruction/prefix saving before implementation; retain bounds/provenance/volatile/target/relocation guards |
 | Refactor transputer code layout | Symbol/builtin consolidation; shared history overlap `bef52a24`; `tps_dead_after` allocation/traversal profiling | Measure large-function compiler cost before changing storage; preserve rewrite decisions, updated reader facts and copy-chain folding |
-| Build per-part uClibc | Scalar64 repair `fc344c0b`; guarded whole-struct MOVE `c96e1bcd`, exact acceptance `b0e8dc23`; compositor/shared-bank audit | Keep corrected emulator pinned, prove eligible bank ranges and adjacent MOVE2D setup/transfer; investigate slot-capacity overflow separately |
+| Build per-part uClibc | Scalar64 repair `fc344c0b`; guarded whole-struct MOVE `c96e1bcd`, exact acceptance `b0e8dc23`; compositor `bc3c780c`; later chief bounds fix `685532a4` | Bounds validation complete; rebuild participating clients together before deployment |
 | Optimize 64-bit division | Linux continuation/frame ABI repairs; T4 FP access repairs `fe000b2` / `2853b29`; per-continuation state preservation | Prove nested FP/block-move clobber first, repair entry/resume wrappers; keep physical alias migration separate and trap-first opt-in |
 | Improve TinyCC Transputer compiler | Coordination, regression gate, audit/ownership records | Verify scheduler baseline first, keep experiment ownership separate, review evidence and commit each validated group |
 
