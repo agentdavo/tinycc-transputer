@@ -96,6 +96,8 @@ ST_FUNC void gen_le32(int c);
 
 /* Forward declarations */
 static void transputer_func_reset(void);
+static void tp_gen_tvx_unary(int opr);
+static void tp_gen_tvx_binary(int opr);
 static void tp_gen_vec2(int opr);
 static void tp_gen_vec3(int opr);
 static void emit_instr(int opc, int v);
@@ -155,6 +157,7 @@ struct tp_builtin_desc {
     short simple_op; /* simple instruction */
     short vector_op; /* TVX vector instruction */
     unsigned char cpu;
+    short scalar_op; /* TVX word instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -198,19 +201,10 @@ void gen_builtin_fprem(void);
 void gen_builtin_fpabs(void);
 void gen_builtin_bf16tof32(void);
 void gen_builtin_f32tobf16(void);
-void gen_builtin_bf16pack(void);
-void gen_builtin_bf16unpkh(void);
-void gen_builtin_mxfp4tof32(void);
-void gen_builtin_f32tomxfp4(void);
-void gen_builtin_mxe8m0tof32(void);
-void gen_builtin_mxe8m0of(void);
 void gen_builtin_mxfp4dot(void);
 void gen_builtin_bf16dot(void);
 void gen_builtin_mxfp4gemv(void);
 void gen_builtin_mxfp4unpk8(void);
-void gen_builtin_f32tomxfp4x8(void);
-void gen_builtin_bf16mul2(void);
-void gen_builtin_bf16add2(void);
 void gen_builtin_vsetlen(void);
 void gen_builtin_mxfp4gemvbf(void);
 void gen_builtin_f16tof32(void);
@@ -225,8 +219,6 @@ void gen_builtin_qdot(void);
 void gen_builtin_ftsetvp(void);
 void gen_builtin_ftransp(void);
 void gen_builtin_ftranspb(void);
-void gen_builtin_frsqrtb(void);
-void gen_builtin_frecipb(void);
 void gen_builtin_ftcull(void);
 void gen_builtin_tskin(void);
 void gen_builtin_vsetfmt(void);
@@ -653,19 +645,19 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         /* TVX (MXFP4 / bfloat16) */
         { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0, 0, 0, TP_BUILTIN_ANY },
         { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___bf16pack,    "ee",  gen_builtin_bf16pack,    0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___bf16unpkh,   "e",   gen_builtin_bf16unpkh,   0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___mxfp4tof32,  "e",   gen_builtin_mxfp4tof32,  0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___f32tomxfp4,  "e",   gen_builtin_f32tomxfp4,  0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___mxe8m0tof32, "e",   gen_builtin_mxe8m0tof32, 0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___mxe8m0of,    "e",   gen_builtin_mxe8m0of,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16pack,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16PACK },
+        { TOK___bf16unpkh,   "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16UNPKH },
+        { TOK___mxfp4tof32,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4TOR32 },
+        { TOK___f32tomxfp4,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4 },
+        { TOK___mxe8m0tof32, "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0TOR32 },
+        { TOK___mxe8m0of,    "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0OF },
         { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0, 0, 0, TP_BUILTIN_TVX },
         { TOK___bf16dot,     "eeee",gen_builtin_bf16dot,     0, 0, 0, TP_BUILTIN_TVX },
         { TOK___mxfp4gemv,   "eeee",gen_builtin_mxfp4gemv,   0, 0, 0, TP_BUILTIN_TVX },
         { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___f32tomxfp4x8,"e",   gen_builtin_f32tomxfp4x8,0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___bf16mul2,    "ee",  gen_builtin_bf16mul2,    0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___bf16add2,    "ee",  gen_builtin_bf16add2,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___f32tomxfp4x8,"e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4X8 },
+        { TOK___bf16mul2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16MUL2 },
+        { TOK___bf16add2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16ADD2 },
         { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1, 0, 0, TP_BUILTIN_TVX },
         { TOK___mxfp4gemvbf, "eeee",gen_builtin_mxfp4gemvbf, 0, 0, 0, TP_BUILTIN_TVX },
         { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN, TP_BUILTIN_TVX },
@@ -689,8 +681,8 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___ftransp,     "eee", gen_builtin_ftransp,     0, 0, 0, TP_BUILTIN_TVX },
         { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0, 0, 0, TP_BUILTIN_TVX },
         { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS, TP_BUILTIN_TVX },
-        { TOK___frsqrtb,     "e",   gen_builtin_frsqrtb,     0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___frecipb,     "e",   gen_builtin_frecipb,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___frsqrtb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRSQRT },
+        { TOK___frecipb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRECIP },
         { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB, TP_BUILTIN_TVX },
         { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE, TP_BUILTIN_TVX },
         { TOK___ftcull,      "eee", gen_builtin_ftcull,      0, 0, 0, TP_BUILTIN_TVX },
@@ -1015,7 +1007,11 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
      * both operands would name the builtin's result.  Spilling after the
      * arguments are parsed also covers an argument that is that result. */
     save_reg(REG_IRET);
-    if (desc->vector_op && !desc->args[2])
+    if (desc->scalar_op && !desc->args[1])
+        tp_gen_tvx_unary(desc->scalar_op);
+    else if (desc->scalar_op)
+        tp_gen_tvx_binary(desc->scalar_op);
+    else if (desc->vector_op && !desc->args[2])
         tp_gen_vec2(desc->vector_op);
     else if (desc->vector_op)
         tp_gen_vec3(desc->vector_op);
@@ -5121,7 +5117,8 @@ static void tp_gen_tvx_unary(int opr) {
     tp_tvx_word_result(VT_INT | VT_UNSIGNED);
 }
 
-/* Binary word,word->word TVX op: AReg = f(BReg, AReg). */
+/* Binary word,word->word TVX op: AReg = f(BReg, AReg).
+ * BF16PACK receives the high half in BReg and the low half in AReg. */
 static void tp_gen_tvx_binary(int opr) {
     gv2(RC_INT, RC_INT);
     tp_push_sv(&vtop[-1]);  /* first arg  -> BReg */
@@ -5420,18 +5417,6 @@ void gen_builtin_f32tobf16(void)
     else
         tp_gen_tvx_unary(TP_OPR_R32TOBF16);
 }
-void gen_builtin_bf16unpkh(void)   { tp_gen_tvx_unary(TP_OPR_BF16UNPKH); }
-void gen_builtin_mxfp4tof32(void)  { tp_gen_tvx_unary(TP_OPR_MXFP4TOR32); }
-void gen_builtin_f32tomxfp4(void)  { tp_gen_tvx_unary(TP_OPR_R32TOMXFP4); }
-void gen_builtin_mxe8m0tof32(void) { tp_gen_tvx_unary(TP_OPR_MXE8M0TOR32); }
-void gen_builtin_mxe8m0of(void)    { tp_gen_tvx_unary(TP_OPR_MXE8M0OF); }
-
-void gen_builtin_bf16pack(void) {
-    /* __bf16pack(hi, lo) -> (bf16(hi) << 16) | bf16(lo)
-     * BF16PACK computes (bf16(BReg) << 16) | bf16(AReg), so `hi` must be
-     * pushed first (it sinks to BReg) and `lo` second. */
-    tp_gen_tvx_binary(TP_OPR_BF16PACK);
-}
 
 /* Shared tail for the two accumulating dot products: the result is left in
  * FAreg, which we spill to the float return slot like every other float value
@@ -5523,13 +5508,6 @@ void gen_builtin_mxfp4unpk8(void) {
     vtop -= 2;
 }
 
-/* unsigned __f32tomxfp4x8(const float *src) - quantise 8 lanes at once */
-void gen_builtin_f32tomxfp4x8(void) { tp_gen_tvx_unary(TP_OPR_R32TOMXFP4X8); }
-
-/* unsigned __bf16mul2/__bf16add2(unsigned a, unsigned b) - 2 packed lanes */
-void gen_builtin_bf16mul2(void) { tp_gen_tvx_binary(TP_OPR_BF16MUL2); }
-void gen_builtin_bf16add2(void) { tp_gen_tvx_binary(TP_OPR_BF16ADD2); }
-
 /* void __vsetlen(int n) - set the length for subsequent vector ops */
 void gen_builtin_vsetlen(void) {
     gv(RC_INT);
@@ -5605,11 +5583,9 @@ void gen_builtin_ftsetvp(void) {
 }
 void gen_builtin_ftransp(void)  { tp_gen_vec3_ret(TP_OPR_FTRANSP); }
 void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
-void gen_builtin_frsqrtb(void)  { tp_gen_tvx_unary(TP_OPR_FRSQRT); }
 /* unsigned __frecipb(unsigned bits);
  * void __fsincosb(float *dst_pairs, const unsigned short *bams)
  *                                        (angle count from __vsetlen) */
-void gen_builtin_frecipb(void)  { tp_gen_tvx_unary(TP_OPR_FRECIP); }
 /* void __vsetstride(unsigned stride_bytes, unsigned stream_mask);
  * int  __ftcull(unsigned char *dst, const float *xyz, const void *param)
  * int  __tskin(float *dst, const void *joints, const void *param)
