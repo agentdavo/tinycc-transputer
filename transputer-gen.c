@@ -7436,6 +7436,12 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
                         if (t == x || t == y)
                             ok = 0;
                     }
+                    /* Indirect word reads are not rewritten below. Keep the
+                     * copy if LDLP s; LDNL d reads its destination word. */
+                    if (m < n && ins[m].opcode == TP_ENC_LDNL &&
+                        ((uint32_t)ins[k].operand +
+                         (uint32_t)ins[m].operand - (uint32_t)y) * 4u == 0)
+                        ok = 0;
                     /* A byte read of y would not be redirected to x below,
                      * and the copy that wrote y goes. */
                     if (ins[k].operand == y && tp_relax_byte_read(ins, n, k))
