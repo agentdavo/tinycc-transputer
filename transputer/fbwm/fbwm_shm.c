@@ -397,6 +397,35 @@ static void blit_surface(volatile unsigned int *fb, const tpos_shm_win_t *win,
     if (copy_w <= 0 || copy_h <= 0) return;
 
     bytes = copy_w * 4;
+#if defined(__TRANSPUTER__) && defined(TPOS_HAVE_MOVE2D) && TPOS_HAVE_MOVE2D && \
+    ((TPOS_FB_BASE + TPOS_FB_CARVEOUT_SIZE <= TPOS_SHM_BASE) || \
+     (TPOS_SHM_BASE + TPOS_SHM_SIZE <= TPOS_FB_BASE))
+    /* MOVE2D requires disjoint blocks.  Published geometry is shared data,
+     * so use it only when every source row is within the reserved SHM bank
+     * and the destination is the normal framebuffer.  Other layouts retain
+     * the original row order.  Avoid setup overhead on very small copies. */
+    if ((unsigned long)fb == (unsigned long)TPOS_FB_BASE &&
+        copy_w >= 16 && copy_h >= 16 &&
+        win->surf_stride >= copy_w &&
+        win->surf_stride <= slot_cap_w[win->slot] &&
+        sx0 <= win->surf_stride - copy_w &&
+        copy_h <= slot_cap_h[win->slot] &&
+        sy0 <= slot_cap_h[win->slot] - copy_h &&
+        slot_pixel_off[win->slot] +
+            (unsigned)(sy0 + copy_h - 1) * (unsigned)win->surf_stride +
+            (unsigned)sx0 + (unsigned)copy_w <=
+            (TPOS_SHM_SIZE - TPOS_SHM_HEADER_BYTES) / 4u) {
+        const unsigned int *s = src + sy0 * win->surf_stride + sx0;
+        unsigned int *d = (unsigned int *)fb + dy * TPOS_FB_WIDTH + dx;
+        int source_stride = win->surf_stride * 4;
+        int destination_stride = TPOS_FB_STRIDE;
+        int rows = copy_h;
+        int width_bytes = bytes;
+        __move2dinit(rows, destination_stride, source_stride);
+        __move2dall(width_bytes, d, s);
+        return;
+    }
+#endif
     for (row = 0; row < copy_h; row++) {
         const unsigned int *s =
             src + (sy0 + row) * win->surf_stride + sx0;
