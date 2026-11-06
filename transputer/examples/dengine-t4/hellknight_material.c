@@ -4,6 +4,10 @@
 #include "../distributed-fb/shadow_map.h"
 #ifdef TG_DEMO_ROOM
 #include "demo_room.h"
+#include "../distributed-fb/gles2_uber_vertex.h"
+#ifndef __transputer__
+#include <math.h>
+#endif
 #endif
 #include "hellknight_asset.h"
 static const int sine[32]={0,50,98,142,181,213,237,251,256,251,237,213,181,142,98,50,0,-50,-98,-142,-181,-213,-237,-251,-256,-251,-237,-213,-181,-142,-98,-50};
@@ -18,6 +22,15 @@ static tg_fragment_texture shadow={map_pixels,64,64,TG_FRAG_CLAMP,TG_FRAG_CLAMP}
 static tg_fragment_material material;
 static unsigned int previous_frame=~0u;
 static float square(float x,float exponent) { (void)exponent; return x*x; }
+#ifdef TG_DEMO_ROOM
+static float shader_root(float x) {
+#ifdef __transputer__
+    return __fpsqrt(x);
+#else
+    return sqrtf(x);
+#endif
+}
+#endif
 static void prepare(unsigned int frame)
 {
     unsigned int i, pose=(frame/15)%HK_ANIMATION_FRAMES, next=(pose+1)%HK_ANIMATION_FRAMES;
@@ -25,8 +38,17 @@ static void prepare(unsigned int frame)
 #ifdef TG_DEMO_ROOM
     float camera_x=-HK_CENTER_X*HK_WORLD_SCALE, camera_y=(80.0f-HK_CENTER_Y)*HK_WORLD_SCALE;
     float camera_z=(100.0f-HK_CENTER_Z)*HK_WORLD_SCALE;
+    static tg_uber_vertex_uniforms shader_uniforms;
     sy=0; cy=1;
     if(previous_frame==~0u) demo_room_init(HK_CENTER_X,HK_CENTER_Y,HK_CENTER_Z,HK_WORLD_SCALE,camera_x,camera_y,camera_z);
+    shader_uniforms.mvp[0]=0.9f; shader_uniforms.mvp[5]=1.2f;
+    shader_uniforms.mvp[11]=-1.0f; shader_uniforms.mvp[12]=-0.9f*camera_x;
+    shader_uniforms.mvp[13]=-1.2f*camera_y; shader_uniforms.mvp[15]=camera_z;
+    shader_uniforms.light_mvp[0]=shader_uniforms.light_mvp[5]=shader_uniforms.light_mvp[10]=0.25f;
+    shader_uniforms.light_mvp[10]=-0.25f; shader_uniforms.light_mvp[15]=1.0f;
+    shader_uniforms.light_position[0]=shader_uniforms.light_position[1]=0; shader_uniforms.light_position[2]=4;
+    shader_uniforms.camera_position[0]=camera_x; shader_uniforms.camera_position[1]=camera_y; shader_uniforms.camera_position[2]=camera_z;
+    shader_uniforms.features=TG_FRAG_BUMP|TG_FRAG_SHADOW; shader_uniforms.sqrt_fn=shader_root;
 #endif
 #ifdef TG_DISABLE_ROTATION
     sy=0; cy=1;
@@ -70,14 +92,34 @@ static void prepare(unsigned int frame)
         ty=(tangent[1]+(tangent_next[1]-tangent[1])*blend)/32767.0f;
         tz=(tangent[2]+(tangent_next[2]-tangent[2])*blend)/32767.0f;
         tg_material_vertex *v=&verts[i];
-#ifdef TG_DEMO_ROOM
-        v->x=(int)(80.0f+72.0f*(rx-camera_x)/w); v->y=(int)(60.0f-72.0f*(y-camera_y)/w);
-#else
+#ifndef TG_DEMO_ROOM
         v->x=(int)(80.0f+110.0f*rx/w); v->y=(int)(60.0f-110.0f*y/w);
-#endif
         v->depth=(int)(100000.0f/w); v->inverse_w=1.0f/w;
+#endif
         v->varying.uv[0]=hk_uv[i][0]; v->varying.uv[1]=hk_uv[i][1];
         v->varying.normal[0]=cy*nx+sy*nz; v->varying.normal[1]=ny; v->varying.normal[2]=-sy*nx+cy*nz;
+#ifdef TG_DEMO_ROOM
+        {
+            tg_uber_vertex_input input; tg_uber_vertex_output output;
+            input.position[0]=rx; input.position[1]=y; input.position[2]=rz;
+            input.normal[0]=v->varying.normal[0]; input.normal[1]=ny; input.normal[2]=v->varying.normal[2];
+            input.tangent[0]=cy*tx+sy*tz; input.tangent[1]=ty; input.tangent[2]=-sy*tx+cy*tz;
+            input.uv[0]=hk_uv[i][0]; input.uv[1]=hk_uv[i][1];
+            if(tg_uber_vertex(&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
+                v->varying=output.varying;
+                v->x=(int)(80.0f+80.0f*output.clip[0]/output.clip[3]);
+                v->y=(int)(60.0f-60.0f*output.clip[1]/output.clip[3]);
+                v->depth=(int)(100000.0f/output.clip[3]); v->inverse_w=1.0f/output.clip[3];
+            } else {
+                /* A zero-length shader normalization is undefined. Keep a
+                 * deterministic ambient-only fallback for that vertex. */
+                v->x=(int)(80.0f+72.0f*(rx-camera_x)/w); v->y=(int)(60.0f-72.0f*(y-camera_y)/w);
+                v->depth=(int)(100000.0f/w); v->inverse_w=1.0f/w;
+                v->varying.light[0]=v->varying.light[1]=v->varying.light[2]=0;
+                v->varying.half_vector[0]=v->varying.half_vector[1]=v->varying.half_vector[2]=0;
+            }
+        }
+#else
         /* World-space light and eye are both approximated by +Z. Transform
          * the direction into the model tangent frame, as v_uber does. */
         lx=-sy; lz=cy; bz=nx*ty-ny*tx;
@@ -91,6 +133,7 @@ static void prepare(unsigned int frame)
         v->varying.light[0]=v->varying.half_vector[0]=0;
         v->varying.light[1]=v->varying.half_vector[1]=0;
         v->varying.light[2]=v->varying.half_vector[2]=1;
+#endif
 #endif
 #ifdef TG_DEMO_ROOM
         v->varying.light_clip[0]=rx*0.25f; v->varying.light_clip[1]=y*0.25f; v->varying.light_clip[2]=-rz*0.25f;

@@ -89,6 +89,16 @@ does not expand macros or implement general preprocessor expressions. The
 eight feature combinations reach the parser on host and T800. They are still
 rejected there because broader GLSL syntax and execution are not implemented.
 
+The character's `techdemo` vertex path now calls the native
+`gles2_uber_vertex` implementation of the source shader's matrix transform,
+`cross`, `dot` and `normalize` operations (using T800 `__fpsqrt`), including
+its different bump-mapped and unbumped half-vector formulas. It produces
+the interpolated lighting and shadow inputs consumed by the existing material
+backend. Zero-length normalization reports an undefined result; the demo
+uses a deterministic ambient-only fallback for such vertices. This is a C
+specialization, not compilation or execution of the GLSL source. The room
+still uses its own approximate tangent-space vertex setup.
+
 `ROOM_BUMP=0`, `ROOM_SPECULAR=0` and `ROOM_SHADOW=0` disable individual
 room features for comparisons. From the fixed default camera, disabling
 the room normal maps changes visible pixels; disabling the specular map did
@@ -103,6 +113,7 @@ RENDERER=techdemo bash transputer/examples/distributed-fb/test-scale.sh
 bash transputer/examples/dengine-t4/test-room.sh
 bash transputer/examples/dengine-t4/test-scene.sh
 bash transputer/examples/dengine-t4/test-uber.sh
+bash transputer/examples/distributed-fb/test-uber-vertex.sh
 python3 transputer/examples/dengine-t4/audit_scene.py
 ```
 
