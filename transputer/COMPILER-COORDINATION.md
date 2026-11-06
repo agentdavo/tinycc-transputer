@@ -79,6 +79,18 @@ target/layout, 32 mixed-version ABI and eight VLA runs. The return fixture
 now has 40 cases, including exact literal bits and widened early-return
 epilogues. Memory, flagged and non-double return controls stay unchanged.
 
+The [direct double-local-store acceptance](tests/bench/double-local-stores-2026-11-06.md)
+extends statement-end cleanup to immediate copies of FPU double results into
+proven nonvolatile, unescaped locals/parameters. It removes temporary pair
+and optional high-word copies while preserving FPU operation totals. Full
+POV box saves 45,305,362 decoded instructions and 71,593,148 modeled T800
+cycles (1.27956%); its ELF shrinks 5,304 bytes. Focused recurrence and
+accumulation loops save 19.73% and 12.24%. All workload gates pass including
+full glass, plus 96 target/layout, 32 mixed-version ABI and eight VLA runs.
+A new seventeen-case fixture covers loops, aliases, live results, volatile/
+packed destinations, control flow, signed zero and wide frames. Soft-float
+store probes and the negative store controls remain byte-identical.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |

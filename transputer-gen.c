@@ -12742,6 +12742,74 @@ static int tp_next_kept(const int *keep, int n, int i)
     return i;
 }
 
+/* A statement-ending double assignment can write FA straight to its local.
+ * Accept only the exact low/high copy, optionally preceded by gv() moving
+ * the high word to another float slot.  No address evaluation or other
+ * operation may intervene, and no vstack value may still need either copy. */
+static int tp_stmt_double_store(struct tp_hist_ent *w, int *keep, int *mod,
+                                int n, int a, int b)
+{
+    int q[6], count = 0, i, x, hi, first, dest;
+    Sym *s;
+
+    if (w[a].kind != TP_HIST_INSTR || w[a].opc != TP_OP_LDLP ||
+        w[b].kind != TP_HIST_INSTR || w[b].opc != TP_OP_OPR ||
+        w[b].val != TP_FPU_STNLDB)
+        return 0;
+    x = w[a].val;
+    if (x < TREG_FA || x > TREG_FC ||
+        tp_reg_live_on_vstack(x, NULL) || tp_reg_live_on_vstack(x + 1, NULL))
+        return 0;
+    for (i = tp_next_kept(keep, n, b); i < n; i = tp_next_kept(keep, n, i)) {
+        if (count == 6)
+            return 0;
+        q[count++] = i;
+    }
+    if (count != 4 && count != 6)
+        return 0;
+    first = count - 4;
+    hi = x + 1;
+    if (first) {
+        if (w[q[0]].kind != TP_HIST_INSTR || w[q[0]].opc != TP_OP_LDL ||
+            w[q[0]].val != hi || w[q[1]].kind != TP_HIST_INSTR ||
+            w[q[1]].opc != TP_OP_STL)
+            return 0;
+        hi = w[q[1]].val;
+        if (hi < TREG_FA || hi > TREG_FC || hi == x || hi == x + 1 ||
+            tp_reg_live_on_vstack(hi, NULL))
+            return 0;
+    }
+    if (w[q[first]].kind != TP_HIST_INSTR ||
+        w[q[first]].opc != TP_OP_LDL || w[q[first]].val != x ||
+        w[q[first + 1]].kind != TP_HIST_LOCAL ||
+        w[q[first + 1]].opc != TP_OP_STL ||
+        w[q[first + 2]].kind != TP_HIST_INSTR ||
+        w[q[first + 2]].opc != TP_OP_LDL || w[q[first + 2]].val != hi ||
+        w[q[first + 3]].kind != TP_HIST_LOCAL ||
+        w[q[first + 3]].opc != TP_OP_STL)
+        return 0;
+    dest = w[q[first + 1]].val;
+    if ((dest & 3) || (int64_t)dest + 4 != w[q[first + 3]].val)
+        return 0;
+    /* The original symbol, rather than a cast's type, proves these writes
+     * nonvolatile.  Exclude escaped locals and anonymous spill temporaries. */
+    for (s = local_stack; s; s = s->prev) {
+        int bt = s->type.t & VT_BTYPE;
+        if ((s->r & (VT_VALMASK | VT_LVAL)) == (VT_LOCAL | VT_LVAL) &&
+            s->c == dest && (bt == VT_DOUBLE || bt == VT_LDOUBLE) &&
+            !(s->type.t & (VT_VOLATILE | VT_BITFIELD)) && !s->a.addrtaken)
+            break;
+    }
+    if (!s)
+        return 0;
+    w[a].kind = TP_HIST_LOCAL;
+    w[a].val = dest;
+    mod[a] = 1;
+    for (i = 0; i < count; i++)
+        keep[q[i]] = 0;
+    return 1;
+}
+
 /* The current pc is a label that a jump emitted later may reach (a loop
  * head, a `continue' target, a case label: tccgen's gind()).  gsym_addr()
  * clears the window when it resolves a forward jump; a backward target is
@@ -12818,6 +12886,10 @@ ST_FUNC void tp_stmt_end(void)
                 w[b].kind == TP_HIST_INSTR && w[b].opc == TP_OP_STL &&
                 tp_park_dead(w, keep, n, b, w[b].val, -1)) {
                 keep[a] = keep[b] = 0;
+                changed = 1;
+                continue;
+            }
+            if (tp_stmt_double_store(w, keep, mod, n, a, b)) {
                 changed = 1;
                 continue;
             }
