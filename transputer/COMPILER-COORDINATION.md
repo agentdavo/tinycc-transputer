@@ -32,8 +32,13 @@ all target regressions, hardened Doom, CoreMark, all four ray images at one/
 four nodes and complete rebuilt POV `box`/`basicvue` references pass. The
 full-source [POV gate](tests/bench/povray/README.md) is a generic single-node
 fixture with existing T9000 libc, distinct from the unchanged ICC BTL.
-Historical random-noise compatibility and a TinyCC 16-node runtime remain
-separate work. No archived worker chats were reopened.
+The subsequent [buffered RGB row acceptance](tests/bench/povray-rgb-rows-2026-11-06.md)
+closes target glass compatibility using the scoped historical generator
+(`b0b79743`). Pixel and row builds match all three full references. T4
+`b3ab1e0` updates collector sources/shared output; `2d6cf12` adds optional
+MOVE2D packing. The full generic box saves 1.946% modeled cycles. The actual
+sixteen-node ICC image still requires recollection/toolset integration;
+the existing BTL is unchanged. No archived worker chats were reopened.
 
 ## Closure checkpoint
 

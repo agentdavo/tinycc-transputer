@@ -123,6 +123,21 @@ static long port_io(int fd, void *buf, unsigned n, int wr)
     return done;
 }
 
+static long port_seek(int fd, long offset, int whence)
+{
+    if (whence < SEEK_SET || whence > SEEK_END)
+        return -22;
+    sp[2] = 17;                 /* SP_SEEK */
+    put32(sp + 3, fd);
+    put32(sp + 7, offset);
+    put32(sp + 11, whence + 1);
+    if (sp_call(13))
+        return -22;
+    sp[2] = 18;                 /* SP_TELL */
+    put32(sp + 3, fd);
+    return sp_call(5) ? -22 : (long)get32(sp + 3);
+}
+
 /* Leave loaded text/BSS and the boot workspace below 16 MiB. */
 static unsigned heap = 0x81000000u, brkptr = 0x81800000u;
 long __transputer_mmap2_addr, __transputer_mmap2_len;
@@ -185,16 +200,21 @@ long __transputer_syscall(long nr, long a, long b, long c,
         }
         return total;
     }
-    case 1057:                  /* lseek: SP_SEEK, then SP_TELL */
-        sp[2] = 17;
-        put32(sp + 3, a);
-        put32(sp + 7, b);
-        put32(sp + 11, c + 1);
-        if (sp_call(13))
-            return -22;
-        sp[2] = 18;
-        put32(sp + 3, a);
-        return sp_call(5) ? -22 : (long)get32(sp + 3);
+    case 1057:                  /* legacy 32-bit lseek */
+        return port_seek(a, b, c);
+    case 62: {                  /* llseek(fd, high, low, result, whence) */
+        long result;
+        /* The iserver protocol has a signed 32-bit offset.  Reject larger
+         * offsets instead of silently truncating the libc's 64-bit value. */
+        if (b != (c < 0 ? -1 : 0))
+            return -75;
+        result = port_seek(a, c, e);
+        if (result < 0)
+            return result;
+        ((unsigned long *)d)[0] = (unsigned long)result;
+        ((unsigned long *)d)[1] = 0;
+        return 0;
+    }
     case 214:                   /* brk */
         if (!a)
             return brkptr;

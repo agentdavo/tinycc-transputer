@@ -5,6 +5,12 @@ The supplied `t4/examples/povray/povsrc/build/povray.btl` is a working
 It is an INMOS ICC/toolset image. Its instruction profile is useful evidence
 for compiler design, but a change to TinyCC cannot change this existing BTL.
 
+**Validated follow-up:** [buffered RGB rows and INMOS random compatibility](tests/bench/povray-rgb-rows-2026-11-06.md)
+now reproduce full target box/basicvue/glass references. The shared collector
+row writer is committed in T4 `b3ab1e0`; optional MOVE2D packing in `2d6cf12`.
+The historical BTL and its measurements below are unchanged. Rebuilding that
+sixteen-node process image remains separate from the generic fixture gate.
+
 ## Configuration and building an array
 
 The authoritative inputs for this binary are
@@ -275,8 +281,9 @@ bytes/pixels and SHA-256
 This isolates the entire observed host glass-image mismatch to the PRNG
 contract. The override and comparison receipt are in
 `povray-deep/glass-rng-host/`. It is not a TinyCC-target glass acceptance run:
-adding a scoped historical-POV PRNG option and validating target procedural
-images remain follow-up work.
+that target step is completed by `b0b79743` and the subsequent row-output
+acceptance linked above. The earlier host-only experiment remains distinct
+evidence of how the compatibility contract was identified.
 
 Input BTL SHA-256:
 `261e056fa3bc03bb9f41454938225703e45f8645d8fff8bc402350eadbf4d831`.
@@ -286,4 +293,5 @@ Raw per-node histograms, map-based attribution, profiler source and rerun
 scripts are retained in `logs/compiler-coordination/povray-deep/`.
 Generic host/target build scripts and original-source math fixtures are in
 `logs/compiler-coordination/pov-rebuild-audit/`. These are local audit
-artifacts; production sources and the historical BTL were not changed.
+artifacts. The initial audit left sources unchanged; the later collector
+source commits are recorded above. The historical BTL remains unchanged.

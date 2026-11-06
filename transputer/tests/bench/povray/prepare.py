@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare a generic POV-Ray 1.0 copy without modifying the historical port."""
 import pathlib
+import os
 import re
 import shutil
 import sys
@@ -8,6 +9,9 @@ import sys
 root = pathlib.Path(__file__).resolve().parents[4]
 work = pathlib.Path(sys.argv[1]).resolve()
 source = root / "transputer/t4/examples/povray/povsrc/source"
+output = os.environ.get("POV_OUTPUT", "row")
+if output not in ("row", "pixel"):
+    raise SystemExit("POV_OUTPUT must be row or pixel")
 dest = work / "source"
 dest.mkdir(parents=True, exist_ok=True)
 for item in source.iterdir():
@@ -53,6 +57,10 @@ void display_finished(void) {
 }
 void display_close(void) { display_finished(); }
 """)
+if output == "row":
+    shutil.copyfile(pathlib.Path(__file__).with_name("display-row.c"), dest / "display.c")
+    shutil.copyfile(root / "transputer/t4/examples/povray/povsrc/machine/transp/rgbrow.h",
+                    dest / "rgbrow.h")
 boot = (root / "transputer/tests/test_boot.S").read_text()
 old = "0x24, 0x20, 0x20, 0x20, 0xB0"
 assert boot.count(old) == 1
