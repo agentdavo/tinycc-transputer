@@ -14,7 +14,8 @@ typedef struct {
 } tg_glsl_fragment_program;
 /* Supports declarations of scalar/vec2/vec3/vec4 uniforms and varyings,
  * sampler2D uniforms, and one gl_FragColor expression using texture2D and
- * component-wise + - * /. It rejects all other syntax, rather than silently
+ * component-wise + - * /, swizzles, vector constructors and dot, cross,
+ * normalize, max and pow. It rejects all other syntax, rather than silently
  * accepting a shader with different semantics. Not full GLSL ES. */
 int tg_glsl_compile_fragment(const char *source,tg_glsl_fragment_program *out);
 int tg_glsl_find_symbol(const tg_glsl_fragment_program *,const char *name);

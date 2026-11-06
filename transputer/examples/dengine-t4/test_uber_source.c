@@ -1,15 +1,19 @@
 #include "../distributed-fb/gles2_program.h"
+#include "../distributed-fb/glsl_fragment_compiler.h"
 #include "uber_source.h"
 #ifndef TG_TARGET_TEST
 #include <stdio.h>
 #endif
 static tg_context context; static tg_gles_state gl; static tg_gles_program_state programs;
+static tg_glsl_fragment_program fragment_program;
 static int same(const char *a,const char *b) { while(*a && *a==*b) { a++; b++; } return *a==*b; }
 static int run(void)
 {
     static const char *flags[]={"#define BUMP_MAPPING\n", "#define SPEC_MAPPING\n", "#define SHADO_MAPPING\n"};
     const char *src[4]; char log[128]; GLuint id; GLint ok; int mode,stage,n,i;
     tgGlesInit(&gl,&context); tgGlesMakeCurrent(&gl); tgGlesInitPrograms(&gl,&programs);
+    /* The new source compiler must also reject unsupported full uber source. */
+    if(tg_glsl_compile_fragment(fragment_source,&fragment_program)) return 2;
     for(stage=0;stage<2;stage++) for(mode=0;mode<8;mode++) {
         n=0; for(i=0;i<3;i++)if(mode&(1<<i))src[n++]=flags[i];
         src[n++]=stage?fragment_source:vertex_source;

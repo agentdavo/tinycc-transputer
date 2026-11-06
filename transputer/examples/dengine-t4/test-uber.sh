@@ -11,7 +11,7 @@ for name,file in [('vertex_source','v_uber.glsl'),('fragment_source','f_uber.gls
     raw=(p/file).read_bytes(); lines.append('static const char '+name+'[]={'+','.join(map(str,raw))+',0};')
 out.write_text('\n'.join(lines)+'\n')
 PY
-sources=("$HERE/test_uber_source.c" "$ROOT/transputer/examples/distributed-fb/tinygl.c" "$ROOT/transputer/examples/distributed-fb/gles2_subset.c" "$ROOT/transputer/examples/distributed-fb/gles2_draw.c" "$ROOT/transputer/examples/distributed-fb/gles2_program.c")
+sources=("$HERE/test_uber_source.c" "$ROOT/transputer/examples/distributed-fb/tinygl.c" "$ROOT/transputer/examples/distributed-fb/gles2_subset.c" "$ROOT/transputer/examples/distributed-fb/gles2_draw.c" "$ROOT/transputer/examples/distributed-fb/gles2_program.c" "$ROOT/transputer/examples/distributed-fb/glsl_fragment_compiler.c")
 cc -O2 -I"$WORK" -o "$WORK/host" "${sources[@]}"; "$WORK/host"
 "$R/transputer-tcc" -mt800 -static -nostdlib -I"$R/include" -I"$ROOT/transputer/native-headers" -I"$WORK" -DTG_TARGET_TEST=1 \
     -o "$WORK/test.elf" "$ROOT/transputer/tests/test_boot.S" "${sources[@]}" "$R/transputer-libtcc1-t800.a"

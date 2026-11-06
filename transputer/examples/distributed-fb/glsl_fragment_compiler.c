@@ -30,7 +30,7 @@ static void emit(parser *p,int op,int d,int a,int b,int w,int flags,int aux)
     i=&p->out->code[p->out->instruction_count++];i->op=op;i->dst=d;i->a=a;i->b=b;i->width=w;i->flags=flags;i->aux=aux;
 }
 static expr expression(parser *p);
-static expr primary(parser *p)
+static expr atom(parser *p)
 {
     expr e={0,0}; int i;
     if(eq(p->tok,"(")){next(p);e=expression(p);take(p,")");return e;}
@@ -41,6 +41,27 @@ static expr primary(parser *p)
         if(e.width!=2){p->bad=1;return e;}
         i=alloc(p);emit(p,TG_VM_TEXTURE2D,i,e.reg,0,4,0,p->out->symbols[sampler].slot);e.reg=i;e.width=4;return e;
     }
+    if(eq(p->tok,"dot")||eq(p->tok,"cross")||eq(p->tok,"normalize")||eq(p->tok,"max")||eq(p->tok,"pow")) {
+        int op=eq(p->tok,"dot")?TG_VM_DOT:eq(p->tok,"cross")?TG_VM_CROSS:eq(p->tok,"normalize")?TG_VM_NORMALIZE:eq(p->tok,"max")?TG_VM_MAX:TG_VM_POW;
+        int d,w,flags=0;expr a,b={0,0};next(p);take(p,"(");a=expression(p);
+        if(op!=TG_VM_NORMALIZE){take(p,",");b=expression(p);}take(p,")");
+        if(op==TG_VM_NORMALIZE)w=a.width;
+        else if(op==TG_VM_DOT||op==TG_VM_CROSS){if(a.width!=b.width||a.width<2||(op==TG_VM_CROSS&&a.width!=3)){p->bad=1;return a;}w=a.width;}
+        else {if(a.width!=b.width&&a.width!=1&&b.width!=1){p->bad=1;return a;}w=a.width>b.width?a.width:b.width;flags=(a.width==1&&w>1?1:0)|(b.width==1&&w>1?2:0);}
+        d=alloc(p);emit(p,op,d,a.reg,b.reg,w,flags,0);e.reg=d;e.width=op==TG_VM_DOT?1:w;return e;
+    }
+    if(width(p->tok)>1) {
+        int w=width(p->tok),d;expr a,b={0,0};next(p);take(p,"(");a=expression(p);
+        if(eq(p->tok,",")){next(p);b=expression(p);}take(p,")");d=alloc(p);
+        if(b.width) {
+            if(a.width!=w-1||b.width!=1){p->bad=1;return a;}
+            emit(p,TG_VM_MOV,d,a.reg,0,a.width,0,0);emit(p,TG_VM_SET_COMPONENT,d,b.reg,0,1,0,w-1);
+        } else {
+            if(a.width!=w&&a.width!=1){p->bad=1;return a;}
+            emit(p,TG_VM_MOV,d,a.reg,0,w,a.width==1?1:0,0);
+        }
+        e.reg=d;e.width=w;return e;
+    }
     if(digit(p->tok[0])) {
         float v=0,scale=1; int frac=0; const char *s=p->tok;
         while(*s){if(*s=='.'){if(frac){p->bad=1;return e;}frac=1;}else {if(frac)scale*=0.1f;v=v*10+(*s-'0');}s++;}
@@ -49,6 +70,20 @@ static expr primary(parser *p)
     i=tg_glsl_find_symbol(p->out,p->tok);
     if(i<0||p->out->symbols[i].kind==TG_GLSL_SAMPLER){p->bad=1;return e;}
     e.reg=p->out->symbols[i].slot;e.width=p->out->symbols[i].width;next(p);return e;
+}
+static expr primary(parser *p)
+{
+    expr a=atom(p);
+    while(!p->bad&&eq(p->tok,".")) {
+        int i,w=0,mask=0,d,family=-1;next(p);
+        for(i=0;p->tok[i];i++) {
+            char c=p->tok[i];int k=c=='x'||c=='r'||c=='s'?0:c=='y'||c=='g'||c=='t'?1:c=='z'||c=='b'||c=='p'?2:c=='w'||c=='a'||c=='q'?3:-1;
+            int group=(c=='x'||c=='y'||c=='z'||c=='w')?0:(c=='r'||c=='g'||c=='b'||c=='a')?1:(c=='s'||c=='t'||c=='p'||c=='q')?2:-1;
+            if(k<0||k>=a.width||w>=4||(family>=0&&family!=group)){p->bad=1;return a;}family=group;mask|=k<<(2*w++);
+        }
+        if(!w){p->bad=1;return a;}d=alloc(p);emit(p,TG_VM_SWIZZLE,d,a.reg,0,w,0,mask);a.reg=d;a.width=w;next(p);
+    }
+    return a;
 }
 static expr product(parser *p)
 {

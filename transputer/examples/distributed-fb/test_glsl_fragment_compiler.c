@@ -1,4 +1,10 @@
 #include "glsl_fragment_compiler.h"
+#ifndef __transputer__
+#include <math.h>
+static float root(float x){return sqrtf(x);}
+#else
+static float root(float x){return __fpsqrt(x);}
+#endif
 #ifndef TG_TARGET_TEST
 #include <stdio.h>
 #endif
@@ -24,6 +30,17 @@ static int run(void)
     if(tg_glsl_compile_fragment("uniform sampler2D x; varying vec3 uv; void main(){gl_FragColor=texture2D(x,uv);}",&p))return 6;
     if(tg_glsl_compile_fragment("varying vec4 x; void main(){gl_FragColor=unknown(x);}",&p))return 7;
     if(tg_glsl_compile_fragment("varying vec4 x; void main(){gl_FragColor=x;} garbage",&p))return 8;
+    if(!tg_glsl_compile_fragment("varying vec3 n; uniform vec3 l; uniform vec4 color; void main(){gl_FragColor=color*max(dot(normalize(n),l),0.0);}",&p))return 9;
+    tg_glsl_fragment_init(&p,&s);s.sqrt_fn=root;
+    s.reg[p.symbols[tg_glsl_find_symbol(&p,"n")].slot][0]=3;s.reg[p.symbols[tg_glsl_find_symbol(&p,"n")].slot][1]=4;
+    s.reg[p.symbols[tg_glsl_find_symbol(&p,"l")].slot][0]=1;
+    for(i=0;i<4;i++)s.reg[p.symbols[tg_glsl_find_symbol(&p,"color")].slot][i]=1;
+    if(tg_glsl_vm_run(&s,p.code,p.instruction_count)!=TG_VM_OK||!close_to(s.reg[p.output_register][0],0.6f))return 10;
+    if(!tg_glsl_compile_fragment("varying vec2 uv; uniform sampler2D tex; uniform vec4 tint; void main(){gl_FragColor=vec4(texture2D(tex,uv).rgb,tint.a);}",&p))return 11;
+    tg_glsl_fragment_init(&p,&s);s.texture[p.symbols[tg_glsl_find_symbol(&p,"tex")].slot]=&texture;
+    s.reg[p.symbols[tg_glsl_find_symbol(&p,"uv")].slot][0]=0.75f;s.reg[p.symbols[tg_glsl_find_symbol(&p,"tint")].slot][3]=0.25f;
+    if(tg_glsl_vm_run(&s,p.code,p.instruction_count)!=TG_VM_OK||!close_to(s.reg[p.output_register][1],128.0f/255.0f)||!close_to(s.reg[p.output_register][3],0.25f))return 12;
+    if(tg_glsl_compile_fragment("varying vec4 x; void main(){gl_FragColor=x.xgba;}",&p))return 13;
     return 0;
 }
 #ifdef TG_TARGET_TEST
