@@ -196,6 +196,7 @@ target_from_comment() {
 
 # A `Needs: fpu` line: any part with an FPU (not -mt425/-mt414).
 # `Needs: t805ops`: the T805/T425 additions such as lddevid (not -mt800/-mt414).
+# `Needs: t800ops`: T425/T800 block-move instructions (not -mt414).
 # `Needs: softfp`: the soft-float runtime, so only -mt425/-mt414.
 needs_from_comment() {
     sed -n '1,24p' "$1" | sed -n 's/.*Needs:[[:space:]]*\([a-z0-9]*\).*/\1/p' | head -n1 || true
@@ -360,7 +361,7 @@ run_one_test() {
         TEST_CFLAGS="$TP_EXTRA_CFLAGS $want"
     fi
     case "$(needs_from_comment "$file"):$TP_TARGET" in
-    fpu:-mt425|fpu:-mt414|t805ops:-mt800|t805ops:-mt414|softfp:|softfp:-mt[89]*)
+    fpu:-mt425|fpu:-mt414|t805ops:-mt800|t805ops:-mt414|t800ops:-mt414|softfp:|softfp:-mt[89]*)
         printf "SKIP %s: needs %s\n" "$name" "$(needs_from_comment "$file")"
         return 0 ;;
     esac

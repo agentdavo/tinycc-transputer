@@ -21,6 +21,14 @@ numbers and line numbers in the original review refer to the older source.
 | #23 | Timed transfers and a stopping trampoline were present. Workspace alignment fixed in `ce1da4af`. | `test_xlink` exercises timed transfers on soft channels. `test_conc_alt` starts processes at all four byte alignments. |
 | #24 | Fixed in the squash | The scheduler describes XWORD as binary. All 14 checks in `test_xword` printed a pass on the T9000 model. |
 
+MOVE2D coverage now checks rectangular copies with unequal byte strides,
+both conditional byte modes, zero width and zero rows, repeated setup, and
+side-effecting arguments on T425, T800 and T9000 emulators. A separate target
+test checks that all four builtins diagnose use on T414. The instruction
+pair requires fresh setup for each transfer and must not be separated by a
+deschedule. Source and destination overlap is outside the instruction's
+defined behavior.
+
 **Other findings and remaining work**
 
 - **Linker safety.** `310efe5b` validates boot load slots before writing and
