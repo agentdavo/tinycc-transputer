@@ -49,6 +49,15 @@ mixed old/new ABI runs. The POV box saves 4,119,717 decoded instructions and
 variadic controls remain byte-identical. Caller ABI and runtime archives
 remain unchanged.
 
+The subsequent [direct double-return acceptance](tests/bench/double-return-pairs-2026-11-06.md)
+loads existing result pairs directly into ABI B/A, removing the intermediate
+IRET/IRE2 copy. It passes all four workload gates including full glass,
+80 target/layout regressions, 32 mixed-version ABI runs and eight VLA-return
+runs. The full POV box removes 172,148 workspace instructions and 258,347
+modeled T800 cycles (0.00462%); its ELF shrinks 400 bytes. FPU opcode totals
+are unchanged. The focused Horner frame shrinks ten to eight words. Memory,
+volatile and cleanup-preserved return values retain their existing path.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |

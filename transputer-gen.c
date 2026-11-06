@@ -10411,7 +10411,23 @@ ST_FUNC void gfunc_return(CType *func_type) {
          * from the workspace slot into AReg before returning.
          */
         int bt = func_type->t & VT_BTYPE;
-        if (bt != VT_VOID) {
+        if ((bt == VT_DOUBLE || bt == VT_LDOUBLE) &&
+            (vtop->type.t & VT_BTYPE) == bt &&
+            vtop->r >= TREG_FA && vtop->r < NB_REGS &&
+            vtop->r2 >= TREG_FA && vtop->r2 < NB_REGS &&
+            vtop->r != vtop->r2) {
+            /* A canonical rvalue pair already contains the result bits.
+             * Load the actual high/low slots directly into B/A rather than
+             * copying them through IRET/IRE2 first.  Raw register numbers
+             * exclude lvalues, symbols and deferred bounds/cast flags, so
+             * this never evaluates an lvalue or bypasses its pending checks.
+             * Keep the caller's two-word ABI, including nonadjacent pairs. */
+            int lo = vtop->r, hi = vtop->r2;
+            tp_areg_invalidate();
+            abcreg_stack_depth = 0;
+            Tp_LDL(hi);
+            Tp_LDL(lo);
+        } else if (bt != VT_VOID) {
             /* Cleanups / prior calls may have left a stale AReg tag or
              * clobbered slot 7.  Force a full rematerialize into IRET and
              * then into hardware A so RET sees the true return value. */
