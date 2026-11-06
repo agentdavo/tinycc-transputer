@@ -60,6 +60,12 @@ def check_instructions(cc):
     Path("callee.S").write_text(".text\n.global target\ntarget: ret\n")
     for name in ("sites", "callee"):
         run(cc, "-c", name + ".S", "-o", name + ".o")
+    trace = run(cc, "-nostdlib", "sites.o", "callee.o", "-o", "trace",
+                env=dict(os.environ, T4_RELOC_SYMINFO="1"))
+    assert "RELOC_SYMINFO: sym=target " in trace, trace
+    trace = run(cc, "-nostdlib", "sites.o", "callee.o", "-o", "trace",
+                env=dict(os.environ, T4_RELOC_SYMINFO="not-a-symbol"))
+    assert "RELOC_SYMINFO:" not in trace, trace
     run(cc, "-r", "-nostdlib", "callee.o", "sites.o", "-o", "partial.o")
     for inputs in (["sites.o", "callee.o"], ["partial.o"]):
         log = run(cc, "-nostdlib", *inputs, "-o", "out", env=dict(os.environ, T4_CALL_AUDIT="1"))

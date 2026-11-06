@@ -43,7 +43,8 @@ numbers and line numbers in the original review refer to the older source.
   descriptors. Environment-controlled code generation, shared-file tracing,
   symbol-repair paths, unconditional `.tccsym` output, standalone assembler
   code, and kernel boot policy in the linker remain. The review's line-count
-  estimates describe the original commit.
+  estimates describe the original commit. `T4_RELOC_SYMINFO=1` now enables
+  tracing for all symbols, while another value remains a substring filter.
 - **§5, generated code.** Same-section call relaxation, argument staging,
   byte-load mask removal and capped inline memset are implemented. Debug
   and switch-table functions still bypass compiler relaxation, dense switch

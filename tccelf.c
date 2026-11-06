@@ -3385,7 +3385,7 @@ ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset
         reloc_summary = env && *env;
         env = getenv("T4_RELOC_SYMINFO");
         reloc_syminfo = env && *env;
-        reloc_syminfo_filter = getenv("T4_RELOC_SYMINFO");
+        reloc_syminfo_filter = env && strcmp(env, "1") ? env : NULL;
         env = getenv("T4_RELOC_LDC_MISMATCH");
         reloc_ldc_mismatch = env && *env;
         symmerge_debug = getenv("T4_SYMMERGE_DEBUG");
