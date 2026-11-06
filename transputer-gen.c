@@ -10374,6 +10374,75 @@ ST_FUNC void gfunc_call(int nb_args) {
     tcc_free(call_words.words);
 }
 
+/* Leave a canonical double's bits in ABI A=low, B=high without a copy
+ * through IRET/IRE2.  Decline before emitting anything if gv() still has
+ * work to do (bounds/casts/unaligned accesses in particular). */
+static int tp_push_double_return(SValue *sv, int bt)
+{
+    int fr, v;
+
+    if ((bt != VT_DOUBLE && bt != VT_LDOUBLE) ||
+        (sv->type.t & VT_BTYPE) != bt)
+        return 0;
+    fr = sv->r;
+    v = fr & VT_VALMASK;
+    if (fr >= TREG_FA && fr < NB_REGS &&
+        sv->r2 >= TREG_FA && sv->r2 < NB_REGS && fr != sv->r2) {
+        /* Use the actual high slot, including nonadjacent rvalue pairs. */
+        tp_areg_invalidate();
+        abcreg_stack_depth = 0;
+        Tp_LDL(sv->r2);
+        Tp_LDL(fr);
+        return 1;
+    }
+    if (!(fr & VT_LVAL) ||
+        (fr & ~(VT_VALMASK | VT_LVAL | VT_SYM)) ||
+        (sv->type.t & (VT_VOLATILE | VT_BITFIELD)) ||
+        tp_word_unaligned(sv) ||
+        ((fr & VT_SYM) && v != VT_CONST) ||
+        (v == VT_CONST && sv->sym && !(fr & VT_SYM)) ||
+        (v != VT_LOCAL && v != VT_LLOCAL && v != VT_CONST && v >= NB_REGS) ||
+        (v != VT_LOCAL && tp_t414()))
+        return 0;
+    if (v == VT_LOCAL) {
+        Sym *s;
+        /* gen_cast() strips qualifiers.  As for tp_push_simple(), require
+         * the original unescaped local symbol before reversing its reads:
+         * the scheduler can fold two LDLs followed by REV into swapped
+         * LDLs, so emitting low/high/REV alone is not a volatile barrier. */
+        for (s = local_stack; s; s = s->prev)
+            if (s == sv->sym &&
+                (s->r & (VT_VALMASK | VT_LVAL)) == (VT_LOCAL | VT_LVAL) &&
+                s->c == sv->c.i && !(s->type.t & (VT_VOLATILE | VT_BITFIELD)) &&
+                (s->type.t & VT_BTYPE) == bt && !s->a.addrtaken)
+                break;
+        if (!s)
+            return 0;
+    }
+
+    tp_areg_invalidate();
+    abcreg_stack_depth = 0;
+    if (v == VT_LOCAL) {
+        /* Proven nonvolatile storage needs no address or parked pair. */
+        emit_local_op(TP_OP_LDL, sv->c.i + 4);
+        abcreg_push(1);
+        emit_local_op(TP_OP_LDL, sv->c.i);
+        abcreg_push(1);
+    } else {
+        /* Share the canonical/spilled/symbol address handling with FP
+         * operands.  Alignment was checked above, so no byte-copy scratch
+         * is needed.  Read low then high, retaining both on the stack.
+         * T414 has no DUP and retains load()'s existing staging path. */
+        tp_emit_float_addr(sv);
+        Tp_DUP();
+        Tp_LDNL(0);
+        Tp_REV();
+        Tp_LDNL(1);
+        Tp_REV();
+    }
+    return 1;
+}
+
 ST_FUNC void gfunc_return(CType *func_type) {
     /* Handle struct returns - structs may occupy multiple vstack entries */
     if ((func_type->t & VT_BTYPE) == VT_STRUCT) {
@@ -10411,23 +10480,7 @@ ST_FUNC void gfunc_return(CType *func_type) {
          * from the workspace slot into AReg before returning.
          */
         int bt = func_type->t & VT_BTYPE;
-        if ((bt == VT_DOUBLE || bt == VT_LDOUBLE) &&
-            (vtop->type.t & VT_BTYPE) == bt &&
-            vtop->r >= TREG_FA && vtop->r < NB_REGS &&
-            vtop->r2 >= TREG_FA && vtop->r2 < NB_REGS &&
-            vtop->r != vtop->r2) {
-            /* A canonical rvalue pair already contains the result bits.
-             * Load the actual high/low slots directly into B/A rather than
-             * copying them through IRET/IRE2 first.  Raw register numbers
-             * exclude lvalues, symbols and deferred bounds/cast flags, so
-             * this never evaluates an lvalue or bypasses its pending checks.
-             * Keep the caller's two-word ABI, including nonadjacent pairs. */
-            int lo = vtop->r, hi = vtop->r2;
-            tp_areg_invalidate();
-            abcreg_stack_depth = 0;
-            Tp_LDL(hi);
-            Tp_LDL(lo);
-        } else if (bt != VT_VOID) {
+        if (bt != VT_VOID && !tp_push_double_return(vtop, bt)) {
             /* Cleanups / prior calls may have left a stale AReg tag or
              * clobbered slot 7.  Force a full rematerialize into IRET and
              * then into hardware A so RET sees the true return value. */

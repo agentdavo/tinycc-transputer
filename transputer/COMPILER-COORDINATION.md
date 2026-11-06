@@ -58,6 +58,17 @@ modeled T800 cycles (0.00462%); its ELF shrinks 400 bytes. FPU opcode totals
 are unchanged. The focused Horner frame shrinks ten to eight words. Memory,
 volatile and cleanup-preserved return values retain their existing path.
 
+The next [aligned-memory double-return acceptance](tests/bench/double-memory-returns-2026-11-06.md)
+extends the shared return helper to proven nonvolatile locals/parameters and
+aligned nonlocal memory. The local proof retains original-symbol and address-
+escape checks; nonlocal reads retain low/high order and T414's existing path.
+All four workload gates pass, including full glass, plus 80 target/layout,
+32 mixed-version ABI and eight VLA runs. The expanded return fixture has
+29 cases. Full POV box saves 527,204 decoded instructions and 863,402 modeled
+T800 cycles (0.01543%); the ELF shrinks 184 bytes. Identity-return frames
+shrink ten to one words. Opaque locals, packed accesses and pending checks
+retain their existing materialization. The archived worker chats stay closed.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
