@@ -33,6 +33,9 @@ int tg_glsl_vm_run(tg_vm_state *s,const tg_vm_instruction *code,unsigned int cou
         case TG_VM_MAT4_VEC4:
             if(in->width!=4 || in->a>TG_VM_REGS-4 || in->flags)return TG_VM_INVALID;
             for(i=0;i<4;i++) for(j=0;j<4;j++)r[i]+=s->reg[in->a+j][i]*b[j]; break;
+        case TG_VM_SET_COMPONENT:
+            if(in->width!=1 || in->aux>3 || in->flags)return TG_VM_INVALID;
+            s->reg[in->dst][in->aux]=a[0]; continue;
         default: return TG_VM_INVALID;
         }
         for(i=0;i<(in->op==TG_VM_DOT?1u:in->width);i++)s->reg[in->dst][i]=r[i];

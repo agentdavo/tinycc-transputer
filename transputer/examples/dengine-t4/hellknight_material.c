@@ -5,6 +5,9 @@
 #ifdef TG_DEMO_ROOM
 #include "demo_room.h"
 #include "../distributed-fb/gles2_uber_vertex.h"
+#ifdef TG_DEMO_VERTEX_VM
+#include "../distributed-fb/gles2_uber_vm.h"
+#endif
 #ifndef __transputer__
 #include <math.h>
 #endif
@@ -105,7 +108,11 @@ static void prepare(unsigned int frame)
             input.normal[0]=v->varying.normal[0]; input.normal[1]=ny; input.normal[2]=v->varying.normal[2];
             input.tangent[0]=cy*tx+sy*tz; input.tangent[1]=ty; input.tangent[2]=-sy*tx+cy*tz;
             input.uv[0]=hk_uv[i][0]; input.uv[1]=hk_uv[i][1];
+#ifdef TG_DEMO_VERTEX_VM
+            if(tg_uber_vertex_vm(&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
+#else
             if(tg_uber_vertex(&input,&shader_uniforms,&output)==TG_FRAGMENT_OK) {
+#endif
                 v->varying=output.varying;
                 v->x=(int)(80.0f+80.0f*output.clip[0]/output.clip[3]);
                 v->y=(int)(60.0f-60.0f*output.clip[1]/output.clip[3]);

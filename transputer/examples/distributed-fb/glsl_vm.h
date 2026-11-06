@@ -8,11 +8,12 @@
 #define TG_VM_MAX_INSTRUCTIONS 256
 enum { TG_VM_MOV=1,TG_VM_ADD,TG_VM_SUB,TG_VM_MUL,TG_VM_DIV,TG_VM_DOT,
        TG_VM_CROSS,TG_VM_NORMALIZE,TG_VM_MAX,TG_VM_POW,TG_VM_TEXTURE2D,
-       TG_VM_SWIZZLE,TG_VM_MAT4_VEC4 };
+       TG_VM_SWIZZLE,TG_VM_MAT4_VEC4,TG_VM_SET_COMPONENT };
 typedef struct { unsigned char op,dst,a,b,width,flags,aux; } tg_vm_instruction;
 /* flags bit 0/1 broadcasts the first/second source scalar. SWIZZLE aux
  * packs two-bit component indices. MAT4_VEC4 reads four column registers
- * starting at a and multiplies them by vector register b. */
+ * starting at a and multiplies them by vector register b. SET_COMPONENT
+ * writes source a.x to destination component aux. */
 typedef struct {
     float reg[TG_VM_REGS][4];
     const tg_fragment_texture *texture[TG_VM_TEXTURES];

@@ -34,6 +34,7 @@ case "$RENDERER" in
         if [[ ${ROOM_SHADOW:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_SHADOW=1); fi
         if [[ ${ROOM_BUMP:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_BUMP=1); fi
         if [[ ${ROOM_SPECULAR:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ROOM_SPECULAR=1); fi
+        if [[ ${VERTEX_VM:-0} == 1 ]]; then render_flags+=(-DTG_DEMO_VERTEX_VM=1); render_sources+=("$HERE/gles2_uber_vm.c" "$HERE/glsl_vm.c"); fi
         if [[ ${ANIMATE:-1} == 0 ]]; then render_flags+=(-DTG_DISABLE_ANIMATION=1); fi ;;
     *) echo 'Unknown RENDERER' >&2; exit 1 ;;
 esac

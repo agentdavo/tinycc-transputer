@@ -1,4 +1,5 @@
 #include "gles2_uber_vertex.h"
+#include "gles2_uber_vm.h"
 #ifndef __transputer__
 #include <math.h>
 static float root(float x) { return sqrtf(x); }
@@ -11,7 +12,7 @@ static float root(float x) { return __fpsqrt(x); }
 static int near(float a,float b) { float d=a-b; return d<0.0002f && d>-0.0002f; }
 static int run(void)
 {
-    static tg_uber_vertex_input in; static tg_uber_vertex_uniforms u; static tg_uber_vertex_output out;
+    static tg_uber_vertex_input in; static tg_uber_vertex_uniforms u; static tg_uber_vertex_output out,vm;
     int i;
     for(i=0;i<4;i++) { u.mvp[i*5]=1; u.light_mvp[i*5]=1; }
     u.mvp[12]=2; u.light_mvp[13]=3; u.sqrt_fn=root;
@@ -23,11 +24,18 @@ static int run(void)
     if(!near(out.varying.light[0],0.6f) || !near(out.varying.light[2],0.8f) ||
        !near(out.varying.half_vector[0],0.3162278f) || !near(out.varying.half_vector[2],0.9486833f)) return 3;
     if(!near(out.varying.uv[0],0.25f) || !near(out.varying.uv[1],0.75f)) return 4;
+    for(i=0;i<8;i++) {
+        int j; u.features=(unsigned int)i;
+        if(tg_uber_vertex(&in,&u,&out)!=TG_FRAGMENT_OK || tg_uber_vertex_vm(&in,&u,&vm)!=TG_FRAGMENT_OK) return 7;
+        for(j=0;j<4;j++) if(!near(out.clip[j],vm.clip[j]) || !near(out.varying.light_clip[j],vm.varying.light_clip[j]))return 8;
+        for(j=0;j<3;j++) if(!near(out.varying.light[j],vm.varying.light[j]) || !near(out.varying.half_vector[j],vm.varying.half_vector[j]) || !near(out.varying.normal[j],vm.varying.normal[j]))return 9;
+    }
     u.features=0;
     if(tg_uber_vertex(&in,&u,&out)!=TG_FRAGMENT_OK || !near(out.varying.normal[2],1) ||
        !(out.varying.half_vector[0]>0.102f && out.varying.half_vector[0]<0.104f)) return 5;
     u.light_position[0]=u.light_position[2]=0; out.clip[0]=123;
     if(tg_uber_vertex(&in,&u,&out)!=TG_FRAGMENT_UNDEFINED || out.clip[0]!=123) return 6;
+    if(tg_uber_vertex_vm(&in,&u,&out)!=TG_FRAGMENT_UNDEFINED || out.clip[0]!=123) return 10;
     return 0;
 }
 #ifdef TG_TARGET_TEST
