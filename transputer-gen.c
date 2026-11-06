@@ -5378,7 +5378,7 @@ void gen_builtin_f32tobf16(void)
         tp_gen_tvx_unary(TP_OPR_R32TOBF16);
 }
 
-/* Shared tail for the two accumulating dot products: the result is left in
+/* Shared tail for accumulating dot products: the result is left in
  * FAreg, which we spill to the float return slot like every other float value
  * in this backend. */
 static void tp_gen_tvx_dot_finish(int nb_args) {
@@ -5413,32 +5413,9 @@ void gen_builtin_mxfp4dot(void) {
     tp_gen_tvx_dot_finish(3);
 }
 
-void gen_builtin_bf16dot(void) {
-    /* float __bf16dot(const void *x, const void *y, int n, float acc)
-     * BF16DOT wants AReg = x, BReg = y, CReg = n, accumulator in FAreg. */
-    SValue xp = vtop[-3];
-    SValue yp = vtop[-2];
-    SValue n  = vtop[-1];
-    SValue acc = vtop[0];
-
-    save_reg(REG_FRET);
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&acc);   /* FAreg = acc */
-    tp_push_sv(&n);           /* n -> CReg */
-    tp_push_sv(&yp);          /* y -> BReg */
-    tp_push_sv(&xp);          /* x -> AReg */
-    emit_instr(TP_OP_OPR, TP_OPR_BF16DOT);
-    abcreg_pop(3);
-
-    tp_gen_tvx_dot_finish(4);
-}
-
-void gen_builtin_mxfp4gemv(void) {
-    /* float __mxfp4gemv(const void *blocks, const float *act, int n, float acc)
-     * MXFP4GEMV wants AReg = block array, BReg = activations, CReg = block
-     * count, accumulator in FAreg.  Defined as n chained MXFP4DOTs. */
+/* Four-argument dots take the accumulator in FA, argument 0 in A,
+ * argument 1 in B and argument 2 in C. */
+static void tp_gen_tvx_dot4(int opr) {
     SValue blk = vtop[-3];
     SValue act = vtop[-2];
     SValue n   = vtop[-1];
@@ -5448,15 +5425,18 @@ void gen_builtin_mxfp4gemv(void) {
     abcreg_stack_depth = 0;
     fpureg_stack_depth = 0;
 
-    tp_push_float_sv(&acc);   /* FAreg = acc */
-    tp_push_sv(&n);           /* n      -> CReg */
-    tp_push_sv(&act);         /* act    -> BReg */
-    tp_push_sv(&blk);         /* blocks -> AReg */
-    emit_instr(TP_OP_OPR, TP_OPR_MXFP4GEMV);
+    tp_push_float_sv(&acc);
+    tp_push_sv(&n);
+    tp_push_sv(&act);
+    tp_push_sv(&blk);
+    emit_instr(TP_OP_OPR, opr);
     abcreg_pop(3);
 
     tp_gen_tvx_dot_finish(4);
 }
+
+void gen_builtin_bf16dot(void) { tp_gen_tvx_dot4(TP_OPR_BF16DOT); }
+void gen_builtin_mxfp4gemv(void) { tp_gen_tvx_dot4(TP_OPR_MXFP4GEMV); }
 
 /* void __mxfp4unpk8(unsigned packed, float *dst) - 8 lanes, one instruction */
 void gen_builtin_mxfp4unpk8(void) {
@@ -5698,27 +5678,7 @@ void gen_builtin_stvxstate(void) {
     vtop--;
 }
 
-void gen_builtin_mxfp4gemvbf(void) {
-    /* float __mxfp4gemvbf(const void *blocks, const void *bf16_act,
-     *                     int n, float acc) */
-    SValue blk = vtop[-3];
-    SValue act = vtop[-2];
-    SValue n   = vtop[-1];
-    SValue acc = vtop[0];
-
-    save_reg(REG_FRET);
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&acc);
-    tp_push_sv(&n);
-    tp_push_sv(&act);
-    tp_push_sv(&blk);
-    emit_instr(TP_OP_OPR, TP_OPR_MXFP4GEMVBF);
-    abcreg_pop(3);
-
-    tp_gen_tvx_dot_finish(4);
-}
+void gen_builtin_mxfp4gemvbf(void) { tp_gen_tvx_dot4(TP_OPR_MXFP4GEMVBF); }
 
 void gen_builtin_f16tof32(void)
 {
@@ -5736,33 +5696,12 @@ void gen_builtin_f32tof16(void)
         tp_gen_tvx_unary(TP_OPR_R32TOF16);
 }
 
-/* float __q8dot(const void *blocks, const void *act, int n, float acc) */
-static void tp_gen_q8dot(int opr) {
-    SValue blk = vtop[-3];
-    SValue act = vtop[-2];
-    SValue n   = vtop[-1];
-    SValue acc = vtop[0];
-
-    save_reg(REG_FRET);
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&acc);
-    tp_push_sv(&n);
-    tp_push_sv(&act);
-    tp_push_sv(&blk);
-    emit_instr(TP_OP_OPR, opr);
-    abcreg_pop(3);
-
-    tp_gen_tvx_dot_finish(4);
-}
-
-void gen_builtin_q8dot(void)   { tp_gen_q8dot(TP_OPR_Q8DOT); }
-void gen_builtin_q8dotbf(void) { tp_gen_q8dot(TP_OPR_Q8DOTBF); }
-void gen_builtin_iq1mdot(void)   { tp_gen_q8dot(TP_OPR_IQ1MDOT); }
-void gen_builtin_iq2xxsdot(void) { tp_gen_q8dot(TP_OPR_IQ2XXSDOT); }
-void gen_builtin_iq3xxsdot(void) { tp_gen_q8dot(TP_OPR_IQ3XXSDOT); }
-void gen_builtin_qdot(void)      { tp_gen_q8dot(TP_OPR_QDOT); }
+void gen_builtin_q8dot(void)   { tp_gen_tvx_dot4(TP_OPR_Q8DOT); }
+void gen_builtin_q8dotbf(void) { tp_gen_tvx_dot4(TP_OPR_Q8DOTBF); }
+void gen_builtin_iq1mdot(void)   { tp_gen_tvx_dot4(TP_OPR_IQ1MDOT); }
+void gen_builtin_iq2xxsdot(void) { tp_gen_tvx_dot4(TP_OPR_IQ2XXSDOT); }
+void gen_builtin_iq3xxsdot(void) { tp_gen_tvx_dot4(TP_OPR_IQ3XXSDOT); }
+void gen_builtin_qdot(void)      { tp_gen_tvx_dot4(TP_OPR_QDOT); }
 
 /* ---------------------------------------------------------------------
  * T9 FPU Temps T0-T7.
