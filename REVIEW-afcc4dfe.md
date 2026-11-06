@@ -87,6 +87,10 @@ defined behavior.
   Simplifying two-word negation removed an extra struct-by-value helper call.
   Estimated cycles per 100 signed divisions fell from 163,522 to 124,322
   for `-65535`, and from 633,122 to 593,922 for `0x100000003`.
+  Directly initializing the division wrappers' word unions avoided additional
+  struct-return calls. The corresponding signed phases fell to 110,322 and
+  580,222 cycles, and the 32-bit-dividend unsigned phase fell from 60,422 to
+  47,022 cycles per 100 calls.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of

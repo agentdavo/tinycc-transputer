@@ -112,9 +112,10 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
 
 s64 __divdi3(s64 dividend, s64 divisor) {
     int neg = 0;
-    u64_u a = u64_from((u64)dividend);
-    u64_u b = u64_from((u64)divisor);
+    u64_u a, b;
     u64_u q;
+    a.v = (u64)dividend;
+    b.v = (u64)divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
     if (a.p.hi & 0x80000000u) { a = u64_neg(a); neg ^= 1; }
     if (b.p.hi & 0x80000000u) { b = u64_neg(b); neg ^= 1; }
@@ -124,17 +125,19 @@ s64 __divdi3(s64 dividend, s64 divisor) {
 }
 
 u64 __udivdi3(u64 dividend, u64 divisor) {
-    u64_u a = u64_from(dividend);
-    u64_u b = u64_from(divisor);
+    u64_u a, b;
+    a.v = dividend;
+    b.v = divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
     return u64_udivmod(a, b, 0).v;
 }
 
 s64 __moddi3(s64 dividend, s64 divisor) {
     int neg = 0;
-    u64_u a = u64_from((u64)dividend);
-    u64_u b = u64_from((u64)divisor);
+    u64_u a, b;
     u64_u r;
+    a.v = (u64)dividend;
+    b.v = (u64)divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
     if (a.p.hi & 0x80000000u) { a = u64_neg(a); neg ^= 1; }
     if (b.p.hi & 0x80000000u) b = u64_neg(b);
@@ -144,9 +147,10 @@ s64 __moddi3(s64 dividend, s64 divisor) {
 }
 
 u64 __umoddi3(u64 dividend, u64 divisor) {
-    u64_u a = u64_from(dividend);
-    u64_u b = u64_from(divisor);
+    u64_u a, b;
     u64_u r;
+    a.v = dividend;
+    b.v = divisor;
     if (b.p.hi == 0 && b.p.lo == 0) return 0;
     u64_udivmod(a, b, &r);
     return r.v;
