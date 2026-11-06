@@ -82,7 +82,8 @@ defined behavior.
   Replacing the loop's struct-by-value helper calls with direct word operations
   reduced that phase to 562,022 cycles. The `0xffffffff` phase fell from
   1,680,222 to 571,922 cycles. The regression includes borrow and high-bit
-  boundaries, and 100,000 host quotient/remainder comparisons passed.
+  boundaries. `test_u64_div_host.py` checks 100,000 deterministic signed and
+  unsigned quotient/remainder pairs against host integer arithmetic.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of
