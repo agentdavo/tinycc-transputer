@@ -17,9 +17,10 @@ case "$RENDERER" in
         upstream="$ROOT/transputer/examples/dEngine/src/matrix.c"
         [[ -f $upstream ]] || { echo 'dEngine clone missing: see transputer/examples/dengine-t4/README.md' >&2; exit 1; }
         render_sources=("$ROOT/transputer/examples/dengine-t4/cube_glsl.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$upstream" "$ROOT/transputer/examples/dengine-t4/stdio_stub.c") ;;
-    gl-uber)
-        render_sources=("$ROOT/transputer/examples/dengine-t4/uber_gl_array.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$HERE/gles2_vm_bridge.c" "$HERE/gles2_texture.c" "$HERE/glsl_fragment_compiler.c" "$HERE/glsl_fragment_shader.c" "$HERE/glsl_uber_vertex_shader.c" "$HERE/glsl_vm.c" "$HERE/gles2_fragment.c" "$HERE/material_raster.c")
-        render_include=();render_flags=(-DTG_GLES_VM_PROGRAM=1 -DTEST_LARGE_WORKSPACE=1) ;;
+    gl-uber|gl-uber-fbo)
+        render_sources=("$ROOT/transputer/examples/dengine-t4/uber_gl_array.c" "$HERE/gles2_draw.c" "$HERE/gles2_program.c" "$HERE/gles2_vm_bridge.c" "$HERE/gles2_texture.c" "$HERE/glsl_fragment_compiler.c" "$HERE/glsl_fragment_shader.c" "$HERE/glsl_uber_vertex_shader.c" "$HERE/glsl_vm.c" "$HERE/gles2_fragment.c" "$HERE/material_raster.c" "$HERE/material_clip.c")
+        render_include=();render_flags=(-DTG_GLES_VM_PROGRAM=1 -DTEST_LARGE_WORKSPACE=1)
+        if [[ $RENDERER == gl-uber-fbo ]]; then render_flags+=(-DTG_GLES_FRAMEBUFFER=1);render_sources+=("$HERE/gles2_framebuffer.c");fi ;;
     hellknight)
         upstream="$ROOT/transputer/examples/dEngine/src/matrix.c"
         [[ -f $upstream ]] || { echo 'dEngine clone missing: see transputer/examples/dengine-t4/README.md' >&2; exit 1; }
@@ -58,7 +59,7 @@ case "$NODES" in 1|2|4|8|16|32) ;; *) echo 'NODES must be 1, 2, 4, 8, 16, or 32'
 FRAMES=$((10#$FRAMES)); FPS=$((10#$FPS))
 if [[ -n ${WORK:-} ]]; then mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd); WORK=$(mktemp -d "$WORK/scale.XXXXXX"); else WORK=$(mktemp -d); fi
 cd "$WORK"
-if [[ $RENDERER == gl-uber ]]; then
+if [[ $RENDERER == gl-uber || $RENDERER == gl-uber-fbo ]]; then
     python3 - "$ROOT/transputer/examples/dEngine/data/shaders" "$WORK/uber_gl_sources.h" <<'PY'
 from pathlib import Path
 import sys
@@ -83,13 +84,17 @@ else: raise SystemExit('unterminated upstream OBJ draw function')
 PY
 fi
 if [[ $RENDERER == hellknight || $RENDERER == hellknight-material || $RENDERER == techdemo ]]; then
+    CHAR_TEXTURE_SIZE=${CHAR_TEXTURE_SIZE:-32};ROOM_TEXTURE_SIZE=${ROOM_TEXTURE_SIZE:-16}
+    [[ $CHAR_TEXTURE_SIZE =~ ^[0-9]+$ && $ROOM_TEXTURE_SIZE =~ ^[0-9]+$ ]] || { echo 'texture sizes must be integers' >&2;exit 1; }
+    CHAR_TEXTURE_SIZE=$((10#$CHAR_TEXTURE_SIZE));ROOM_TEXTURE_SIZE=$((10#$ROOM_TEXTURE_SIZE))
+    (( CHAR_TEXTURE_SIZE>=1 && CHAR_TEXTURE_SIZE<=64 && ROOM_TEXTURE_SIZE>=1 && ROOM_TEXTURE_SIZE<=32 )) || { echo 'texture sizes exceed the T4 preview bounds (character 1..64, room 1..32)' >&2;exit 1; }
     texture_args=()
     if [[ $RENDERER == hellknight-material || $RENDERER == techdemo ]]; then texture_args=(--texture "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight.png" --normal-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellknight_local.png" --specular-map "$ROOT/transputer/examples/dEngine/data/textures/monsters/hellBaronSpec.png" --animation "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight_idle2.md5anim"); fi
     python3 "$ROOT/transputer/examples/dengine-t4/export_hellknight.py" \
-        "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight.pvr.2bpp.md5mesh" "$WORK/hellknight_asset.h" "${texture_args[@]}"
+        "$ROOT/transputer/examples/dEngine/data/models/monsters/hellKnight/hellknight.pvr.2bpp.md5mesh" "$WORK/hellknight_asset.h" --texture-size "$CHAR_TEXTURE_SIZE" "${texture_args[@]}"
     render_include+=(-I"$WORK")
     render_flags+=(-DTEST_LARGE_WORKSPACE=1)
-    if [[ $RENDERER == techdemo ]]; then PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/transputer/examples/dengine-t4/export_room.py" "$ROOT/transputer/examples/dEngine" "$WORK/room_asset.h"; fi
+    if [[ $RENDERER == techdemo ]]; then PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/transputer/examples/dengine-t4/export_room.py" "$ROOT/transputer/examples/dEngine" "$WORK/room_asset.h" --texture-size "$ROOM_TEXTURE_SIZE"; fi
     if [[ $RENDERER == techdemo && ${FRAGMENT_SOURCE:-0} == uber ]]; then
         python3 - "$ROOT/transputer/examples/dEngine/data/shaders/f_uber.glsl" "$WORK/fragment_uber_source.h" <<'PY'
 from pathlib import Path

@@ -13,7 +13,7 @@ Path(sys.argv[2]).write_text('\n'.join(lines)+'\n')
 PY
 D="$ROOT/transputer/examples/distributed-fb"
 if [[ ${UBER_GL_DRAW:-0} == 1 ]];then test_source="$HERE/test_uber_gl_draw.c";marker='UBER DRAW';else test_source="$HERE/test_uber_api.c";marker='UBER API';fi
-sources=("$test_source" "$D/tinygl.c" "$D/gles2_subset.c" "$D/gles2_draw.c" "$D/gles2_program.c" "$D/gles2_vm_bridge.c" "$D/gles2_texture.c" "$D/glsl_fragment_compiler.c" "$D/glsl_fragment_shader.c" "$D/glsl_uber_vertex_shader.c" "$D/glsl_vm.c" "$D/gles2_fragment.c" "$D/material_raster.c")
+sources=("$test_source" "$D/tinygl.c" "$D/gles2_subset.c" "$D/gles2_draw.c" "$D/gles2_program.c" "$D/gles2_vm_bridge.c" "$D/gles2_texture.c" "$D/glsl_fragment_compiler.c" "$D/glsl_fragment_shader.c" "$D/glsl_uber_vertex_shader.c" "$D/glsl_vm.c" "$D/gles2_fragment.c" "$D/material_raster.c" "$D/material_clip.c")
 extra=();if [[ ${UBER_GL_FBO:-0} == 1 ]];then extra=(-DTG_GLES_FRAMEBUFFER=1);sources+=("$D/gles2_framebuffer.c");fi
 cc -O2 -DTG_GLES_VM_PROGRAM=1 "${extra[@]}" -I"$WORK" -o "$WORK/host" "${sources[@]}" -lm;"$WORK/host"
 "$R/transputer-tcc" -mt800 -static -nostdlib -I"$R/include" -I"$ROOT/transputer/native-headers" -I"$WORK" -DTG_GLES_VM_PROGRAM=1 "${extra[@]}" -DTG_TARGET_TEST=1 -o "$WORK/test.elf" "$ROOT/transputer/tests/test_boot.S" "${sources[@]}" "$R/transputer-libtcc1-t800.a"

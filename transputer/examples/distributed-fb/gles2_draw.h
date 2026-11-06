@@ -58,7 +58,7 @@ typedef struct tg_gles_draw_state {
     GLboolean persistent_cache;
     tg_gles_vertex_cache_entry cache[TG_GLES_VERTEX_CACHE_SIZE];
 #ifdef TG_GLES_VM_PROGRAM
-    int (*material_vertex)(const GLfloat attributes[TG_GLES_MAX_ATTRIBUTES][4],tg_material_vertex *,void *);
+    int (*material_vertex)(const GLfloat attributes[TG_GLES_MAX_ATTRIBUTES][4],tg_material_clip_vertex *,void *);
     int (*material_prepare)(void *);
     tg_material_fragment_fn material_fragment;
     void *material_user;

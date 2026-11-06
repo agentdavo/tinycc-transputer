@@ -14,6 +14,7 @@ static tg_gles_framebuffer_state framebuffers;static unsigned int scratch[32*24]
 static GLuint generated_shadow;
 #endif
 static const float pos[][3]={{-0.5f,0.5f,0},{-0.5f,-0.5f,0},{0.5f,0.5f,0}};
+static const float partial[][3]={{-2.0f,0.5f,0},{-0.5f,-0.5f,0},{0.5f,0.5f,0}},outside[][3]={{-2,0.5f,0},{-2,-0.5f,0},{-1.5f,0.5f,0}};
 static const float norm[][3]={{0,0,1},{0,0,1},{0,0,1}},uv[][2]={{0,0},{0,0},{0,0}};
 static const float tangent[][3]={{1,0,0},{1,0,0},{1,0,0}};
 static const unsigned char indices[]={0,1,2};
@@ -58,6 +59,15 @@ static int run(void)
     if(glGetError()!=GL_NO_ERROR||tile[40*80+50]!=0xffff0000u)return 6;
     glBindTexture(GL_TEXTURE_2D,tex[2]);tg_clear(&target,0xff000000u);glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);
     if(glGetError()!=GL_NO_ERROR||tile[40*80+50]!=0xff0000ffu)return 7;
+    if(mode==0) {
+        int k,count=0;glBindTexture(GL_TEXTURE_2D,tex[0]);a=glGetAttribLocation(p,"a_vertex");glVertexAttribPointer(a,3,GL_FLOAT,GL_FALSE,0,partial);
+        tg_clear(&target,0xff000000u);glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);
+        for(k=0;k<80*60;k++)if(tile[k]==0xffff0000u)count++;
+        if(glGetError()!=GL_NO_ERROR||!count)return 14;
+        glVertexAttribPointer(a,3,GL_FLOAT,GL_FALSE,0,outside);tg_clear(&target,0xff000000u);glDrawElements(GL_TRIANGLES,3,GL_UNSIGNED_BYTE,indices);
+        for(k=0;k<80*60;k++)if(tile[k]!=0xff000000u)return 15;
+        if(glGetError()!=GL_NO_ERROR)return 15;glVertexAttribPointer(a,3,GL_FLOAT,GL_FALSE,0,pos);
+    }
 #ifdef TG_GLES_FRAMEBUFFER
     if(mode==0) {
         GLuint ft,fb,rb,sv,sf,sp;unsigned char pixel[4];const tg_fragment_texture *view;float unpacked,shadow_matrix[16];int k;

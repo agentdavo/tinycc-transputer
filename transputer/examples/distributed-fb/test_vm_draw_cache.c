@@ -6,8 +6,8 @@ static unsigned int tile[80*60];static int depth[80*60],calls,offset;
 static tg_context target;static tg_gles_state gl;static tg_gles_draw_state draw;
 static const float points[][2]={{10,10},{10,40},{40,10},{40,40}};
 static const unsigned char index[]={0,1,2,2,1,3};
-static int vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_vertex *out,void *user)
-{ static const tg_fragment_varyings zero={0};(void)user;calls++;out->x=(int)a[0][0]+offset;out->y=(int)a[0][1];out->depth=1;out->inverse_w=1;out->varying=zero;return 1; }
+static int vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_clip_vertex *out,void *user)
+{ static const tg_fragment_varyings zero={0};(void)user;calls++;out->clip[0]=(a[0][0]+offset-80)/80;out->clip[1]=(60-a[0][1])/60;out->clip[2]=0;out->clip[3]=1;out->varying=zero;return 1; }
 static int fragment(void *user,const tg_fragment_varyings *v,float out[4])
 { (void)user;(void)v;out[0]=1;out[1]=out[2]=0;out[3]=1;return TG_FRAGMENT_OK; }
 static int run(void)

@@ -244,9 +244,9 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
     }
 #ifdef TG_GLES_VM_PROGRAM
     if(s->material_vertex) {
-        tg_material_vertex mv[3];GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];tg_material_draw_options options;
+        tg_material_clip_vertex mv[3];GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];tg_material_draw_options options;
 #ifndef TG_GLES_DISABLE_VM_VERTEX_CACHE
-        tg_material_vertex cached[TG_GLES_VERTEX_CACHE_SIZE];unsigned int cached_index[TG_GLES_VERTEX_CACHE_SIZE];unsigned char valid[TG_GLES_VERTEX_CACHE_SIZE];
+        tg_material_clip_vertex cached[TG_GLES_VERTEX_CACHE_SIZE];unsigned int cached_index[TG_GLES_VERTEX_CACHE_SIZE];unsigned char valid[TG_GLES_VERTEX_CACHE_SIZE];
         for(i=0;i<TG_GLES_VERTEX_CACHE_SIZE;i++)valid[i]=0;
 #endif
         if(!s->material_fragment || (s->material_prepare && !s->material_prepare(s->material_user))) { tgGlesSetError(GL_INVALID_OPERATION); return; }
@@ -271,7 +271,13 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
                 if(!s->material_vertex(values,&mv[j],s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
 #endif
             }
-            if(tg_material_triangle_config(c->target,&mv[0],&mv[1],&mv[2],s->material_fragment,s->material_user,&options)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
+            if(tg_material_clip_triangle(c->target,&mv[0],&mv[1],&mv[2],s->material_fragment,s->material_user,&options,c->viewport_x,c->viewport_y,c->viewport_width,c->viewport_height,
+#ifdef TG_GLES_FRAMEBUFFER
+               c->logical_height
+#else
+               120
+#endif
+               )) { tgGlesSetError(GL_INVALID_OPERATION);return; }
         }
         return;
     }

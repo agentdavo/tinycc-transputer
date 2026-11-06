@@ -108,9 +108,9 @@ static int prepare(void *user)
     }
     return 1;
 }
-static int shade_vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_vertex *v,void *user)
+static int shade_vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_clip_vertex *v,void *user)
 {
-    tg_gles_program *p=user;tg_uber_vertex_input in;tg_uber_vertex_output out;tg_gles_state *state=tgGlesCurrentState();int i;float w;
+    tg_gles_program *p=user;tg_uber_vertex_input in;tg_uber_vertex_output out;int i;
     if(p->vm_shadow) {
         static const tg_fragment_varyings zero={0};tg_vm_state *vm=&p->vm_vertex.vm;out.varying=zero;
         for(i=0;i<3;i++)vm->reg[p->vm_shadow_position][i]=a[p->vm_attributes[0]][i];
@@ -121,14 +121,7 @@ static int shade_vertex(const GLfloat a[TG_GLES_MAX_ATTRIBUTES][4],tg_material_v
         for(i=0;i<2;i++)in.uv[i]=a[p->vm_attributes[2]][i];
         if(tg_glsl_uber_vertex_run_prepared(&p->vm_vertex,&in,&out)!=TG_FRAGMENT_OK)return 0;
     }
-    w=out.clip[3];if(w<=0.01f || out.clip[0]<-w || out.clip[0]>w || out.clip[1]<-w || out.clip[1]>w || out.clip[2]<-w || out.clip[2]>w)return 0;
-    v->x=(int)(state->viewport_x+(1.0f+out.clip[0]/w)*0.5f*state->viewport_width);
-#ifdef TG_GLES_FRAMEBUFFER
-    v->y=(int)(state->logical_height-state->viewport_y-(1.0f+out.clip[1]/w)*0.5f*state->viewport_height);
-#else
-    v->y=(int)(120-state->viewport_y-(1.0f+out.clip[1]/w)*0.5f*state->viewport_height);
-#endif
-    v->depth=(int)((1.0f-out.clip[2]/w)*16777216.0f);v->inverse_w=1.0f/w;v->varying=out.varying;return 1;
+    for(i=0;i<4;i++)v->clip[i]=out.clip[i];v->varying=out.varying;return 1;
 }
 static int shade_fragment(void *user,const tg_fragment_varyings *v,float out[4])
 { tg_gles_program *p=user;return tg_glsl_shader_fragment(&p->vm_fragment,v,out); }

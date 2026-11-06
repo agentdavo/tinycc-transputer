@@ -3,7 +3,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd);ROOT=$(cd "$HERE/../../.." && pwd)
 R=${TCC_DIR:-$ROOT};T4=${T4_BIN:-$ROOT/transputer/t4/t4};WORK=$(mktemp -d);pid=
 trap 'if [[ -n $pid ]];then kill "$pid" 2>/dev/null||true;wait "$pid" 2>/dev/null||true;fi;rm -rf "$WORK"' EXIT
-sources=("$HERE/test_vm_draw_cache.c" "$HERE/gles2_draw.c" "$HERE/gles2_subset.c" "$HERE/tinygl.c" "$HERE/material_raster.c" "$HERE/gles2_fragment.c")
+sources=("$HERE/test_vm_draw_cache.c" "$HERE/gles2_draw.c" "$HERE/gles2_subset.c" "$HERE/tinygl.c" "$HERE/material_raster.c" "$HERE/material_clip.c" "$HERE/gles2_fragment.c")
 cc -O2 -DTG_GLES_VM_PROGRAM=1 -o "$WORK/host" "${sources[@]}";"$WORK/host"
 "$R/transputer-tcc" -mt800 -static -nostdlib -I"$R/include" -I"$ROOT/transputer/native-headers" -DTG_GLES_VM_PROGRAM=1 -DTG_TARGET_TEST=1 -o "$WORK/test.elf" "$ROOT/transputer/tests/test_boot.S" "${sources[@]}" "$R/transputer-libtcc1-t800.a"
 "$R/transputer-netload" "$WORK/test.elf" "$WORK/test.btl" >"$WORK/build.log" 2>&1
