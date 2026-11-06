@@ -12318,6 +12318,20 @@ static void tp_emit_fp_compare(int op)
  * (gsym_addr clears the history, and jumps and relocations break its
  * contiguity, which is checked). */
 
+/* Does a direct workspace instruction touch [base, base + words)?
+ * LDLP may feed a double-word access, so conservatively count two slots.
+ * At int limits the original callers' +/- 1 tests could overflow: refuse
+ * to move the instruction instead of relying on signed wraparound. */
+static int tp_hist_workspace_overlap(const struct tp_hist_ent *h,
+                                     int base, int words)
+{
+    int64_t start = h->val, first = base;
+    if (first <= INT32_MIN || first >= INT32_MAX)
+        return 1;
+    return start <= first + words - 1 &&
+           start + (h->opc == TP_OP_LDLP) >= first;
+}
+
 /* May h stand between the store and its consumer?  An integer instruction
  * that neither reads nor writes slot r (or r + 1, a double's pair). */
 static int tp_hist_fpu_neutral(const struct tp_hist_ent *h, int r)
@@ -12328,10 +12342,8 @@ static int tp_hist_fpu_neutral(const struct tp_hist_ent *h, int r)
     switch (h->opc) {
     case TP_OP_LDL:
     case TP_OP_STL:
-        return h->val != r && h->val != r + 1;
     case TP_OP_LDLP:
-        /* a double access through it touches val and val + 1 */
-        return h->val < r - 1 || h->val > r + 1;
+        return !tp_hist_workspace_overlap(h, r, 2);
     case TP_OP_LDC:
     case TP_OP_ADC:
     case TP_OP_LDNL:
@@ -12885,9 +12897,8 @@ static int tp_hist_int_neutral(const struct tp_hist_ent *h, int v)
     switch (h->opc) {
     case TP_OP_LDL:
     case TP_OP_STL:
-        return h->val != v;
     case TP_OP_LDLP:
-        return h->val != v && h->val != v - 1;
+        return !tp_hist_workspace_overlap(h, v, 1);
     case TP_OP_OPR:
         return tp_hist_fpu_neutral(h, -2);   /* its integer operations */
     }
