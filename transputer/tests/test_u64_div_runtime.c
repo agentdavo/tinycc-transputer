@@ -35,6 +35,12 @@ void test_main(void)
     ok &= __moddi3(4294967297LL, -7) == 5;
     ok &= __udivdi3(high, 0x8000000000000000ULL) == 1;
     ok &= __umoddi3(high, 0x8000000000000000ULL) == 0x7fffffffffffffffULL;
+    ok &= __udivdi3(high, 0x100000001ULL) == 0xffffffffULL;
+    ok &= __umoddi3(high, 0x100000001ULL) == 0;
+    ok &= __udivdi3(high, 0x8000000000000001ULL) == 1;
+    ok &= __umoddi3(high, 0x8000000000000001ULL) == 0x7ffffffffffffffeULL;
+    ok &= __udivdi3(high, high) == 1;
+    ok &= __umoddi3(high, high) == 0;
     ok &= __udivdi3(high, 0) == 0;
     ok &= __umoddi3(high, 0) == 0;
     for (i = 0; i < 64; i++) {

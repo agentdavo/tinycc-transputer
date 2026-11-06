@@ -58,7 +58,7 @@ static u64_u u64_shl1(u64_u v) {
 
 static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
     u64_u result, remainder;
-    int i = 63;
+    int i;
     result.p.hi = 0; result.p.lo = 0;
     remainder.p.hi = 0; remainder.p.lo = 0;
     if (divisor.p.hi == 0 && dividend.p.hi == 0) {
@@ -117,20 +117,17 @@ static u64_u u64_udivmod(u64_u dividend, u64_u divisor, u64_u *rem_out) {
          * loop divides the low word with that operation's remainder. */
         result.p.hi = dividend.p.hi / divisor.p.lo;
         remainder.p.lo = dividend.p.hi % divisor.p.lo;
-        i = 31;
+    } else {
+        /* A divisor of at least 2^32 is greater than the initial high word,
+         * so the first 32 restoring steps produce no quotient bits. */
+        remainder.p.lo = dividend.p.hi;
     }
-    for (; i >= 0; i--) {
+    for (i = 31; i >= 0; i--) {
         remainder = u64_shl1(remainder);
-        if (i >= 32)
-            remainder.p.lo |= (dividend.p.hi >> (i - 32)) & 1u;
-        else
-            remainder.p.lo |= (dividend.p.lo >> i) & 1u;
+        remainder.p.lo |= (dividend.p.lo >> i) & 1u;
         if (u64_cmp(remainder, divisor) >= 0) {
             remainder = u64_sub(remainder, divisor);
-            if (i >= 32)
-                result.p.hi |= (1u << (i - 32));
-            else
-                result.p.lo |= (1u << i);
+            result.p.lo |= (1u << i);
         }
     }
     if (rem_out) *rem_out = remainder;

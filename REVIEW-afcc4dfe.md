@@ -60,7 +60,8 @@ defined behavior.
   32-bit dividends and for larger dividends with divisors up to 65535. Larger
   power-of-two divisors use shifts. Other 32-bit divisors use 32
   iterations after dividing the high word. Other divisors wider than 32 bits
-  retain the 64-step loop. `test_u64_div_runtime` exercises
+  also use 32 restoring iterations because the high quotient word is zero.
+  `test_u64_div_runtime` exercises
   these paths on the T414, T800 and T9000 emulator models, including signed
   limits, negative divisors, zero divisors and divisors with the high bit set.
   `tests/bench/u64_div.sh` measures 100 calls with T4's estimated T800-cycle
@@ -76,6 +77,8 @@ defined behavior.
   The subsequent 64-bit power-of-two path reduced the `0x100000000` phase
   from 3,057,422 to 63,222 estimated cycles per 100 calls. The `0xffffffff`
   phase increased from 1,732,422 to 1,733,222 cycles.
+  Shortening the remaining loop reduced the non-power-of-two `0x100000003`
+  phase from 3,059,022 to 1,661,022 estimated cycles per 100 calls.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation
   scans to the current function. The linker indexes symbol names once before
   relocation, preserving the repair pass's symbol ordering and handling of

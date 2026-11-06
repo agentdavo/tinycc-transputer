@@ -28,4 +28,5 @@ void test_main(void)
     bench(0x123456789abcdef0ULL, 0xffffffffu);
     bench(0x123456789abcdef0ULL, 0x80000000u);
     bench(0x123456789abcdef0ULL, 0x100000000ULL);
+    bench(0x123456789abcdef0ULL, 0x100000003ULL);
 }
