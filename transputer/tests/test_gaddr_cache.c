@@ -9,7 +9,7 @@
  * address escapes and its one-past-the-end pointer (an LDLP of the old
  * frame top, which must not move), float locals the FPU reaches by
  * address, early returns, recursion, varargs, and more busy globals than
- * the pass keeps (four).
+ * the pass keeps (eight).
  */
 typedef __builtin_va_list va_list;
 #define va_start __builtin_va_start
@@ -19,7 +19,7 @@ typedef __builtin_va_list va_list;
 static int table[16];
 static int count;
 static float scale[4] = { 0.5f, 1.5f, 2.5f, -3.5f };
-static int g1, g2, g3, g4, g5;
+static int g1, g2, g3, g4, g5, g6, g7, g8, g9;
 static volatile int one = 1;
 
 static int fill(int n)
@@ -74,7 +74,9 @@ static int many(int x)
 {
     g1 = x; g2 = g1 + 1; g3 = g2 + g1; g4 = g3 + g2; g5 = g4 + g3;
     g1 += g5; g2 += g4; g3 += g1; g4 += g2; g5 += g3;
-    return g1 + g2 + g3 + g4 + g5;
+    g6 = x + 1; g7 = x + 2; g8 = x + 3; g9 = x + 4;
+    g6 += g6; g7 += g7; g8 += g8; g9 += g9;
+    return g1 + g2 + g3 + g4 + g5 + g6 + g7 + g8 + g9;
 }
 
 static int rec(int d)
@@ -123,7 +125,7 @@ void test_main(void)
 {
     /* from gcc on the host, -DHOST */
     static const int want[8] = {
-        17, 891, 66, -65560, -137, 288, 30724, 128
+        17, 891, 66, -65560, -137, 364, 30724, 128
     };
     volatile unsigned *uart = (volatile unsigned *)0x10000000u;
     const char *msg = "GADDROK\n";

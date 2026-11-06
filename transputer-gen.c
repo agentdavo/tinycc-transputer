@@ -8447,7 +8447,7 @@ bail:
  * TCC_TRANSPUTER_GADDR=0 turns it off; TP_GADDR_STATS=1 lists what it
  * keeps.
  */
-#define TPG_MAX 4
+#define TPG_MAX 8
 
 static struct {
     int n;                  /* symbols kept; 0 means nothing to commit */
