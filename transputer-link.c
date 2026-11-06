@@ -2937,7 +2937,7 @@ static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
     ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
     int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
     const char *e = tp_env("T4_LINK_RELAX");
-    uint8_t *marked;
+    uint8_t *marked, *marked_sections;
     Section *list = NULL;
     uint32_t saved = 0;
     int i, fns = 0, kept = 0;
@@ -2951,10 +2951,16 @@ static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
         return;
 
     marked = tcc_mallocz((size_t)nsym + 1);
+    marked_sections = tcc_mallocz(s1->nb_sections);
     for (i = 0; i < (int)(list->reloc->data_offset / sizeof(ElfW_Rel)); i++) {
         int si = (int)ELFW(R_SYM)(((ElfW_Rel *)list->reloc->data)[i].r_info);
-        if (si > 0 && si < nsym)
+        if (si > 0 && si < nsym) {
+            ElfW(Sym) *sym = &syms[si];
             marked[si] = 1;
+            if (ELFW(ST_TYPE)(sym->st_info) == STT_FUNC && sym->st_size
+                && sym->st_shndx > 0 && sym->st_shndx < s1->nb_sections)
+                marked_sections[sym->st_shndx] = 1;
+        }
     }
     for (i = 1; i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
@@ -2962,8 +2968,10 @@ static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
         if ((s->sh_flags & (SHF_ALLOC | SHF_EXECINSTR))
             != (SHF_ALLOC | SHF_EXECINSTR)
             || s->sh_type == SHT_NOBITS || !s->data || !before
-            || fixed[i] || !strcmp(s->name, ".text.start"))
+            || fixed[i] || !marked_sections[i] || !strcmp(s->name, ".text.start"))
             continue;
+        /* Unmarked sections can only become one unchanged block. Avoid
+         * their byte-sized maps and scans of all incoming relocations. */
         n = tp_lr_section(s1, i, marked, &fns, &kept);
         saved += n;
         if (n && (link_debug || tp_env_enabled("T4_RELAX_STATS")))
@@ -2974,6 +2982,7 @@ static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
         fprintf(stderr, "transputer_simple_link: relaxed %d functions "
                 "(%d kept whole), %u bytes\n", fns, kept, saved);
     tcc_free(marked);
+    tcc_free(marked_sections);
 }
 
 static void tp_optimize_code_sections(TCCState *s1, const uint8_t *fixed, int link_debug)
