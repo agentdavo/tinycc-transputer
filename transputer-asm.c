@@ -389,9 +389,24 @@ static unsigned int hash_string(const char *s) {
     return hash % HASH_TABLE_SIZE;
 }
 
-static int stricmp(const char *a, const char *b) {
-    while (*a && tolower(*a) == tolower(*b)) { a++; b++; }
-    return tolower(*a) - tolower(*b);
+static int tp_asm_stricmp(const char *a, const char *b) {
+    while (*a && tolower((unsigned char)*a) == tolower((unsigned char)*b)) { a++; b++; }
+    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
+/* Both assembler entry points use the same case-insensitive lookup.  The
+ * table's mnemonics are lowercase; reject different initials before comparing
+ * the rest, especially for the many extended secondary instructions. */
+static const InstructionInfo *find_instr(const char *name)
+{
+    const InstructionInfo *p;
+    int first = tolower((unsigned char)*name);
+
+    for (p = instructions; p->mnemonic; p++)
+        if (p->mnemonic[0] == first
+            && tp_asm_stricmp(p->mnemonic + 1, name + 1) == 0)
+            return p;
+    return NULL;
 }
 
 static char *strdup_lower(const char *s) {
@@ -444,13 +459,13 @@ static void free_assembler(AssemblerState *as) {
 static Label *find_label(AssemblerState *as, const char *name) {
     unsigned int idx;
     Label *l;
-    if (stricmp(name, "$") == 0) {
+    if (tp_asm_stricmp(name, "$") == 0) {
         as->current_address_label->value = as->current_address;
         return as->current_address_label;
     }
     idx = hash_string(name);
     for (l = as->label_table[idx]; l; l = l->next)
-        if (stricmp(l->name, name) == 0) return l;
+        if (tp_asm_stricmp(l->name, name) == 0) return l;
     return NULL;
 }
 
@@ -783,24 +798,24 @@ static void parse_line(AssemblerState *as) {
         asm_trace = env && *env;
         asm_sym_filter = env;
     }
-    if (stricmp(mnemonic, "equ") == 0) {
+    if (tp_asm_stricmp(mnemonic, "equ") == 0) {
         char label_name[MAX_LINE_LENGTH];
         sscanf(as->line_buffer, " %s", label_name);
         label_name[strlen(label_name)-1] = 0;
         define_equ(as, label_name, p);
-    } else if (stricmp(mnemonic, "db") == 0 || stricmp(mnemonic, ".db") == 0 ||
-               stricmp(mnemonic, ".byte") == 0) {
+    } else if (tp_asm_stricmp(mnemonic, "db") == 0 || tp_asm_stricmp(mnemonic, ".db") == 0 ||
+               tp_asm_stricmp(mnemonic, ".byte") == 0) {
         parse_db(as, p);
-    } else if (stricmp(mnemonic, "dw") == 0) {
+    } else if (tp_asm_stricmp(mnemonic, "dw") == 0) {
         add_data_item(as, 4, p);
-    } else if (stricmp(mnemonic, "ds") == 0) {
+    } else if (tp_asm_stricmp(mnemonic, "ds") == 0) {
         bool error = false;
         int count;
         AsmItem *it;
         count = evaluate_expression(as, p, &error);
         if (error) { report_error(as, "DS requires value", NULL); return; }
         it = add_item(as, count); it->type = ITEM_PAD;
-    } else if (stricmp(mnemonic, "align") == 0) {
+    } else if (tp_asm_stricmp(mnemonic, "align") == 0) {
         bool err = false;
         int n;
         int pad;
@@ -809,7 +824,7 @@ static void parse_line(AssemblerState *as) {
         if (err || n <= 0) { report_error(as, "ALIGN requires value", NULL); return; }
         pad = (-as->current_address) & (n - 1);
         if (pad) { it = add_item(as, pad); it->type = ITEM_PAD; }
-    } else if (stricmp(mnemonic, "include") == 0) {
+    } else if (tp_asm_stricmp(mnemonic, "include") == 0) {
         char fname[MAX_LINE_LENGTH];
         char path[1024];
         char *slash;
@@ -833,7 +848,7 @@ static void parse_line(AssemblerState *as) {
         if (!inc) { report_error(as, "Cannot open include", fname); return; }
         parse_file(as, inc, path);
         fclose(inc);
-    } else if (stricmp(mnemonic, "org") == 0) {
+    } else if (tp_asm_stricmp(mnemonic, "org") == 0) {
         bool error = false;
         int new_addr = evaluate_expression(as, p, &error);
         if (error) { report_error(as, "ORG requires value", NULL); return; }
@@ -843,27 +858,25 @@ static void parse_line(AssemblerState *as) {
             AsmItem *it = add_item(as, new_addr - as->current_address);
             it->type = ITEM_PAD;
         }
-    } else if (stricmp(mnemonic, "end") == 0 || mnemonic[0] == '.') {
+    } else if (tp_asm_stricmp(mnemonic, "end") == 0 || mnemonic[0] == '.') {
         /* ignore */
     } else {
-        int i;
-        for (i = 0; instructions[i].mnemonic; i++) {
-            if (stricmp(mnemonic, instructions[i].mnemonic) == 0) {
-                if (asm_trace && asm_sym_filter && p && strstr(p, asm_sym_filter)) {
-                    fprintf(stderr, "ASM_SYM: file=%s line=%d mnemonic=%s expr=%s\n",
-                            as->current_filename ? as->current_filename : "<unknown>",
-                            as->current_line, mnemonic, p);
-                }
-                if (instructions[i].code >= 0x30000) {
-                    /* selth/tret/goprot/syscall — ISM nfix0;opr */
-                    add_t9000_protect_opr(as, -(instructions[i].code & 0xFF));
-                } else if (instructions[i].code >= 0x20000) {
-                    add_fpentry_sequence(as, instructions[i].code);
-                } else {
-                    add_instruction_item(as, instructions[i].code, p);
-                }
-                return;
+        const InstructionInfo *info = find_instr(mnemonic);
+        if (info) {
+            if (asm_trace && asm_sym_filter && p && strstr(p, asm_sym_filter)) {
+                fprintf(stderr, "ASM_SYM: file=%s line=%d mnemonic=%s expr=%s\n",
+                        as->current_filename ? as->current_filename : "<unknown>",
+                        as->current_line, mnemonic, p);
             }
+            if (info->code >= 0x30000) {
+                /* selth/tret/goprot/syscall — ISM nfix0;opr */
+                add_t9000_protect_opr(as, -(info->code & 0xFF));
+            } else if (info->code >= 0x20000) {
+                add_fpentry_sequence(as, info->code);
+            } else {
+                add_instruction_item(as, info->code, p);
+            }
+            return;
         }
         report_error(as, "Unknown mnemonic", mnemonic);
     }
@@ -980,15 +993,6 @@ int transputer_asm_main(int argc, char **argv) {
 /* -------------------------------------------------------------- */
 /* Inline assembler support for TinyCC                            */
 /* -------------------------------------------------------------- */
-
-static const InstructionInfo *find_instr(const char *name)
-{
-    const InstructionInfo *p;
-    for (p = instructions; p->mnemonic; p++)
-        if (strcasecmp(p->mnemonic, name) == 0)
-            return p;
-    return NULL;
-}
 
 /* Encode an inline asm instruction, handling IP-relative adjustment for
  * J/CALL/CJ. Uses the unified tp_encode_instr from transputer-enc.h. */
