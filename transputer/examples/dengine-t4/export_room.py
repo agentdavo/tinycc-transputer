@@ -35,7 +35,8 @@ def materials(root):
         elif len(fields)>=2 and current and fields[0] in ('map_Kd','BumpKd','SpecKd','hasAlpha'): result[current][fields[0]]=fields[1]
     return result
 
-def export(root,output):
+def export(root,output,texture_size=16):
+    if not 1<=texture_size<=512: raise ValueError('texture size must be 1..512')
     scene,map_name,matrix,models=scene_data(root); lib=materials(root)
     verts=[]; triangles=[]; textures=[]; tex_index={}; mats=[]; mat_index={}
     def texture_id(path):
@@ -83,6 +84,7 @@ def export(root,output):
     out=['/* Generated locally from the original dEngine scene. */',
          f'#define ROOM_VERTEX_COUNT {len(verts)}',f'#define ROOM_TRIANGLE_COUNT {len(triangles)}',
          f'#define ROOM_TEXTURE_COUNT {len(textures)}',
+         f'#define ROOM_TEXTURE_SIZE {texture_size}',
          f'#define ROOM_MATERIAL_COUNT {len(mats)}',
          'typedef struct { float x,y,z,nx,ny,nz,u,v; } room_source_vertex;',
          'typedef struct { unsigned short a,b,c,material; float tx,ty,tz; } room_source_triangle;',
@@ -93,18 +95,18 @@ def export(root,output):
     out.extend('{%d,%d,%d,%d,%.8ff,%.8ff,%.8ff},'%row for row in triangles)
     out+=['};','static const room_source_material room_materials[ROOM_MATERIAL_COUNT]={']
     out.extend('{%d,%d,%d,%d},'%row for row in mats)
-    out+=['};','static const unsigned char room_textures[ROOM_TEXTURE_COUNT][16*16*4]={']
+    out+=['};','static const unsigned char room_textures[ROOM_TEXTURE_COUNT][ROOM_TEXTURE_SIZE*ROOM_TEXTURE_SIZE*4]={']
     for name in textures:
         pixels,w,h=read_rgba_png(root/name); out.append('{')
-        for y in range(16):
+        for y in range(texture_size):
             row=[]
-            for x in range(16):
-                i=((y*h//16)*w+x*w//16)*4; row.extend(pixels[i:i+4])
+            for x in range(texture_size):
+                i=((y*h//texture_size)*w+x*w//texture_size)*4; row.extend(pixels[i:i+4])
             out.append(','.join(map(str,row))+',')
         out.append('},')
     out.append('};'); output.write_text('\n'.join(out)+'\n')
     print(f'Exported {scene} / {map_name}: {len(models)} OBJ models, {len(verts)} vertices, {len(triangles)} triangles, {len(mats)} materials, {len(textures)} maps')
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__); p.add_argument('checkout',type=Path); p.add_argument('output',type=Path)
-    a=p.parse_args(); export(a.checkout,a.output)
+    p=argparse.ArgumentParser(description=__doc__); p.add_argument('checkout',type=Path); p.add_argument('output',type=Path);p.add_argument('--texture-size',type=int,default=16)
+    a=p.parse_args(); export(a.checkout,a.output,a.texture_size)

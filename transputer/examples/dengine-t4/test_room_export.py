@@ -21,6 +21,11 @@ with tempfile.TemporaryDirectory() as d:
     assert '#define ROOM_TRIANGLE_COUNT 653' in data
     assert '#define ROOM_TEXTURE_COUNT 51' in data
     assert '#define ROOM_MATERIAL_COUNT 29' in data
+    assert '#define ROOM_TEXTURE_SIZE 16' in data
     # First source vertex (14,46,-8), transformed by demo.map.
     assert '{164.00000000f,126.00000000f,122.00000000f,' in data
+    export(root,output,8);assert '#define ROOM_TEXTURE_SIZE 8' in output.read_text()
+    try: export(root,output,0)
+    except ValueError: pass
+    else: raise AssertionError('invalid texture size accepted')
 print('demo room export tests OK')

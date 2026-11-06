@@ -117,7 +117,9 @@ def main():
     parser.add_argument("--animation", type=Path)
     parser.add_argument("--normal-map", type=Path)
     parser.add_argument("--specular-map", type=Path)
+    parser.add_argument("--texture-size",type=int,default=32)
     args = parser.parse_args()
+    if not 1<=args.texture_size<=512: raise SystemExit("texture size must be 1..512")
     lines = args.mesh.read_text().splitlines()
     joints=[]
     for line in section(lines,"joints"):
@@ -211,14 +213,15 @@ def main():
         out.append("static const short hk_tangents[HK_VERTEX_COUNT][3]={")
         out.extend("{%d,%d,%d}," % n for n in vertex_tangents(points,vertices,triangles,list(vertex_normals(points,triangles))))
         out.append("};")
+    out.append(f"#define HK_TEXTURE_SIZE {args.texture_size}")
     for name,path in (("diffuse",args.texture),("bump",args.normal_map),("specular",args.specular_map)):
       if path:
         pixels,w,h=read_rgb_png(path)
-        out.append(f"static const unsigned char hk_{name}[32*32*4]={{")
-        for y in range(32):
+        out.append(f"static const unsigned char hk_{name}[HK_TEXTURE_SIZE*HK_TEXTURE_SIZE*4]={{")
+        for y in range(args.texture_size):
             row=[]
-            for x in range(32):
-                i=((y*h//32)*w+x*w//32)*3
+            for x in range(args.texture_size):
+                i=((y*h//args.texture_size)*w+x*w//args.texture_size)*3
                 row.extend((*pixels[i:i+3],255))
             out.append(",".join(map(str,row))+",")
         out.append("};")

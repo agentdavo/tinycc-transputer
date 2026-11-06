@@ -43,7 +43,7 @@ static void project(tg_material_vertex *v,clip_vertex p,const room_source_triang
 void demo_room_init(float center_x,float center_y,float center_z,float scale,float camera_x,float camera_y,float camera_z)
 {
     unsigned int i,j; cx=camera_x; cy=camera_y; cz=camera_z; projected_count=0; opaque_count=alpha_count=0;
-    for(i=0;i<ROOM_TEXTURE_COUNT;i++) { textures[i].rgba=room_textures[i]; textures[i].width=textures[i].height=16; textures[i].wrap_s=textures[i].wrap_t=TG_FRAG_REPEAT; }
+    for(i=0;i<ROOM_TEXTURE_COUNT;i++) { textures[i].rgba=room_textures[i]; textures[i].width=textures[i].height=ROOM_TEXTURE_SIZE; textures[i].wrap_s=textures[i].wrap_t=TG_FRAG_REPEAT; }
     for(i=0;i<ROOM_VERTEX_COUNT;i++) {
         const room_source_vertex *v=&room_vertices[i];
         float x=(v->x-center_x)*scale,y=(v->y-center_y)*scale,z=(v->z-center_z)*scale;

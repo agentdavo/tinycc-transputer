@@ -2,9 +2,15 @@
  * triangle, not dEngine's renderer or its demo scene. */
 #include "../distributed-fb/gles2_program.h"
 #include "../distributed-fb/gles2_texture.h"
+#ifdef TG_GLES_FRAMEBUFFER
+#include "../distributed-fb/gles2_framebuffer.h"
+#endif
 #include "uber_gl_sources.h"
 static tg_context target;static tg_gles_state gl;static tg_gles_draw_state draw;static tg_gles_program_state programs;
 static tg_gles_texture_state textures;static unsigned int arena[256];static GLuint program;static int initialized,failed;
+#ifdef TG_GLES_FRAMEBUFFER
+static tg_gles_framebuffer_state framebuffers;static unsigned int scratch[4];static int rb_arena[16];
+#endif
 /* Minimal ABI matching the fields consumed by dEngine's unmodified OBJ draw
  * function. The function body is extracted from the local checkout at build
  * time, not copied into this repository. */
@@ -35,6 +41,10 @@ static void init(void)
 {
     GLuint v,f,ids[4];GLint ok,a;int i;const unsigned char *pixels[]={base_pixels,bump_pixels,spec_pixels,shadow_pixels};
     tgGlesInit(&gl,&target);tgGlesMakeCurrent(&gl);tgGlesInitDraw(&gl,&draw,0,0,0,0);tgGlesInitPrograms(&gl,&programs);tgGlesInitTextures(&gl,&textures,arena,sizeof(arena));
+#ifdef TG_GLES_FRAMEBUFFER
+    tgGlesInitFramebuffers(&gl,&framebuffers,scratch,4,rb_arena,16);
+#endif
+    glEnable(GL_DEPTH_TEST);glEnable(GL_CULL_FACE);glCullFace(GL_BACK);
     v=compile(GL_VERTEX_SHADER,vertex_uber_source);f=compile(GL_FRAGMENT_SHADER,fragment_uber_source);
     program=glCreateProgram();glAttachShader(program,v);glAttachShader(program,f);glLinkProgram(program);glGetProgramiv(program,GL_LINK_STATUS,&ok);if(!ok)failed=1;glUseProgram(program);
     glUniformMatrix4fv(glGetUniformLocation(program,"lightPOVPVMMatrix"),1,GL_FALSE,identity);
@@ -49,6 +59,20 @@ static void init(void)
     a=glGetAttribLocation(program,"a_tangent");currentShader->vars[SHADER_ATT_TANGENT]=a;glEnableVertexAttribArray(a);
     a=glGetAttribLocation(program,"a_texcoord0");currentShader->vars[SHADER_ATT_UV]=a;glEnableVertexAttribArray(a);
     glGenTextures(4,ids);for(i=0;i<4;i++){glActiveTexture(GL_TEXTURE0+i);glBindTexture(GL_TEXTURE_2D,ids[i]);glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,i?1:2,i?1:2,0,GL_RGBA,GL_UNSIGNED_BYTE,pixels[i]);}
+#ifdef TG_GLES_FRAMEBUFFER
+    {
+        GLuint output,fb,rb;
+        glActiveTexture(GL_TEXTURE0);glGenTextures(1,&output);glBindTexture(GL_TEXTURE_2D,output);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,0);glBindTexture(GL_TEXTURE_2D,ids[0]);
+        glGenFramebuffers(1,&fb);glBindFramebuffer(GL_FRAMEBUFFER,fb);glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,output,0);
+        glGenRenderbuffers(1,&rb);glBindRenderbuffer(GL_RENDERBUFFER,rb);glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,2,2);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,rb);
+        if(glCheckFramebufferStatus(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE)failed=1;
+        glViewport(0,0,2,2);glClearColor(0.1f,0.15f,0.2f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glUniformMatrix4fv(glGetUniformLocation(program,"modelViewProjectionMatrix"),1,GL_FALSE,identity);RenderEntitiesOBJ(&object);
+        glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,160,120);glBindTexture(GL_TEXTURE_2D,output);
+    }
+#endif
     if(glGetError()!=GL_NO_ERROR)failed=1;initialized=1;
 }
 void cube_render_band(unsigned int *tile,int *depth,int quadrant,unsigned int frame,int row0,int row1)
