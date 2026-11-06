@@ -65,6 +65,8 @@ The upstream default configuration selects `data/scenes/techDemo.scene`,
 which references `data/map/demo.map`, a room made of OBJ meshes, the
 Hellknight MD5 mesh and its idle animation. This preview does not yet load or
 render that scene or run dEngine's GLSL renderer.
+Run `python3 transputer/examples/dengine-t4/audit_scene.py` to verify its
+directly named map assets and count room geometry in the local checkout.
 
 The expected upstream checkout is `transputer/examples/dEngine`, cloned from
 `https://github.com/fabiensanglard/dEngine.git`; the checkout used for these
