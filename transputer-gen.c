@@ -128,6 +128,7 @@ static void tp_switch_patch_fixed_slot(int offset, int opcode, int operand, int 
 static void switch_slot_add(int instr_offset, int slot_size, int opcode,
                             int target_addr, int base_addr);
 static void tp_builtin_return_void(void);
+static void tp_gen_flag_result(int opr);
 void tp_emit_1op(int opcode);
 void tp_emit_2op(int opcode, int b_idx, int a_idx);
 void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx);
@@ -151,7 +152,7 @@ struct tp_builtin_desc {
     const char *args;
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
-    short simple_op; /* simple void instruction */
+    short simple_op; /* simple instruction */
     short vector_op; /* TVX vector instruction */
     unsigned char cpu;
 };
@@ -185,8 +186,6 @@ void gen_builtin_csub0(void);
 void gen_builtin_fmul(void);
 void gen_builtin_lddevid(void);
 void gen_builtin_fpsqrt(void);
-void gen_builtin_testhalterr(void);
-void gen_builtin_testpranal(void);
 void gen_builtin_fpchkerr(void);
 void gen_builtin_fptesterr(void);
 void gen_builtin_fpseterr(void);
@@ -596,10 +595,10 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO, 0, TP_BUILTIN_T425 },
         { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0, 0, 0, TP_BUILTIN_T425 },
         { TOK___crcword,     "eee", gen_builtin_crcword,     0, 0, 0, TP_BUILTIN_T425 },
-        { TOK___ldtimer,     "",    gen_builtin_ldtimer,     0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___ldtimer,     "",    NULL,     0, TP_OPR_LDTIMER, 0, TP_BUILTIN_ANY },
         { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER, 0, TP_BUILTIN_ANY },
-        { TOK___mint,        "",    gen_builtin_mint,        0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___ldpri,       "",    gen_builtin_ldpri,       0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___mint,        "",    NULL,        0, TP_OPR_MINT, 0, TP_BUILTIN_ANY },
+        { TOK___ldpri,       "",    NULL,       0, TP_OPR_LDPRI, 0, TP_BUILTIN_ANY },
         { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP, 0, TP_BUILTIN_ANY },
         { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP, 0, TP_BUILTIN_ANY },
         { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP, 0, TP_BUILTIN_ANY },
@@ -625,12 +624,12 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___gajw,        "e",   gen_builtin_gajw,        0, 0, 0, TP_BUILTIN_ANY },
         { TOK___wcnt,        "e",   gen_builtin_wcnt,        0, 0, 0, TP_BUILTIN_ANY },
         { TOK___seterr, "", NULL, 1, TP_OPR_SETERR, 0, TP_BUILTIN_ANY },
-        { TOK___testerr,     "",    gen_builtin_testerr,     0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___testerr,     "",    NULL,     0, TP_OPR_TESTERR, 0, TP_BUILTIN_ANY },
         { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR, 0, TP_BUILTIN_ANY },
         { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR, 0, TP_BUILTIN_ANY },
-        { TOK___testhalterr, "",    gen_builtin_testhalterr, 0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___testhalterr, "",    NULL, 0, TP_OPR_TESTHALTERR, 0, TP_BUILTIN_ANY },
         { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR, 0, TP_BUILTIN_ANY },
-        { TOK___testpranal,  "",    gen_builtin_testpranal,  0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___testpranal,  "",    NULL,  0, TP_OPR_TESTPRANAL, 0, TP_BUILTIN_ANY },
         { TOK___norm,        "e",   gen_builtin_norm,        0, 0, 0, TP_BUILTIN_ANY },
         { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0, 0, 0, TP_BUILTIN_ANY },
         { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
@@ -1020,6 +1019,8 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
         tp_gen_vec2(desc->vector_op);
     else if (desc->vector_op)
         tp_gen_vec3(desc->vector_op);
+    else if (desc->simple_op && !desc->args[0] && !desc->returns_void)
+        tp_gen_flag_result(desc->simple_op);
     else if (desc->simple_op && !desc->args[0])
         emit_instr(TP_OP_OPR, desc->simple_op);
     else if (desc->simple_op && !desc->args[1])
@@ -4634,25 +4635,6 @@ void gen_builtin_resetch(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_ldpri(void) {
-    /* LOAD PRIORITY - no args, returns priority level */
-    emit_instr(TP_OP_OPR, TP_OPR_LDPRI);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/* Timer operations */
-void gen_builtin_ldtimer(void) {
-    /* LOAD TIMER - no args, returns current timer value */
-    emit_instr(TP_OP_OPR, TP_OPR_LDTIMER);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
 /* Memory operations */
 void gen_builtin_move(void) {
     /* MOVE: __move(dest, src, length)
@@ -4845,14 +4827,6 @@ void gen_builtin_wcnt(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_mint(void) {
-    /* MIN INTEGER constant: returns 0x80000000 (most negative int) */
-    emit_instr(TP_OP_OPR, TP_OPR_MINT);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
 
 /* Workspace operations */
 void gen_builtin_gajw(void) {
@@ -4864,18 +4838,7 @@ void gen_builtin_gajw(void) {
     Tp_STL(REG_IRET);
 }
 
-/* Error handling */
-void gen_builtin_testerr(void) {
-    /* TEST ERROR - no args, returns error flag */
-    emit_instr(TP_OP_OPR, TP_OPR_TESTERR);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/* testhalterr: the HaltOnError flag; testpranal: whether the processor
- * was analysed (it booted after Analyse, not Reset). */
+/* Emit a zero-operand instruction whose result is returned as a word. */
 static void tp_gen_flag_result(int opr)
 {
     emit_instr(TP_OP_OPR, opr);
@@ -4884,9 +4847,6 @@ static void tp_gen_flag_result(int opr)
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
 }
-void gen_builtin_testhalterr(void) { tp_gen_flag_result(TP_OPR_TESTHALTERR); }
-void gen_builtin_testpranal(void)  { tp_gen_flag_result(TP_OPR_TESTPRANAL); }
-
 
 /* The FPU error flag, which the FPU sets on an invalid operation,
  * overflow, division by zero or a non-finite fpint.  T800 and later. */
