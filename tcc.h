@@ -1927,11 +1927,8 @@ ST_FUNC void tp_cmp_hint_branch_true(int on);
 
 /* Transputer intrinsic generator functions (called from tccgen.c) */
 /* Channel I/O */
-void gen_builtin_in(void);
-void gen_builtin_out(void);
 void gen_builtin_outbyte(void);
 void gen_builtin_outword(void);
-void gen_builtin_tin(void);
 void gen_builtin_resetch(void);
 /* Memory operations */
 void gen_builtin_move(void);
@@ -1940,15 +1937,12 @@ void gen_builtin_crcbyte(void);
 void gen_builtin_crcword(void);
 /* Timer */
 void gen_builtin_ldtimer(void);
-void gen_builtin_sttimer(void);
 /* Utility */
 void gen_builtin_mint(void);
 void gen_builtin_wcnt(void);
 /* Process/scheduler */
 void gen_builtin_ldpri(void);
 void gen_builtin_startp(void);
-void gen_builtin_endp(void);
-void gen_builtin_runp(void);
 void gen_builtin_stopp(void);
 /* ALT operations */
 void gen_builtin_alt(void);
@@ -1957,7 +1951,6 @@ void gen_builtin_altend(void);
 void gen_builtin_talt(void);
 void gen_builtin_taltwt(void);
 void gen_builtin_enbc(void);
-void gen_builtin_enbs(void);
 void gen_builtin_enbt(void);
 void gen_builtin_disc(void);
 void gen_builtin_diss(void);

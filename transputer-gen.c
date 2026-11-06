@@ -605,11 +605,11 @@ static void tp_builtin_return_void(void)
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
 {
     static const struct tp_builtin_desc descs[] = {
-        { TOK___out,         "eee", gen_builtin_out,         1 },
-        { TOK___in,          "eee", gen_builtin_in,          1 },
+        { TOK___out,         "eee", NULL, 1, TP_OPR_OUT },
+        { TOK___in,          "eee", NULL, 1, TP_OPR_IN },
         { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1 },
         { TOK___outword,     "ee",  gen_builtin_outword,     1 },
-        { TOK___tin,         "e",   gen_builtin_tin,         1 },
+        { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN },
         { TOK___resetch,     "e",   gen_builtin_resetch,     0 },
         { TOK___move,        "eee", gen_builtin_move,        1 },
         { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT },
@@ -619,12 +619,12 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0 },
         { TOK___crcword,     "eee", gen_builtin_crcword,     0 },
         { TOK___ldtimer,     "",    gen_builtin_ldtimer,     0 },
-        { TOK___sttimer,     "e",   gen_builtin_sttimer,     1 },
+        { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER },
         { TOK___mint,        "",    gen_builtin_mint,        0 },
         { TOK___ldpri,       "",    gen_builtin_ldpri,       0 },
         { TOK___startp,      "ee",  gen_builtin_startp,      1 },
-        { TOK___endp,        "e",   gen_builtin_endp,        1 },
-        { TOK___runp,        "e",   gen_builtin_runp,        1 },
+        { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP },
+        { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP },
         { TOK___stopp,       "",    gen_builtin_stopp,       1 },
         { TOK___alt,         "",    gen_builtin_alt,         1 },
         { TOK___altwt,       "",    gen_builtin_altwt,       1 },
@@ -632,7 +632,7 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___talt,        "",    gen_builtin_talt,        1 },
         { TOK___taltwt,      "",    gen_builtin_taltwt,      1 },
         { TOK___enbc,        "ee",  gen_builtin_enbc,        1 },
-        { TOK___enbs,        "e",   gen_builtin_enbs,        1 },
+        { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS },
         { TOK___enbt,        "ee",  gen_builtin_enbt,        1 },
         { TOK___disc,        "eee", gen_builtin_disc,        0 },
         { TOK___diss,        "ee",  gen_builtin_diss,        0 },
@@ -4576,22 +4576,6 @@ ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str) {
  * gv(RC_INT) loads vtop into AReg (emitting LDL/LDC), pushing previous A->B->C
  */
 
-void gen_builtin_in(void) {
-    /* Channel Input: __in(length, chan, buf)
-     * eval: C=buf(2), B=chan(1), A=length(0) */
-    tp_emit_3op(TP_OPR_IN, 2, 1, 0);
-}
-
-void gen_builtin_out(void) {
-    /* Channel Output: __out(length, chan, buf)
-     * eval: C=buf(2), B=chan(1), A=length(0) */
-    tp_emit_3op(TP_OPR_OUT, 2, 1, 0);
-}
-
-void gen_builtin_tin(void) {
-    tp_emit_1op(TP_OPR_TIN);
-}
-
 void gen_builtin_outbyte(void) {
     /* __outbyte(chan, byte): A=byte(1), B=chan(0) */
     tp_emit_2op(TP_OPR_OUTBYTE, 0, 1);
@@ -4649,11 +4633,6 @@ void gen_builtin_taltwt(void) {
  * enable the wrong thing.  That is why link multiplexing could not be
  * expressed here.
  */
-void gen_builtin_enbs(void) {
-    /* ENABLE SKIP: __enbs(guard) - AReg=guard */
-    tp_emit_1op(TP_OPR_ENBS);
-}
-
 void gen_builtin_enbc(void) {
     /* ENABLE CHANNEL: __enbc(guard, chan) - AReg=guard, BReg=chan */
     tp_emit_2op(TP_OPR_ENBC, 1, 0);
@@ -4716,16 +4695,6 @@ void gen_builtin_startp(void) {
     tp_emit_2op(TP_OPR_STARTP, 1, 0);
 }
 
-void gen_builtin_endp(void) {
-    /* A points to the successor's join record. */
-    tp_emit_1op(TP_OPR_ENDP);
-}
-
-void gen_builtin_runp(void) {
-    /* RUN PROCESS: __runp(descriptor) - AReg = Wptr | priority */
-    tp_emit_1op(TP_OPR_RUNP);
-}
-
 void gen_builtin_stopp(void) {
     /* STOP PROCESS - no args */
     emit_instr(TP_OP_OPR, TP_OPR_STOPP);
@@ -4748,11 +4717,6 @@ void gen_builtin_ldtimer(void) {
     vpushi(0);
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
-}
-
-void gen_builtin_sttimer(void) {
-    /* STORE TIMER: __sttimer(value) - AReg=value */
-    tp_emit_1op(TP_OPR_STTIMER);
 }
 
 /* Memory operations */
