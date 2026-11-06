@@ -3,6 +3,9 @@
 #define DISTFB_GLES2_DRAW_H
 #include <stddef.h>
 #include "gles2_subset.h"
+#ifdef TG_GLES_VM_PROGRAM
+#include "material_raster.h"
+#endif
 #define GL_BYTE 0x1400
 #define GL_UNSIGNED_BYTE 0x1401
 #define GL_SHORT 0x1402
@@ -54,6 +57,12 @@ typedef struct tg_gles_draw_state {
     void *vertex_user;
     GLboolean persistent_cache;
     tg_gles_vertex_cache_entry cache[TG_GLES_VERTEX_CACHE_SIZE];
+#ifdef TG_GLES_VM_PROGRAM
+    int (*material_vertex)(const GLfloat attributes[TG_GLES_MAX_ATTRIBUTES][4],tg_material_vertex *,void *);
+    int (*material_prepare)(void *);
+    tg_material_fragment_fn material_fragment;
+    void *material_user;
+#endif
 } tg_gles_draw_state;
 /* The caller owns the arena and state for the lifetime of the GL context.
  * Storage is split into eight equal aligned slots; no malloc is needed. */

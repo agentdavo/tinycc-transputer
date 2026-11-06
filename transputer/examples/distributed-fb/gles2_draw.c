@@ -51,6 +51,9 @@ void tgGlesInitDraw(tg_gles_state *c, tg_gles_draw_state *s, void *arena,
     int i;
     s->arena=(unsigned char *)arena; s->slot_size=(arena_size/TG_GLES_MAX_BUFFERS)&~3u;
     s->array_buffer=s->element_buffer=0; s->vertex=vertex; s->vertex_user=user; s->persistent_cache=GL_FALSE;
+#ifdef TG_GLES_VM_PROGRAM
+    s->material_vertex=0;s->material_prepare=0;s->material_fragment=0;s->material_user=0;
+#endif
     tgGlesInvalidateVertexCache(s);
     for (i=0;i<TG_GLES_MAX_BUFFERS;i++) {
         s->buffers[i].name=0; s->buffers[i].size=0; s->buffers[i].usage=GL_STATIC_DRAW;
@@ -183,9 +186,9 @@ static GLfloat component(const unsigned char *p, GLenum type, GLboolean norm)
     if (type==GL_SHORT) { int x=(int)(int16_t)v.u; return norm ? (x==-32768 ? -1.0f : (GLfloat)x/32767.0f) : (GLfloat)x; }
     return norm ? (GLfloat)(uint16_t)v.u/65535.0f : (GLfloat)(uint16_t)v.u;
 }
-static int vertex(tg_gles_draw_state *s, unsigned int index, tg_screen_vertex *out)
+static int load_attributes(tg_gles_draw_state *s,unsigned int index,GLfloat values[TG_GLES_MAX_ATTRIBUTES][4])
 {
-    GLfloat values[TG_GLES_MAX_ATTRIBUTES][4]; int i,j;
+    int i,j;
     for (i=0;i<TG_GLES_MAX_ATTRIBUTES;i++) {
         tg_gles_attribute *a=&s->attributes[i]; const unsigned char *p; size_t offset, stride, bytes;
         values[i][0]=values[i][1]=values[i][2]=0.0f; values[i][3]=1.0f;
@@ -204,8 +207,10 @@ static int vertex(tg_gles_draw_state *s, unsigned int index, tg_screen_vertex *o
         }
         for (j=0;j<a->size;j++) values[i][j]=component(p+j*type_size(a->type),a->type,a->normalized);
     }
-    return s->vertex(values,out,s->vertex_user);
+    return 1;
 }
+static int vertex(tg_gles_draw_state *s,unsigned int index,tg_screen_vertex *out)
+{ GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];if(!load_attributes(s,index,values))return 0;return s->vertex(values,out,s->vertex_user); }
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
     tg_gles_draw_state *s=draw(); tg_gles_state *c=tgGlesCurrentState();
@@ -214,7 +219,11 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
     if (mode!=GL_TRIANGLES) { tgGlesSetError(GL_INVALID_ENUM); return; }
     if (count<0) { tgGlesSetError(GL_INVALID_VALUE); return; }
     if (type!=GL_UNSIGNED_BYTE && type!=GL_UNSIGNED_SHORT) { tgGlesSetError(GL_INVALID_ENUM); return; }
+#ifdef TG_GLES_VM_PROGRAM
+    if (!s->vertex && !s->material_vertex) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+#else
     if (!s->vertex) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+#endif
     if (!count) return;
     width=(type==GL_UNSIGNED_BYTE) ? 1 : 2;
     if ((size_t)count>SIZE_MAX/(size_t)width) { tgGlesSetError(GL_INVALID_OPERATION); return; }
@@ -227,6 +236,22 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
         if (!indices) { tgGlesSetError(GL_INVALID_OPERATION); return; }
         p=(const unsigned char *)indices;
     }
+#ifdef TG_GLES_VM_PROGRAM
+    if(s->material_vertex) {
+        tg_material_vertex mv[3];GLfloat values[TG_GLES_MAX_ATTRIBUTES][4];
+        if(!s->material_fragment || (s->material_prepare && !s->material_prepare(s->material_user))) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+        for(i=0;i+2<count;i+=3) {
+            for(j=0;j<3;j++) {
+                unsigned int index;
+                if(width==1)index=p[i+j];else { union { uint16_t value; unsigned char b[2]; } x;x.b[0]=p[(i+j)*2];x.b[1]=p[(i+j)*2+1];index=x.value; }
+                if(!load_attributes(s,index,values))return;
+                if(!s->material_vertex(values,&mv[j],s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
+            }
+            if(tg_material_triangle_custom(c->target,&mv[0],&mv[1],&mv[2],s->material_fragment,s->material_user)) { tgGlesSetError(GL_INVALID_OPERATION);return; }
+        }
+        return;
+    }
+#endif
     /* Client arrays and arbitrary external callbacks can mutate without a GL
      * command. Keep their cache only within this draw; the GLSL program path
      * opts in to cross-draw caching when every enabled attribute is a VBO. */

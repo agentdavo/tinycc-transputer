@@ -1,4 +1,7 @@
 #include "gles2_program.h"
+#ifdef TG_GLES_VM_PROGRAM
+#include "gles2_vm_bridge.h"
+#endif
 
 /* The compiler below implements one useful GLSL ES grammar, rather than
  * reporting success for shader features the fixed rasterizer cannot run. */
@@ -104,6 +107,9 @@ static int preprocess(const char *src,char *out,int cap)
             if(same(op,"define")) {
                 if(!isletter(name[0]))return 0;
                 if(active && !found) { if(nname>=16)return 0; copy(names[nname++],name,32); }
+            } else if(same(op,"undef")) {
+                if(!isletter(name[0]))return 0;
+                if(active && found) { for(i=0;i<nname;i++)if(same(names[i],name)){nname--;if(i<nname)copy(names[i],names[nname],32);break;} }
             } else if(same(op,"ifdef") || same(op,"ifndef")) {
                 if(!isletter(name[0]) || depth>=16)return 0;
                 parent[depth]=(unsigned char)active; condition[depth]=(unsigned char)(same(op,"ifdef")?found:!found);
@@ -276,7 +282,9 @@ void glLinkProgram(GLuint id)
             j=tg_glsl_find_symbol(&v->ir,f->ir.symbols[i].name);
             if(j>=0 && ((v->ir.symbols[j].kind!=f->ir.symbols[i].kind) || (v->ir.symbols[j].width!=f->ir.symbols[i].width))) { p->log="uniform interface mismatch"; return; }
         }
-        p->vertex_ir=v->ir;p->fragment_ir=f->ir;p->vm_linked=GL_TRUE;p->linked=GL_TRUE;p->log="";return;
+        p->vertex_ir=v->ir;p->fragment_ir=f->ir;
+        if(!tgGlesVmLink(p)) { p->log="unsupported programmable shader interface";return; }
+        p->vm_linked=GL_TRUE;p->linked=GL_TRUE;p->log="";return;
     }
 #endif
     copy(p->attribute,v->attribute,32); copy(p->matrix_name,v->matrix,32); copy(p->color_name,f->color,32);
@@ -328,6 +336,9 @@ void glUseProgram(GLuint id)
     if(!c->draw) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     if(!id) {
         old=s->current_program; s->current_program=0; c->draw->vertex=0; c->draw->persistent_cache=0;
+#ifdef TG_GLES_VM_PROGRAM
+        c->draw->material_vertex=0;c->draw->material_fragment=0;c->draw->material_prepare=0;c->draw->material_user=0;
+#endif
         tgGlesInvalidateVertexCache(c->draw);
         if(old && s->programs[old-1].deleted) release_program(s,old);
         return;
@@ -335,8 +346,12 @@ void glUseProgram(GLuint id)
     p=program(s,id); if(!p) return;
     if(!p->linked) { tgGlesSetError(GL_INVALID_OPERATION); return; }
 #ifdef TG_GLES_VM_PROGRAM
-    /* The indexed programmable draw bridge is not wired yet. */
-    if(p->vm_linked) { tgGlesSetError(GL_INVALID_OPERATION); return; }
+    if(p->vm_linked) {
+        old=s->current_program;s->current_program=id;tgGlesVmUse(p,c->draw);
+        if(old && old!=id && s->programs[old-1].deleted)release_program(s,old);
+        return;
+    }
+    c->draw->material_vertex=0;c->draw->material_fragment=0;c->draw->material_prepare=0;c->draw->material_user=0;
 #endif
     old=s->current_program; s->current_program=id; c->draw->vertex=program_vertex; c->draw->vertex_user=p; c->draw->persistent_cache=1; c->target->texture=p->texture;
     tgGlesInvalidateVertexCache(c->draw);
@@ -346,12 +361,18 @@ GLint glGetAttribLocation(GLuint id, const GLchar *name)
 {
     tg_gles_program_state *s=state(); tg_gles_program *p; if(!s || !(p=program(s,id))) return -1;
     if(!p->linked) { tgGlesSetError(GL_INVALID_OPERATION); return -1; }
+#ifdef TG_GLES_VM_PROGRAM
+    if(p->vm_linked)return tgGlesVmAttrib(p,name);
+#endif
     return name && same(name,p->attribute) ? (GLint)p->attribute_index : -1;
 }
 GLint glGetUniformLocation(GLuint id, const GLchar *name)
 {
     tg_gles_program_state *s=state(); tg_gles_program *p; if(!s || !(p=program(s,id))) return -1;
     if(!p->linked) { tgGlesSetError(GL_INVALID_OPERATION); return -1; }
+#ifdef TG_GLES_VM_PROGRAM
+    if(p->vm_linked)return tgGlesVmUniformLocation(p,name);
+#endif
     if(name && same(name,p->matrix_name)) return 0;
     if(name && same(name,p->color_name)) return 1;
     return -1;
@@ -363,6 +384,10 @@ void glUniformMatrix4fv(GLint loc, GLsizei count, GLboolean transpose, const GLf
     if(count<0 || transpose) { tgGlesSetError(GL_INVALID_VALUE); return; }
     if(!s->current_program) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     if(loc==-1 || !count) return;
+#ifdef TG_GLES_VM_PROGRAM
+    p=&s->programs[s->current_program-1];
+    if(p->vm_linked) { if(count!=1 || !value || !tgGlesVmUniformMatrix(p,loc,value))tgGlesSetError(GL_INVALID_OPERATION);return; }
+#endif
     if(loc!=0 || count!=1 || !value) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     p=&s->programs[s->current_program-1]; for(i=0;i<16;i++) p->matrix[i]=value[i];
     tgGlesInvalidateVertexCache(tgGlesCurrentState()->draw);
@@ -379,8 +404,32 @@ void glUniform4f(GLint loc, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
     if(!s) return;
     if(!s->current_program) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     if(loc==-1) return;
+#ifdef TG_GLES_VM_PROGRAM
+    p=&s->programs[s->current_program-1];
+    if(p->vm_linked) { GLfloat values[4];values[0]=x;values[1]=y;values[2]=z;values[3]=w;if(!tgGlesVmUniformVector(p,loc,values,4))tgGlesSetError(GL_INVALID_OPERATION);return; }
+#endif
     if(loc!=1) { tgGlesSetError(GL_INVALID_OPERATION); return; }
     p=&s->programs[s->current_program-1]; p->color[0]=x; p->color[1]=y; p->color[2]=z; p->color[3]=w;
     color=(color_channel(w)<<24)|(color_channel(x)<<16)|(color_channel(y)<<8)|color_channel(z);
     for(i=0;i<64;i++) p->texture[i]=color;
 }
+#ifdef TG_GLES_VM_PROGRAM
+void glUniform3fv(GLint loc,GLsizei count,const GLfloat *value)
+{
+    tg_gles_program_state *s=state();tg_gles_program *p;if(!s)return;
+    if(count<0){tgGlesSetError(GL_INVALID_VALUE);return;}if(!s->current_program){tgGlesSetError(GL_INVALID_OPERATION);return;}if(loc==-1||!count)return;
+    p=&s->programs[s->current_program-1];if(!p->vm_linked||count!=1||!value||!tgGlesVmUniformVector(p,loc,value,3))tgGlesSetError(GL_INVALID_OPERATION);
+}
+void glUniform1f(GLint loc,GLfloat value)
+{
+    tg_gles_program_state *s=state();tg_gles_program *p;if(!s)return;
+    if(!s->current_program){tgGlesSetError(GL_INVALID_OPERATION);return;}if(loc==-1)return;
+    p=&s->programs[s->current_program-1];if(!p->vm_linked||!tgGlesVmUniformVector(p,loc,&value,1))tgGlesSetError(GL_INVALID_OPERATION);
+}
+void glUniform1i(GLint loc,GLint value)
+{
+    tg_gles_program_state *s=state();tg_gles_program *p;if(!s)return;
+    if(!s->current_program){tgGlesSetError(GL_INVALID_OPERATION);return;}if(loc==-1)return;
+    p=&s->programs[s->current_program-1];if(!p->vm_linked||!tgGlesVmUniformSampler(p,loc,value))tgGlesSetError(GL_INVALID_OPERATION);
+}
+#endif

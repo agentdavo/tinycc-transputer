@@ -5,10 +5,11 @@
 #endif
 static tg_context target;static tg_gles_state gl;static tg_gles_draw_state draw;static tg_gles_program_state programs;
 static const char *defs[]={"#define BUMP_MAPPING\n","#define SPEC_MAPPING\n","#define SHADO_MAPPING\n"};
+static const char *undefs[]={"#undef BUMP_MAPPING\n","#undef SPEC_MAPPING\n","#undef SHADO_MAPPING\n"};
 static GLuint build(GLenum type,const char *source,int mode)
 {
     const char *strings[4];GLuint id;GLint ok;int i,n=0;
-    for(i=0;i<3;i++)if(mode&(1<<i))strings[n++]=defs[i];strings[n++]=source;
+    for(i=0;i<3;i++)strings[n++]=(mode&(1<<i))?defs[i]:undefs[i];strings[n++]=source;
     id=glCreateShader(type);glShaderSource(id,n,strings,0);glCompileShader(id);glGetShaderiv(id,GL_COMPILE_STATUS,&ok);
     return ok?id:0;
 }
@@ -20,10 +21,10 @@ static int run(void)
         v=build(GL_VERTEX_SHADER,vertex_source,mode);f=build(GL_FRAGMENT_SHADER,fragment_source,mode);
         if(!v||!f)return 1;p=glCreateProgram();glAttachShader(p,v);glAttachShader(p,f);glLinkProgram(p);
         glGetProgramiv(p,GL_LINK_STATUS,&ok);if(!ok)return 2;
-        glUseProgram(p);if(glGetError()!=GL_INVALID_OPERATION)return 3;
+        glUseProgram(p);if(glGetError()!=GL_NO_ERROR)return 3;
         glDeleteProgram(p);glDeleteShader(v);glDeleteShader(f);
     }
-    v=build(GL_VERTEX_SHADER,vertex_source,1);f=build(GL_FRAGMENT_SHADER,fragment_source,0);
+    glUseProgram(0);v=build(GL_VERTEX_SHADER,vertex_source,1);f=build(GL_FRAGMENT_SHADER,fragment_source,0);
     if(!v||!f)return 4;p=glCreateProgram();glAttachShader(p,v);glAttachShader(p,f);glLinkProgram(p);
     glGetProgramiv(p,GL_LINK_STATUS,&ok);if(ok)return 5;
     glDeleteProgram(p);glDeleteShader(v);glDeleteShader(f);tgGlesMakeCurrent(0);return 0;

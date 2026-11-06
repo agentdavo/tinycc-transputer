@@ -4,6 +4,8 @@
 #include "gles2_draw.h"
 #ifdef TG_GLES_VM_PROGRAM
 #include "glsl_fragment_compiler.h"
+#include "glsl_uber_vertex_shader.h"
+#include "glsl_fragment_shader.h"
 #endif
 typedef char GLchar;
 #define GL_VERTEX_SHADER 0x8b31
@@ -39,6 +41,10 @@ typedef struct {
 #ifdef TG_GLES_VM_PROGRAM
     GLboolean vm_linked;
     tg_glsl_fragment_program vertex_ir,fragment_ir;
+    tg_glsl_uber_vertex_shader vm_vertex;
+    tg_glsl_fragment_shader vm_fragment;
+    tg_uber_vertex_uniforms vm_uniforms;
+    unsigned char vm_attributes[4],vm_sampler_units[TG_VM_TEXTURES];
 #endif
 } tg_gles_program;
 typedef struct tg_gles_program_state {
@@ -68,4 +74,9 @@ GLint glGetAttribLocation(GLuint program, const GLchar *name);
 GLint glGetUniformLocation(GLuint program, const GLchar *name);
 void glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 void glUniform4f(GLint location, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
+#ifdef TG_GLES_VM_PROGRAM
+void glUniform3fv(GLint location,GLsizei count,const GLfloat *value);
+void glUniform1f(GLint location,GLfloat value);
+void glUniform1i(GLint location,GLint value);
+#endif
 #endif
