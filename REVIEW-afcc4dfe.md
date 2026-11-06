@@ -94,8 +94,11 @@ defined behavior.
   The shift helpers likewise initialize their word unions directly. Their new
   regression checks zero, 1, 31, 32, 33, 63 and overshift counts on T414, T800
   and T9000. The benchmark's 100 variable logical-right shifts fell from
-  24,883 to 17,605 estimated T800 cycles. The helpers still use word operations
-  instead of single LSHL/LSHR instructions. `test_u64_shift_host.py` also
+  24,883 to 17,605 estimated T800 cycles. The logical shift helpers now lower
+  to native LSHL/LSHR, reducing that phase to 11,765 cycles. Arithmetic right
+  shift still uses word operations. `test_u64_shift_codegen.sh` checks the
+  native instructions and absence of recursive helper calls for each part.
+  `test_u64_shift_host.py` also
   checks 5,006 values against host arithmetic for every shift count from 0
   through 65.
 - **§6, compiler speed.** The compiler limits the relaxer's relocation

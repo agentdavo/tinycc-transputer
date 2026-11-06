@@ -8,6 +8,8 @@ extern u64 __lshrdi3(u64, int);
 void test_main(void)
 {
     volatile u64 value = 0x8000000100000001ULL;
+    u64 left = value, right = value, arithmetic = value;
+    int count;
     int ok = 1;
     const char *message;
 
@@ -30,6 +32,14 @@ void test_main(void)
     ok &= __ashrdi3((s64)value, 33) == (s64)0xffffffffc0000000ULL;
     ok &= __ashrdi3((s64)value, 63) == -1;
     ok &= __ashrdi3((s64)value, 64) == -1;
+    for (count = 0; count < 64; count++) {
+        ok &= (u64)__ashldi3(value, count) == left;
+        ok &= __lshrdi3(value, count) == right;
+        ok &= (u64)__ashrdi3((s64)value, count) == arithmetic;
+        left <<= 1;
+        right >>= 1;
+        arithmetic = (arithmetic >> 1) | 0x8000000000000000ULL;
+    }
     message = ok ? "SHIFT64OK\n" : "FAIL\n";
     while (*message)
         *(volatile unsigned *)0x10000000u = (unsigned char)*message++;

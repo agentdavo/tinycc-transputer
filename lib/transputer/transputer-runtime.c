@@ -155,18 +155,8 @@ u64 __umoddi3(u64 dividend, u64 divisor) {
 }
 
 s64 __ashldi3(s64 value, int shift) {
-    u64_u v, r;
-    v.v = (u64)value;
     if (shift >= 64) return 0;
-    if (shift == 0) return value;
-    if (shift >= 32) {
-        r.p.hi = v.p.lo << (shift - 32);
-        r.p.lo = 0;
-    } else {
-        r.p.hi = (v.p.hi << shift) | (v.p.lo >> (32 - shift));
-        r.p.lo = v.p.lo << shift;
-    }
-    return (s64)r.v;
+    return (s64)((u64)value << shift);
 }
 
 s64 __ashrdi3(s64 value, int shift) {
@@ -190,16 +180,6 @@ s64 __ashrdi3(s64 value, int shift) {
 }
 
 u64 __lshrdi3(u64 value, int shift) {
-    u64_u v, r;
-    v.v = value;
     if (shift >= 64) return 0;
-    if (shift == 0) return value;
-    if (shift >= 32) {
-        r.p.lo = v.p.hi >> (shift - 32);
-        r.p.hi = 0;
-    } else {
-        r.p.lo = (v.p.lo >> shift) | (v.p.hi << (32 - shift));
-        r.p.hi = v.p.hi >> shift;
-    }
-    return r.v;
+    return value >> shift;
 }
