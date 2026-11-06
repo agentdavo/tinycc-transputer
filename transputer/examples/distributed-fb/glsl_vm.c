@@ -4,9 +4,15 @@ int tg_glsl_vm_run(tg_vm_state *s,const tg_vm_instruction *code,unsigned int cou
     unsigned int pc,i,j; float a[4],b[4],r[4],sum;
     if(!s || (!code && count) || count>TG_VM_MAX_INSTRUCTIONS) return TG_VM_INVALID;
     for(pc=0;pc<count;pc++) {
-        const tg_vm_instruction *in=&code[pc];
+        const tg_vm_instruction *in=&code[pc]; unsigned int reads;
+        int needs_b;
         if(in->dst>=TG_VM_REGS || in->a>=TG_VM_REGS || in->b>=TG_VM_REGS || !in->width || in->width>4 || (in->flags&~3u)) return TG_VM_INVALID;
-        for(i=0;i<4;i++) { a[i]=s->reg[in->a][(in->flags&1)?0:i]; b[i]=s->reg[in->b][(in->flags&2)?0:i]; r[i]=0; }
+        reads=in->op==TG_VM_SWIZZLE?4u:in->width;
+        needs_b=(in->op==TG_VM_ADD || in->op==TG_VM_SUB || in->op==TG_VM_MUL || in->op==TG_VM_DIV ||
+                 in->op==TG_VM_DOT || in->op==TG_VM_CROSS || in->op==TG_VM_MAX || in->op==TG_VM_POW || in->op==TG_VM_MAT4_VEC4);
+        for(i=0;i<4;i++)r[i]=0;
+        for(i=0;i<reads;i++)a[i]=s->reg[in->a][(in->flags&1)?0:i];
+        if(needs_b)for(i=0;i<in->width;i++)b[i]=s->reg[in->b][(in->flags&2)?0:i];
         switch(in->op) {
         case TG_VM_MOV: for(i=0;i<in->width;i++) r[i]=a[i]; break;
         case TG_VM_ADD: for(i=0;i<in->width;i++) r[i]=a[i]+b[i]; break;
