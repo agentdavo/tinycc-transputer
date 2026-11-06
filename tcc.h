@@ -1943,13 +1943,7 @@ void gen_builtin_wcnt(void);
 /* Process/scheduler */
 void gen_builtin_ldpri(void);
 void gen_builtin_startp(void);
-void gen_builtin_stopp(void);
 /* ALT operations */
-void gen_builtin_alt(void);
-void gen_builtin_altwt(void);
-void gen_builtin_altend(void);
-void gen_builtin_talt(void);
-void gen_builtin_taltwt(void);
 void gen_builtin_enbc(void);
 void gen_builtin_enbt(void);
 void gen_builtin_disc(void);
@@ -1958,10 +1952,7 @@ void gen_builtin_dist(void);
 /* Workspace */
 void gen_builtin_gajw(void);
 /* Error handling */
-void gen_builtin_seterr(void);
 void gen_builtin_testerr(void);
-void gen_builtin_sethalterr(void);
-void gen_builtin_clrhalterr(void);
 ST_FUNC int gen_transputer_builtin_call(int tok);
 /* T800 pointer arithmetic fast paths */
 ST_DATA int tp_ptr_add_is_addr;       /* final `+` of a pointer computation */

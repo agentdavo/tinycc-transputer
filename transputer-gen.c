@@ -96,6 +96,7 @@ ST_FUNC void gen_le32(int c);
 
 /* Forward declarations */
 static void transputer_func_reset(void);
+static void emit_instr(int opc, int v);
 static void tp_push_sv(SValue *sv);
 static void tp_push_float_sv(SValue *sv);
 static void tp_store_fpu_result_to_slot(int slot, int bt);
@@ -139,7 +140,7 @@ struct tp_builtin_desc {
     const char *args;
     tp_builtin_gen_fn gen;
     unsigned char returns_void;
-    unsigned char simple_op; /* one- or three-operand void instruction */
+    unsigned char simple_op; /* zero-, one- or three-operand void instruction */
 };
 static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 struct tp_soft_tvx_desc;
@@ -172,7 +173,6 @@ void gen_builtin_fmul(void);
 void gen_builtin_lddevid(void);
 void gen_builtin_fpsqrt(void);
 void gen_builtin_testhalterr(void);
-void gen_builtin_stoperr(void);
 void gen_builtin_testpranal(void);
 void gen_builtin_fpchkerr(void);
 void gen_builtin_fptesterr(void);
@@ -625,12 +625,12 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___startp,      "ee",  gen_builtin_startp,      1 },
         { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP },
         { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP },
-        { TOK___stopp,       "",    gen_builtin_stopp,       1 },
-        { TOK___alt,         "",    gen_builtin_alt,         1 },
-        { TOK___altwt,       "",    gen_builtin_altwt,       1 },
-        { TOK___altend,      "",    gen_builtin_altend,      1 },
-        { TOK___talt,        "",    gen_builtin_talt,        1 },
-        { TOK___taltwt,      "",    gen_builtin_taltwt,      1 },
+        { TOK___stopp, "", NULL, 1, TP_OPR_STOPP },
+        { TOK___alt, "", NULL, 1, TP_OPR_ALT },
+        { TOK___altwt, "", NULL, 1, TP_OPR_ALTWT },
+        { TOK___altend, "", NULL, 1, TP_OPR_ALTEND },
+        { TOK___talt, "", NULL, 1, TP_OPR_TALT },
+        { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT },
         { TOK___enbc,        "ee",  gen_builtin_enbc,        1 },
         { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS },
         { TOK___enbt,        "ee",  gen_builtin_enbt,        1 },
@@ -646,12 +646,12 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB },
         { TOK___gajw,        "e",   gen_builtin_gajw,        0 },
         { TOK___wcnt,        "e",   gen_builtin_wcnt,        0 },
-        { TOK___seterr,      "",    gen_builtin_seterr,      1 },
+        { TOK___seterr, "", NULL, 1, TP_OPR_SETERR },
         { TOK___testerr,     "",    gen_builtin_testerr,     0 },
-        { TOK___sethalterr,  "",    gen_builtin_sethalterr,  1 },
-        { TOK___clrhalterr,  "",    gen_builtin_clrhalterr,  1 },
+        { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR },
+        { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR },
         { TOK___testhalterr, "",    gen_builtin_testhalterr, 0 },
-        { TOK___stoperr,     "",    gen_builtin_stoperr,     1 },
+        { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR },
         { TOK___testpranal,  "",    gen_builtin_testpranal,  0 },
         { TOK___norm,        "e",   gen_builtin_norm,        0 },
         { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0 },
@@ -1052,7 +1052,9 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
      * both operands would name the builtin's result.  Spilling after the
      * arguments are parsed also covers an argument that is that result. */
     save_reg(REG_IRET);
-    if (desc->simple_op && !desc->args[1])
+    if (desc->simple_op && !desc->args[0])
+        emit_instr(TP_OP_OPR, desc->simple_op);
+    else if (desc->simple_op && !desc->args[1])
         tp_emit_1op(desc->simple_op);
     else if (desc->simple_op)
         tp_emit_3op(desc->simple_op, 2, 1, 0);
@@ -4586,30 +4588,6 @@ void gen_builtin_outword(void) {
     tp_emit_2op(TP_OPR_OUTWORD, 0, 1);
 }
 
-/* ALT operations - using correct TCWG opcodes */
-void gen_builtin_alt(void) {
-    /* ALT START - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_ALT);
-}
-
-void gen_builtin_altwt(void) {
-    emit_instr(TP_OP_OPR, TP_OPR_ALTWT);
-}
-
-void gen_builtin_altend(void) {
-    /* ALT END - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_ALTEND);
-}
-
-void gen_builtin_talt(void) {
-    /* TIMED ALT - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_TALT);
-}
-
-void gen_builtin_taltwt(void) {
-    emit_instr(TP_OP_OPR, TP_OPR_TALTWT);
-}
-
 /* ALT guard enable/disable.
  *
  * These take their operands in fixed eval-stack positions (ISM
@@ -4693,11 +4671,6 @@ void gen_builtin_resetch(void) {
 void gen_builtin_startp(void) {
     /* A is the child workspace, B the byte offset from the next IPtr. */
     tp_emit_2op(TP_OPR_STARTP, 1, 0);
-}
-
-void gen_builtin_stopp(void) {
-    /* STOP PROCESS - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_STOPP);
 }
 
 void gen_builtin_ldpri(void) {
@@ -4940,21 +4913,6 @@ void gen_builtin_testerr(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_seterr(void) {
-    /* SET ERROR - no args, sets error flag */
-    emit_instr(TP_OP_OPR, TP_OPR_SETERR);
-}
-
-void gen_builtin_sethalterr(void) {
-    /* SET HALT ON ERROR - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_SETHALTERR);
-}
-
-void gen_builtin_clrhalterr(void) {
-    /* CLEAR HALT ON ERROR - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_CLRHALTERR);
-}
-
 /* testhalterr: the HaltOnError flag; testpranal: whether the processor
  * was analysed (it booted after Analyse, not Reset). */
 static void tp_gen_flag_result(int opr)
@@ -4968,8 +4926,6 @@ static void tp_gen_flag_result(int opr)
 void gen_builtin_testhalterr(void) { tp_gen_flag_result(TP_OPR_TESTHALTERR); }
 void gen_builtin_testpranal(void)  { tp_gen_flag_result(TP_OPR_TESTPRANAL); }
 
-/* stoperr: deschedule the process for good if the Error flag is set. */
-void gen_builtin_stoperr(void) { emit_instr(TP_OP_OPR, TP_OPR_STOPERR); }
 
 /* The FPU error flag, which the FPU sets on an invalid operation,
  * overflow, division by zero or a non-finite fpint.  T800 and later. */
