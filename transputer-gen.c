@@ -10386,6 +10386,19 @@ static int tp_push_double_return(SValue *sv, int bt)
         return 0;
     fr = sv->r;
     v = fr & VT_VALMASK;
+    if ((fr == VT_CONST || fr == (VT_CONST | VT_NONCONST)) && !sv->sym) {
+        union { double d; uint64_t u; } bits;
+        /* gv() would first put this already-converted literal in rodata,
+         * then load and park its two words.  Return the identical bits
+         * directly; do not evaluate it with the target FPU (not even zero,
+         * whose sign must survive).  Symbol/flagged operands still use gv. */
+        bits.d = sv->c.d;
+        tp_areg_invalidate();
+        abcreg_stack_depth = 0;
+        Tp_LDC((uint32_t)(bits.u >> 32));
+        Tp_LDC((uint32_t)bits.u);
+        return 1;
+    }
     if (fr >= TREG_FA && fr < NB_REGS &&
         sv->r2 >= TREG_FA && sv->r2 < NB_REGS && fr != sv->r2) {
         /* Use the actual high slot, including nonadjacent rvalue pairs. */

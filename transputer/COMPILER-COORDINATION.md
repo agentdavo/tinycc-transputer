@@ -69,6 +69,16 @@ T800 cycles (0.01543%); the ELF shrinks 184 bytes. Identity-return frames
 shrink ten to one words. Opaque locals, packed accesses and pending checks
 retain their existing materialization. The archived worker chats stay closed.
 
+The [direct double-literal acceptance](tests/bench/double-constant-returns-2026-11-06.md)
+loads already-converted literal bits into ABI B/A without literal memory or
+workspace staging. Standalone frames shrink ten to one words; focused
+zero/one/dense-literal call kernels save 28.04%/15.77%/3.50% modeled cycles.
+The full POV ELF shrinks 256 bytes, while box/basicvue decoded runtime totals
+are unchanged. All workload gates pass, including full glass, plus 80
+target/layout, 32 mixed-version ABI and eight VLA runs. The return fixture
+now has 40 cases, including exact literal bits and widened early-return
+epilogues. Memory, flagged and non-double return controls stay unchanged.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
