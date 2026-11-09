@@ -132,39 +132,15 @@ static void switch_slot_add(int instr_offset, int slot_size, int opcode,
 static void tp_builtin_return_void(void);
 static void tp_gen_flag_result(int opr);
 static void tp_builtin_word_result(void);
-void tp_emit_1op(int opcode);
-void tp_emit_2op(int opcode, int b_idx, int a_idx);
-void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx);
+static void tp_emit_1op(int opcode);
+static void tp_emit_2op(int opcode, int b_idx, int a_idx);
+static void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx);
 struct tp_call_words {
     SValue *words;
     int count;
     int cap;
 };
-typedef void (*tp_builtin_gen_fn)(void);
-enum {
-    TP_BUILTIN_ANY,
-    TP_BUILTIN_T425,
-    TP_BUILTIN_T805,
-    TP_BUILTIN_FPU,
-    TP_BUILTIN_TVX,
-    TP_BUILTIN_T9000
-};
-
-struct tp_builtin_desc {
-    int tok;
-    const char *args;
-    tp_builtin_gen_fn gen;
-    unsigned char returns_void;
-    short simple_op; /* simple instruction */
-    short vector_op; /* TVX vector instruction */
-    unsigned char cpu;
-    short scalar_op; /* TVX word or four-argument accumulating instruction */
-};
-static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
 static void tp_gen_tvx_dot4(int opr);
-struct tp_soft_tvx_desc;
-static const struct tp_soft_tvx_desc *tp_find_soft_tvx(int tok);
-static void tp_soft_tvx_call(const struct tp_soft_tvx_desc *s);
 static void tp_call_words_reserve(struct tp_call_words *cw, int extra_words);
 static void tp_expand_struct_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug);
 static void tp_expand_scalar_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug);
@@ -181,64 +157,6 @@ static void Tp_STL(int v);
 static void Tp_LDL(int v);
 static void abcreg_push(int count);
 static int func_start_ind;
-
-/* Forward declarations for builtins defined later in this file */
-void gen_builtin_norm(void);
-void gen_builtin_bitcnt(void);
-void gen_builtin_bitrevword(void);
-void gen_builtin_bitrevnbits(void);
-void gen_builtin_csub0(void);
-void gen_builtin_fmul(void);
-void gen_builtin_lddevid(void);
-void gen_builtin_fpsqrt(void);
-void gen_builtin_fpchkerr(void);
-void gen_builtin_fptesterr(void);
-void gen_builtin_fpseterr(void);
-void gen_builtin_fpclrerr(void);
-void gen_builtin_fpint(void);
-void gen_builtin_fpintrp(void);
-void gen_builtin_fpintrm(void);
-void gen_builtin_fpintrz(void);
-void gen_builtin_fprem(void);
-void gen_builtin_fpabs(void);
-void gen_builtin_bf16tof32(void);
-void gen_builtin_f32tobf16(void);
-void gen_builtin_mxfp4dot(void);
-void gen_builtin_mxfp4unpk8(void);
-void gen_builtin_vsetlen(void);
-void gen_builtin_f16tof32(void);
-void gen_builtin_f32tof16(void);
-void gen_builtin_qsetfmt(void);
-void gen_builtin_ftsetvp(void);
-void gen_builtin_ftransp(void);
-void gen_builtin_ftranspb(void);
-void gen_builtin_ftcull(void);
-void gen_builtin_tskin(void);
-void gen_builtin_vsetfmt(void);
-void gen_builtin_ftsetlit(void);
-void gen_builtin_flitb(void);
-void gen_builtin_qgemm(void);
-void gen_builtin_csumb(void);
-void gen_builtin_stvxstate(void);
-void gen_builtin_csumcpy(void);
-void gen_builtin_ldconf(void);
-void gen_builtin_swapbfr(void);
-void gen_builtin_vin(void);
-void gen_builtin_ldchstatus(void);
-void gen_builtin_chantype(void);
-void gen_builtin_disg(void);
-void gen_builtin_erdsq(void);
-void gen_builtin_ldresptr(void);
-void gen_builtin_tld(void);
-void gen_builtin_tst(void);
-void gen_builtin_tclr(void);
-void gen_builtin_f2ldm(void);
-void gen_builtin_f4ldm(void);
-void gen_builtin_f2ldma(void);
-void gen_builtin_f2stm(void);
-void gen_builtin_fmvmul4(void);
-void gen_builtin_fmvmul4st(void);
-void gen_builtin_fpoly3(void);
 
 /* DUP optimization: track what's in AReg after tp_push_sv().
  * If next push wants the same value, emit DUP instead of reloading.
@@ -565,188 +483,6 @@ static void tp_builtin_return_void(void)
     vtop->type.t = VT_VOID;
 }
 
-static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
-{
-    static const struct tp_builtin_desc descs[] = {
-        { TOK___out,         "eee", NULL, 1, TP_OPR_OUT, 0, TP_BUILTIN_ANY },
-        { TOK___in,          "eee", NULL, 1, TP_OPR_IN, 0, TP_BUILTIN_ANY },
-        { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1, 0, 0, TP_BUILTIN_ANY },
-        { TOK___outword,     "ee",  gen_builtin_outword,     1, 0, 0, TP_BUILTIN_ANY },
-        { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN, 0, TP_BUILTIN_ANY },
-        /* RESETCH returns the previous channel word: NotProcess_p if idle,
-         * otherwise the descriptor of the process blocked on it. */
-        { TOK___resetch,     "e",   NULL,     0, TP_OPR_RESETCH, 0, TP_BUILTIN_ANY },
-        { TOK___move,        "eee", gen_builtin_move,        1, 0, 0, TP_BUILTIN_ANY },
-        { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT, 0, TP_BUILTIN_T425 },
-        { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL, 0, TP_BUILTIN_T425 },
-        { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO, 0, TP_BUILTIN_T425 },
-        { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO, 0, TP_BUILTIN_T425 },
-        { TOK___crcbyte,     "eee", NULL,     0, TP_OPR_CRCBYTE, 0, TP_BUILTIN_T425 },
-        { TOK___crcword,     "eee", NULL,     0, TP_OPR_CRCWORD, 0, TP_BUILTIN_T425 },
-        { TOK___ldtimer,     "",    NULL,     0, TP_OPR_LDTIMER, 0, TP_BUILTIN_ANY },
-        { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER, 0, TP_BUILTIN_ANY },
-        { TOK___mint,        "",    NULL,        0, TP_OPR_MINT, 0, TP_BUILTIN_ANY },
-        { TOK___ldpri,       "",    NULL,       0, TP_OPR_LDPRI, 0, TP_BUILTIN_ANY },
-        { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP, 0, TP_BUILTIN_ANY },
-        { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP, 0, TP_BUILTIN_ANY },
-        { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP, 0, TP_BUILTIN_ANY },
-        { TOK___stopp, "", NULL, 1, TP_OPR_STOPP, 0, TP_BUILTIN_ANY },
-        { TOK___alt, "", NULL, 1, TP_OPR_ALT, 0, TP_BUILTIN_ANY },
-        { TOK___altwt, "", NULL, 1, TP_OPR_ALTWT, 0, TP_BUILTIN_ANY },
-        { TOK___altend, "", NULL, 1, TP_OPR_ALTEND, 0, TP_BUILTIN_ANY },
-        { TOK___talt, "", NULL, 1, TP_OPR_TALT, 0, TP_BUILTIN_ANY },
-        { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT, 0, TP_BUILTIN_ANY },
-        { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC, 0, TP_BUILTIN_ANY },
-        { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS, 0, TP_BUILTIN_ANY },
-        { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT, 0, TP_BUILTIN_ANY },
-        { TOK___disc,        "eee", NULL,        0, TP_OPR_DISC, 0, TP_BUILTIN_ANY },
-        { TOK___diss,        "ee",  NULL,        0, TP_OPR_DISS, 0, TP_BUILTIN_ANY },
-        { TOK___dist,        "eee", NULL,        0, TP_OPR_DIST, 0, TP_BUILTIN_ANY },
-        /* saveh/savel write two queue pointers; the st* forms set one. */
-        { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH, 0, TP_BUILTIN_ANY },
-        { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL, 0, TP_BUILTIN_ANY },
-        { TOK___sthf,        "e",   NULL, 1, TP_OPR_STHF, 0, TP_BUILTIN_ANY },
-        { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB, 0, TP_BUILTIN_ANY },
-        { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF, 0, TP_BUILTIN_ANY },
-        { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB, 0, TP_BUILTIN_ANY },
-        /* GAJW returns the old workspace; WCNT returns the word offset. */
-        { TOK___gajw,        "e",   NULL,        0, TP_OPR_GAJW, 0, TP_BUILTIN_ANY },
-        { TOK___wcnt,        "e",   NULL,        0, TP_OPR_WCNT, 0, TP_BUILTIN_ANY },
-        { TOK___seterr, "", NULL, 1, TP_OPR_SETERR, 0, TP_BUILTIN_ANY },
-        { TOK___testerr,     "",    NULL,     0, TP_OPR_TESTERR, 0, TP_BUILTIN_ANY },
-        { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR, 0, TP_BUILTIN_ANY },
-        { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR, 0, TP_BUILTIN_ANY },
-        { TOK___testhalterr, "",    NULL, 0, TP_OPR_TESTHALTERR, 0, TP_BUILTIN_ANY },
-        { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR, 0, TP_BUILTIN_ANY },
-        { TOK___testpranal,  "",    NULL,  0, TP_OPR_TESTPRANAL, 0, TP_BUILTIN_ANY },
-        { TOK___norm,        "e",   gen_builtin_norm,        0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0, 0, 0, TP_BUILTIN_ANY },
-        { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
-        { TOK_builtin_popcountl, "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___bitrevword,  "e",   gen_builtin_bitrevword,  0, 0, 0, TP_BUILTIN_T425 },
-        { TOK___bitrevnbits, "ee",  gen_builtin_bitrevnbits, 0, 0, 0, TP_BUILTIN_T425 },
-        { TOK___csub0,       "ee",  gen_builtin_csub0,       0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___fmul,        "ee",  gen_builtin_fmul,        0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___lddevid,     "",    gen_builtin_lddevid,     0, 0, 0, TP_BUILTIN_T805 },
-        { TOK___fpchkerr,    "",    gen_builtin_fpchkerr,    1, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fptesterr,   "",    gen_builtin_fptesterr,   0, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpseterr,    "",    gen_builtin_fpseterr,    1, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpclrerr,    "",    gen_builtin_fpclrerr,    1, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpint,       "e",   gen_builtin_fpint,       0, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpintrp,     "e",   gen_builtin_fpintrp,     0, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpintrm,     "e",   gen_builtin_fpintrm,     0, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpintrz,     "e",   gen_builtin_fpintrz,     0, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fprem,       "ee",  gen_builtin_fprem,       0, 0, 0, TP_BUILTIN_FPU },
-        { TOK___fpsqrt,      "e",   gen_builtin_fpsqrt,      0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___fpabs,       "e",   gen_builtin_fpabs,       0, 0, 0, TP_BUILTIN_ANY },
-        /* TVX (MXFP4 / bfloat16) */
-        { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___bf16pack,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16PACK },
-        { TOK___bf16unpkh,   "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16UNPKH },
-        { TOK___mxfp4tof32,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4TOR32 },
-        { TOK___f32tomxfp4,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4 },
-        { TOK___mxe8m0tof32, "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0TOR32 },
-        { TOK___mxe8m0of,    "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0OF },
-        { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___bf16dot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16DOT },
-        { TOK___mxfp4gemv,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMV },
-        { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___f32tomxfp4x8,"e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4X8 },
-        { TOK___bf16mul2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16MUL2 },
-        { TOK___bf16add2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16ADD2 },
-        { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___mxfp4gemvbf, "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMVBF },
-        { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN, TP_BUILTIN_TVX },
-        { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN, TP_BUILTIN_TVX },
-        { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN, TP_BUILTIN_TVX },
-        { TOK___vrmsnorm,    "eee", NULL, 1, 0, TP_OPR_VRMSNORM, TP_BUILTIN_TVX },
-        { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN, TP_BUILTIN_TVX },
-        { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0, 0, 0, TP_BUILTIN_ANY },
-        { TOK___q8dot,       "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOT },
-        { TOK___q8dotbf,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOTBF },
-        { TOK___iq1mdot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ1MDOT },
-        { TOK___iq2xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ2XXSDOT },
-        { TOK___iq3xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ3XXSDOT },
-        { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___qdot,        "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_QDOT },
-        { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32, TP_BUILTIN_TVX },
-        { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT, TP_BUILTIN_TVX },
-        { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF, TP_BUILTIN_TVX },
-        { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___ftransp,     "eee", gen_builtin_ftransp,     0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS, TP_BUILTIN_TVX },
-        { TOK___frsqrtb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRSQRT },
-        { TOK___frecipb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRECIP },
-        { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB, TP_BUILTIN_TVX },
-        { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE, TP_BUILTIN_TVX },
-        { TOK___ftcull,      "eee", gen_builtin_ftcull,      0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___tskin,       "eee", gen_builtin_tskin,       0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___flitb,       "eee", gen_builtin_flitb,       0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___qgemm,       "eee", gen_builtin_qgemm,       0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___vblend8,     "eee", NULL, 1, 0, TP_OPR_VBLEND8, TP_BUILTIN_TVX },
-        { TOK___vfill,       "eee", NULL, 1, 0, TP_OPR_VFILL, TP_BUILTIN_TVX },
-        { TOK___vfill2d,     "eee", NULL, 1, 0, TP_OPR_VFILL2D, TP_BUILTIN_TVX },
-        { TOK___csumb,       "eee", gen_builtin_csumb,       0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___vblend2d,    "eee", NULL, 1, 0, TP_OPR_VBLEND2D, TP_BUILTIN_TVX },
-        { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1, 0, 0, TP_BUILTIN_TVX },
-        { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0, 0, 0, TP_BUILTIN_TVX },
-        { TOK___vq8k,        "ee",  NULL, 1, 0, TP_OPR_VQ8K, TP_BUILTIN_TVX },
-        { TOK___vq80,        "ee",  NULL, 1, 0, TP_OPR_VQ80, TP_BUILTIN_TVX },
-        { TOK___vcvt,        "eee", NULL, 1, 0, TP_OPR_VCVT, TP_BUILTIN_TVX },
-        { TOK___vxfer,       "ee",  NULL, 1, 0, TP_OPR_VXFER, TP_BUILTIN_TVX },
-        /* T9000 configuration space and VCP */
-        { TOK___ldconf,      "e",   gen_builtin_ldconf,      0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF, 0, TP_BUILTIN_T9000 },
-        { TOK___initvlcb,      "ee",   NULL, 1, TP_OPR_INITVLCB, 0, TP_BUILTIN_T9000 },
-        { TOK___sethdr,        "eee",  NULL, 1, TP_OPR_SETHDR, 0, TP_BUILTIN_T9000 },
-        { TOK___writehdr,      "eee",  NULL, 1, TP_OPR_WRITEHDR, 0, TP_BUILTIN_T9000 },
-        { TOK___readhdr,       "eee",  NULL, 1, TP_OPR_READHDR, 0, TP_BUILTIN_T9000 },
-        { TOK___setchmode,     "ee",   NULL, 1, TP_OPR_SETCHMODE, 0, TP_BUILTIN_T9000 },
-        { TOK___stopch,        "e",    NULL, 1, TP_OPR_STOPCH, 0, TP_BUILTIN_T9000 },
-        { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___vin,         "eee", gen_builtin_vin,         0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___vout,          "eee",  NULL, 1, TP_OPR_VOUT, 0, TP_BUILTIN_T9000 },
-        { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___chantype,    "e",   gen_builtin_chantype,    0, 0, 0, TP_BUILTIN_T9000 },
-        /* T9000 semaphores and resource channels */
-        { TOK___semwait,       "e",    NULL, 1, TP_OPR_WAIT, 0, TP_BUILTIN_T9000 },
-        { TOK___semsignal,     "e",    NULL, 1, TP_OPR_SIGNAL, 0, TP_BUILTIN_T9000 },
-        { TOK___mkrc,          "eee",  NULL, 1, TP_OPR_MKRC, 0, TP_BUILTIN_T9000 },
-        { TOK___unmkrc,        "e",    NULL, 1, TP_OPR_UNMKRC, 0, TP_BUILTIN_T9000 },
-        { TOK___grant,         "ee",   NULL, 1, TP_OPR_GRANT, 0, TP_BUILTIN_T9000 },
-        { TOK___enbg,          "ee",   NULL, 1, TP_OPR_ENBG, 0, TP_BUILTIN_T9000 },
-        { TOK___disg,        "eee", gen_builtin_disg,        0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___irdsq,         "eee",  NULL, 1, TP_OPR_IRDSQ, 0, TP_BUILTIN_T9000 },
-        { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___stresptr,      "ee",   NULL, 1, TP_OPR_STRESPTR, 0, TP_BUILTIN_T9000 },
-        /* T9 FPU Temps T0-T7 */
-        { TOK___tld,         "e",   gen_builtin_tld,         0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___tst,         "ee",  gen_builtin_tst,         1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___tclr,        "e",   gen_builtin_tclr,        1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___f2ldm,       "ee",  gen_builtin_f2ldm,       1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___f4ldm,       "ee",  gen_builtin_f4ldm,       1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___f2ldma,      "ee",  gen_builtin_f2ldma,      1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___f2stm,       "ee",  gen_builtin_f2stm,       1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___fmvmul4,     "ee",  gen_builtin_fmvmul4,     0, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___fmvmul4st,   "eee", gen_builtin_fmvmul4st,   1, 0, 0, TP_BUILTIN_T9000 },
-        { TOK___fpoly3,      "ee",  gen_builtin_fpoly3,      0, 0, 0, TP_BUILTIN_T9000 },
-        { 0,                 NULL,  NULL,                    0 }
-    };
-    const struct tp_builtin_desc *desc;
-
-    for (desc = descs; desc->tok != 0; ++desc) {
-        if (desc->tok == tok)
-            return desc;
-    }
-    return NULL;
-}
-
 #define TP_SWITCH_JUMP_SLOT_SIZE 9
 #define TP_SWITCH_MAX_SPAN      2048
 
@@ -965,71 +701,6 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
 
     vpop();
     *pdsym = d;
-    return 1;
-}
-
-ST_FUNC int gen_transputer_builtin_call(int tok)
-{
-    const struct tp_builtin_desc *desc;
-
-    desc = tp_find_builtin_desc(tok);
-    if (!desc)
-        return 0;
-    /* FPU-only generators diagnose after parsing their operands. */
-    if (desc->cpu == TP_BUILTIN_TVX && !tp_tvx()) {
-        const struct tp_soft_tvx_desc *soft = tp_find_soft_tvx(tok);
-        if (!soft)
-            tcc_error("%s is a TVX instruction with no software "
-                      "version, not available without -mt9000tvx",
-                      get_tok_str(tok, NULL));
-        parse_builtin_params(0, desc->args);
-        save_reg(REG_IRET);
-        tp_soft_tvx_call(soft);
-        return 1;
-    }
-    if (desc->cpu == TP_BUILTIN_T9000 && !tcc_state->tp_t9000)
-        tcc_error("%s is a T9000 instruction, not available with -m%s",
-                  get_tok_str(tok, NULL), tp_target_name(tcc_state));
-    if ((desc->cpu == TP_BUILTIN_T425 || desc->cpu == TP_BUILTIN_T805) &&
-        tp_t414())
-        tcc_error("%s is a T425 instruction, not available with -mt414",
-                  get_tok_str(tok, NULL));
-    if (desc->cpu == TP_BUILTIN_T805 && tcc_state->tp_t800)
-        tcc_error("%s is a T805 instruction, not available with -mt800",
-                  get_tok_str(tok, NULL));
-
-    parse_builtin_params(0, desc->args);
-    /* Integer results land in REG_IRET, which may still hold a pending
-     * call result on the vstack (`icall() + __ldtimer()`); without a spill
-     * both operands would name the builtin's result.  Spilling after the
-     * arguments are parsed also covers an argument that is that result. */
-    save_reg(REG_IRET);
-    if (desc->scalar_op && strlen(desc->args) == 4)
-        tp_gen_tvx_dot4(desc->scalar_op);
-    else if (desc->scalar_op && !desc->args[1])
-        tp_gen_tvx_unary(desc->scalar_op);
-    else if (desc->scalar_op)
-        tp_gen_tvx_binary(desc->scalar_op);
-    else if (desc->vector_op && !desc->args[2])
-        tp_gen_vec2(desc->vector_op);
-    else if (desc->vector_op)
-        tp_gen_vec3(desc->vector_op);
-    else if (desc->simple_op && !desc->args[0] && !desc->returns_void)
-        tp_gen_flag_result(desc->simple_op);
-    else if (desc->simple_op && !desc->args[0])
-        emit_instr(TP_OP_OPR, desc->simple_op);
-    else if (desc->simple_op && !desc->args[1])
-        tp_emit_1op(desc->simple_op);
-    else if (desc->simple_op && !desc->args[2])
-        tp_emit_2op(desc->simple_op, 1, 0);
-    else if (desc->simple_op)
-        tp_emit_3op(desc->simple_op, 2, 1, 0);
-    else
-        desc->gen();
-    if (desc->simple_op && desc->args[0] && !desc->returns_void)
-        tp_builtin_word_result();
-    if (desc->returns_void)
-        tp_builtin_return_void();
     return 1;
 }
 
@@ -4536,12 +4207,12 @@ ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str) {
  * gv(RC_INT) loads vtop into AReg (emitting LDL/LDC), pushing previous A->B->C
  */
 
-void gen_builtin_outbyte(void) {
+static void gen_builtin_outbyte(void) {
     /* __outbyte(chan, byte): A=byte(1), B=chan(0) */
     tp_emit_2op(TP_OPR_OUTBYTE, 0, 1);
 }
 
-void gen_builtin_outword(void) {
+static void gen_builtin_outword(void) {
     /* __outword(chan, word): A=word(1), B=chan(0) */
     tp_emit_2op(TP_OPR_OUTWORD, 0, 1);
 }
@@ -4571,7 +4242,7 @@ void gen_builtin_outword(void) {
  */
 
 /* Memory operations */
-void gen_builtin_move(void) {
+static void gen_builtin_move(void) {
     /* MOVE: __move(dest, src, length)
      * vstack: vtop[0]=length, vtop[-1]=src, vtop[-2]=dest
      * MOVE expects eval stack: CReg=src, BReg=dest, AReg=length
@@ -4658,7 +4329,7 @@ static void tp_builtin_push(SValue *sv)
         tp_push_sym_addr(sv);
 }
 
-void tp_emit_1op(int opcode) {
+static void tp_emit_1op(int opcode) {
     if (!tp_builtin_arg_direct(vtop))
         gv(RC_INT);
     tp_builtin_push(&vtop[0]);
@@ -4675,7 +4346,7 @@ void tp_emit_1op(int opcode) {
  * vstack layout:  vtop[0]=arg1, vtop[-1]=arg0
  * Eval stack result:  BReg=first pushed, AReg=second pushed
  */
-void tp_emit_2op(int opcode, int b_idx, int a_idx) {
+static void tp_emit_2op(int opcode, int b_idx, int a_idx) {
     SValue sv[2];
 
     /* Materialize arg1 (vtop), then arg0 - each only if it cannot be
@@ -4700,7 +4371,7 @@ void tp_emit_2op(int opcode, int b_idx, int a_idx) {
     abcreg_pop(2);
 }
 
-void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
+static void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
     SValue sv[3];
 
     /* Materialize arg2 (vtop), arg1, arg0 as before, skipping those that
@@ -4757,14 +4428,14 @@ static void tp_need_fpu(int tok)
 }
 
 /* fpchkerr: copy the FP error flag into the Error flag */
-void gen_builtin_fpchkerr(void)
+static void gen_builtin_fpchkerr(void)
 {
     tp_need_fpu(TOK___fpchkerr);
     emit_instr(TP_OP_OPR, TP_FPU_CHKERR);
 }
 
 /* fptesterr: 1 if the FP error flag was clear, 0 if set; clears it */
-void gen_builtin_fptesterr(void)
+static void gen_builtin_fptesterr(void)
 {
     tp_need_fpu(TOK___fptesterr);
     tp_gen_flag_result(TP_OPR_FPTESTERR);
@@ -4783,11 +4454,11 @@ static void tp_gen_fp_errflag(int tok, int t9k_opr, int fpentry_code)
         abcreg_pop(1);
     }
 }
-void gen_builtin_fpseterr(void)
+static void gen_builtin_fpseterr(void)
 {
     tp_gen_fp_errflag(TOK___fpseterr, TP_OPR_FPSETERR, TP_FPENTRY_USETERR);
 }
-void gen_builtin_fpclrerr(void)
+static void gen_builtin_fpclrerr(void)
 {
     tp_gen_fp_errflag(TOK___fpclrerr, TP_OPR_FPCLRERR, TP_FPENTRY_UCLRERR);
 }
@@ -4796,7 +4467,7 @@ void gen_builtin_fpclrerr(void)
  * Bit manipulation builtins (T800)
  * ------------------------------------------------------------------ */
 
-void gen_builtin_norm(void) {
+static void gen_builtin_norm(void) {
     /* NORM normalizes a 64-bit value BReg:AReg.
      * For 32-bit CLZ: put value in BReg, 0 in AReg.
      * Input:  BReg=high32 (our value), AReg=low32 (0)
@@ -4819,7 +4490,7 @@ void gen_builtin_norm(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_bitcnt(void) {
+static void gen_builtin_bitcnt(void) {
     /* BITCNT: AReg = popcount(AReg) + BReg.
      * We want popcount(x), so load 0 into BReg first (accumulator). */
     if (tp_t414()) {
@@ -4838,7 +4509,7 @@ void gen_builtin_bitcnt(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_bitrevword(void) {
+static void gen_builtin_bitrevword(void) {
     /* BITREVWORD: AReg = bit-reversed AReg (all 32 bits) */
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
@@ -4847,7 +4518,7 @@ void gen_builtin_bitrevword(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_bitrevnbits(void) {
+static void gen_builtin_bitrevnbits(void) {
     /* BITREVNBITS: reverse bottom N bits of AReg.
      * Args: __bitrevnbits(value, nbits) → BReg=value, AReg=nbits */
     gv2(RC_INT, RC_INT);
@@ -4860,7 +4531,7 @@ void gen_builtin_bitrevnbits(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_lddevid(void) {
+static void gen_builtin_lddevid(void) {
     emit_instr(TP_OP_OPR, TP_OPR_LDDEVID);
     abcreg_push(1);
     Tp_STL(REG_IRET);
@@ -5152,8 +4823,8 @@ static void tp_gen_fpu_unary(int t9k_opr, int fpentry_code, int is_sqrt)
     tp_fpu_result(bt);
 }
 
-void gen_builtin_fpsqrt(void) { tp_gen_fpu_unary(TP_OPR_FPSQRT, TP_FPENTRY_SQRTLAST, 1); }
-void gen_builtin_fpabs(void)  { tp_gen_fpu_unary(TP_OPR_FPABS,  TP_FPENTRY_ABS,      0); }
+static void gen_builtin_fpsqrt(void) { tp_gen_fpu_unary(TP_OPR_FPSQRT, TP_FPENTRY_SQRTLAST, 1); }
+static void gen_builtin_fpabs(void)  { tp_gen_fpu_unary(TP_OPR_FPABS,  TP_FPENTRY_ABS,      0); }
 
 /* Round to an integer value, keeping the precision: __fpint (to nearest,
  * like rint), __fpintrp (toward +inf, ceil), __fpintrm (toward -inf,
@@ -5188,17 +4859,17 @@ static void tp_gen_fpu_round(int tok, int t9k_mode, int fpentry_mode)
         tp_fpu_result(bt);
     }
 }
-void gen_builtin_fpint(void)   { tp_gen_fpu_round(TOK___fpint, 0, 0); }
-void gen_builtin_fpintrp(void) { tp_gen_fpu_round(TOK___fpintrp, TP_OPR_FPRP, TP_FPENTRY_RP); }
-void gen_builtin_fpintrm(void) { tp_gen_fpu_round(TOK___fpintrm, TP_OPR_FPRM, TP_FPENTRY_RM); }
-void gen_builtin_fpintrz(void) { tp_gen_fpu_round(TOK___fpintrz, TP_OPR_FPRZ, TP_FPENTRY_RZ); }
+static void gen_builtin_fpint(void)   { tp_gen_fpu_round(TOK___fpint, 0, 0); }
+static void gen_builtin_fpintrp(void) { tp_gen_fpu_round(TOK___fpintrp, TP_OPR_FPRP, TP_FPENTRY_RP); }
+static void gen_builtin_fpintrm(void) { tp_gen_fpu_round(TOK___fpintrm, TP_OPR_FPRM, TP_FPENTRY_RM); }
+static void gen_builtin_fpintrz(void) { tp_gen_fpu_round(TOK___fpintrz, TP_OPR_FPRZ, TP_FPENTRY_RZ); }
 
 /* __fprem(x, y): the IEEE remainder x REM y, exact, in double unless both
  * are float.  One instruction on the T9000; on the T800 the TCWG 7.5.4
  * loop, each step leaving "done" in A for the cj:
  *      fpremfirst; eqc 0; cj next; loop: fpremstep; cj loop; next:
  * It uses all three FPU registers and destroys the integer stack. */
-void gen_builtin_fprem(void)
+static void gen_builtin_fprem(void)
 {
     CType t;
     int bt;
@@ -5311,7 +4982,7 @@ static void tp_soft_tvx_call(const struct tp_soft_tvx_desc *s)
     }
 }
 
-void gen_builtin_bf16tof32(void)
+static void gen_builtin_bf16tof32(void)
 {
     if (!tp_tvx()) {            /* bfloat16 is the top half of a binary32 */
         gv(RC_INT);
@@ -5324,7 +4995,7 @@ void gen_builtin_bf16tof32(void)
     tp_gen_tvx_unary(TP_OPR_BF16TOR32);
 }
 
-void gen_builtin_f32tobf16(void)
+static void gen_builtin_f32tobf16(void)
 {
     if (!tp_tvx())
         tp_soft_tvx_unary("__truncsfbf2");
@@ -5346,7 +5017,7 @@ static void tp_gen_tvx_dot_finish(int nb_args) {
     fpureg_stack_depth = 0;
 }
 
-void gen_builtin_mxfp4dot(void) {
+static void gen_builtin_mxfp4dot(void) {
     /* float __mxfp4dot(const void *block, const float *act, float acc)
      * MXFP4DOT wants AReg = block pointer, BReg = activation pointer, and the
      * accumulator on top of the FPU stack. */
@@ -5390,7 +5061,7 @@ static void tp_gen_tvx_dot4(int opr) {
 }
 
 /* void __mxfp4unpk8(unsigned packed, float *dst) - 8 lanes, one instruction */
-void gen_builtin_mxfp4unpk8(void) {
+static void gen_builtin_mxfp4unpk8(void) {
     gv2(RC_INT, RC_INT);
     tp_push_sv(&vtop[0]);   /* dst    -> BReg */
     tp_push_sv(&vtop[-1]);  /* packed -> AReg */
@@ -5400,7 +5071,7 @@ void gen_builtin_mxfp4unpk8(void) {
 }
 
 /* void __vsetlen(int n) - set the length for subsequent vector ops */
-void gen_builtin_vsetlen(void) {
+static void gen_builtin_vsetlen(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_VSETLEN);
@@ -5465,15 +5136,15 @@ static void tp_gen_vec3_ret(int opr) {
  *                                     (vertex count from __vsetlen)
  * void __fsincos(float *dst, unsigned bams)        dst = {sin, cos}
  * unsigned __frsqrtb(unsigned bits)                bit-domain 1/sqrt   */
-void gen_builtin_ftsetvp(void) {
+static void gen_builtin_ftsetvp(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_FTSETVP);
     abcreg_pop(1);
     vtop--;
 }
-void gen_builtin_ftransp(void)  { tp_gen_vec3_ret(TP_OPR_FTRANSP); }
-void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
+static void gen_builtin_ftransp(void)  { tp_gen_vec3_ret(TP_OPR_FTRANSP); }
+static void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
 /* unsigned __frecipb(unsigned bits);
  * void __fsincosb(float *dst_pairs, const unsigned short *bams)
  *                                        (angle count from __vsetlen) */
@@ -5481,10 +5152,10 @@ void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
  * int  __ftcull(unsigned char *dst, const float *xyz, const void *param)
  * int  __tskin(float *dst, const void *joints, const void *param)
  *                                        (vertex count from __vsetlen) */
-void gen_builtin_ftcull(void)   { tp_gen_vec3_ret(TP_OPR_FTCULL); }
-void gen_builtin_tskin(void)    { tp_gen_vec3_ret(TP_OPR_TSKIN); }
+static void gen_builtin_ftcull(void)   { tp_gen_vec3_ret(TP_OPR_FTCULL); }
+static void gen_builtin_tskin(void)    { tp_gen_vec3_ret(TP_OPR_TSKIN); }
 /* void __vsetfmt(unsigned fmt);  0 = f32 xyz, 1 = bf16, 2 = f16 */
-void gen_builtin_vsetfmt(void) {
+static void gen_builtin_vsetfmt(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_VSETFMT);
@@ -5496,15 +5167,15 @@ void gen_builtin_vsetfmt(void) {
  * int  __qgemm(float *dst, const void *param, unsigned nblocks_per_row)
  *                       param = {acts ptr, weights ptr}; rows = __vsetlen
  * void __vblend8(unsigned *dst, const unsigned *src, unsigned alpha_ctl) */
-void gen_builtin_ftsetlit(void) {
+static void gen_builtin_ftsetlit(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_FTSETLIT);
     abcreg_pop(1);
     vtop--;
 }
-void gen_builtin_flitb(void)   { tp_gen_vec3_ret(TP_OPR_FLITB); }
-void gen_builtin_qgemm(void)   { tp_gen_vec3_ret(TP_OPR_QGEMM); }
+static void gen_builtin_flitb(void)   { tp_gen_vec3_ret(TP_OPR_FLITB); }
+static void gen_builtin_qgemm(void)   { tp_gen_vec3_ret(TP_OPR_QGEMM); }
 /* void __vfill(void *dst, unsigned pattern, unsigned nbytes)
  * void __vfill2d(void *dst, unsigned pattern, unsigned width_bytes)
  *                          (rows/stride latched by __move2dinit)
@@ -5513,7 +5184,7 @@ void gen_builtin_qgemm(void)   { tp_gen_vec3_ret(TP_OPR_QGEMM); }
  *                          (rows/strides from __move2dinit, px/row
  *                           from __vsetlen)
  * void __stvxstate(void *save15words) */
-void gen_builtin_csumb(void)    { tp_gen_vec3_ret(TP_OPR_CSUM); }
+static void gen_builtin_csumb(void)    { tp_gen_vec3_ret(TP_OPR_CSUM); }
 /* unsigned __csumcpy(void *dst, const void *src, unsigned nbytes)
  * void __vq8k(void *dst_q8_K_blocks, const void *src)
  * void __vq80(void *dst_q8_0_blocks, const void *src)
@@ -5527,7 +5198,7 @@ void gen_builtin_csumb(void)    { tp_gen_vec3_ret(TP_OPR_CSUM); }
  *                    (n VCP transfers started at once, one deschedule
  *                     until all are done; each input's length comes back
  *                     in its entry - see include/t9000.h) */
-void gen_builtin_csumcpy(void)  { tp_gen_vec3_ret(TP_OPR_CSUMCPY); }
+static void gen_builtin_csumcpy(void)  { tp_gen_vec3_ret(TP_OPR_CSUMCPY); }
 
 /* T9000 configuration space and virtual channel processor (ISM 12.8-12.9,
  * HRM 11 and 15).  `chan` is a virtual channel word - input #80000040+8n,
@@ -5548,15 +5219,15 @@ static void tp_t9k_result(void)
     vpushi(0);
     tp_tvx_word_result(VT_INT | VT_UNSIGNED);
 }
-void gen_builtin_ldconf(void)     { tp_emit_1op(TP_OPR_LDCONF); tp_t9k_result(); }
-void gen_builtin_swapbfr(void)
+static void gen_builtin_ldconf(void)     { tp_emit_1op(TP_OPR_LDCONF); tp_t9k_result(); }
+static void gen_builtin_swapbfr(void)
 {
     tp_emit_2op(TP_OPR_SWAPBFR, 1, 0);
     tp_t9k_result();
     vtop->type.t = VT_PTR;
     vtop->type.ref = char_pointer_type.ref;
 }
-void gen_builtin_vin(void)
+static void gen_builtin_vin(void)
 {
     /* vin may deschedule; ldcnt then reads the count it left in the
      * process's workspace */
@@ -5564,8 +5235,8 @@ void gen_builtin_vin(void)
     emit_instr(TP_OP_OPR, TP_OPR_LDCNT);
     tp_t9k_result();
 }
-void gen_builtin_ldchstatus(void) { tp_emit_1op(TP_OPR_LDCHSTATUS); tp_t9k_result(); }
-void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(); }
+static void gen_builtin_ldchstatus(void) { tp_emit_1op(TP_OPR_LDCHSTATUS); tp_t9k_result(); }
+static void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(); }
 
 /* T9000 semaphores (ISM 8.6).  A semaphore is three words: a count, then
  * the front and back of the queue of processes waiting on it.
@@ -5588,7 +5259,7 @@ void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(
  *                                  its back through *back
  *   unsigned __ldresptr(chan)      read rc.Ptr; __stresptr(chan, v) write it
  * They take a T9000 (the descriptor table puts them after __vxfer). */
-void gen_builtin_disg(void)
+static void gen_builtin_disg(void)
 {
     /* as __disc: A=code(0), B=guard(1), C=rds(2) -> selected */
     tp_emit_3op(TP_OPR_DISG, 2, 1, 0);
@@ -5597,7 +5268,7 @@ void gen_builtin_disg(void)
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
 }
-void gen_builtin_erdsq(void)
+static void gen_builtin_erdsq(void)
 {
     /* erdsq leaves the queue's front in A and its back in B.  Park the
      * front in a scratch slot while the back is stored, since the vstack
@@ -5620,8 +5291,8 @@ void gen_builtin_erdsq(void)
     tp_tvx_word_result(VT_PTR);
     vtop->type.ref = char_pointer_type.ref;
 }
-void gen_builtin_ldresptr(void)   { tp_emit_1op(TP_OPR_LDRESPTR); tp_t9k_result(); }
-void gen_builtin_stvxstate(void) {
+static void gen_builtin_ldresptr(void)   { tp_emit_1op(TP_OPR_LDRESPTR); tp_t9k_result(); }
+static void gen_builtin_stvxstate(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_STVXSTATE);
@@ -5629,7 +5300,7 @@ void gen_builtin_stvxstate(void) {
     vtop--;
 }
 
-void gen_builtin_f16tof32(void)
+static void gen_builtin_f16tof32(void)
 {
     if (!tp_tvx())
         tp_soft_tvx_unary("__extendhfsf2");
@@ -5637,7 +5308,7 @@ void gen_builtin_f16tof32(void)
         tp_gen_tvx_unary(TP_OPR_F16TOR32);
 }
 
-void gen_builtin_f32tof16(void)
+static void gen_builtin_f32tof16(void)
 {
     if (!tp_tvx())
         tp_soft_tvx_unary("__truncsfhf2");
@@ -5691,7 +5362,7 @@ static void tp_gen_temp_idx_op(int opr, int idx)
 }
 
 /* void __tclr(int i)   -- mark T[i] empty */
-void gen_builtin_tclr(void) {
+static void gen_builtin_tclr(void) {
     int idx = tp_temp_index_const(&vtop[0], "__tclr");
     abcreg_stack_depth = 0;
     tp_gen_temp_idx_op(TP_OPR_TCLR, idx);
@@ -5700,7 +5371,7 @@ void gen_builtin_tclr(void) {
 }
 
 /* void __tst(float v, int i)  -- T[i] <- v  (v is pushed to FA first) */
-void gen_builtin_tst(void) {
+static void gen_builtin_tst(void) {
     SValue v = vtop[-1];
     int idx = tp_temp_index_const(&vtop[0], "__tst");
     abcreg_stack_depth = 0;
@@ -5715,7 +5386,7 @@ void gen_builtin_tst(void) {
 }
 
 /* float __tld(int i)  -- FA <- T[i], spilled to the float return slot */
-void gen_builtin_tld(void) {
+static void gen_builtin_tld(void) {
     int idx = tp_temp_index_const(&vtop[0], "__tld");
     save_reg(REG_FRET);
     abcreg_stack_depth = 0;
@@ -5754,13 +5425,13 @@ static void tp_gen_temp_fill(int opr)
  * next Temps-class instruction fences on it (is_fp_fill_fence).  Issue it
  * as far ahead of the consuming __tld/__fmvmul4 as the source allows or it
  * degenerates into a plain __f2ldm plus a stall. */
-void gen_builtin_f2ldm(void)  { tp_gen_temp_fill(TP_OPR_F2LDM); }
-void gen_builtin_f4ldm(void)  { tp_gen_temp_fill(TP_OPR_F4LDM); }
-void gen_builtin_f2ldma(void) { tp_gen_temp_fill(TP_OPR_F2LDMA); }
+static void gen_builtin_f2ldm(void)  { tp_gen_temp_fill(TP_OPR_F2LDM); }
+static void gen_builtin_f4ldm(void)  { tp_gen_temp_fill(TP_OPR_F4LDM); }
+static void gen_builtin_f2ldma(void) { tp_gen_temp_fill(TP_OPR_F2LDMA); }
 
 /* void __f2stm(void *p, int i)   {p[1], p[0]} <- T[i]
  * Mirrors __f2ldm's operand order.  This one really does pop both A and B. */
-void gen_builtin_f2stm(void) {
+static void gen_builtin_f2stm(void) {
     SValue p = vtop[-1];
     int idx = tp_temp_index_const(&vtop[0], "__f2stm");
     abcreg_stack_depth = 0;
@@ -5793,7 +5464,7 @@ static void tp_gen_mvmul4(int opr, int rowbase, int vbase)
     tp_gen_temp_idx_op(opr, rowbase & 7);
 }
 
-void gen_builtin_fmvmul4(void) {
+static void gen_builtin_fmvmul4(void) {
     int rowbase = tp_temp_index_const(&vtop[-1], "__fmvmul4");
     int vbase   = tp_temp_index_const(&vtop[0],  "__fmvmul4");
     save_reg(REG_FRET);
@@ -5819,7 +5490,7 @@ void gen_builtin_fmvmul4(void) {
  * transform is eight workspace touches per vertex - the exact traffic the
  * Temps are supposed to remove.  This form keeps the result on FA until it
  * reaches memory. */
-void gen_builtin_fmvmul4st(void) {
+static void gen_builtin_fmvmul4st(void) {
     SValue dst  = vtop[0];
     int rowbase = tp_temp_index_const(&vtop[-2], "__fmvmul4st");
     int vbase   = tp_temp_index_const(&vtop[-1], "__fmvmul4st");
@@ -5835,7 +5506,7 @@ void gen_builtin_fmvmul4st(void) {
 }
 
 /* float __fpoly3(float x, int cbase)  -- Horner with c0..c2 in T[cbase..+2] */
-void gen_builtin_fpoly3(void) {
+static void gen_builtin_fpoly3(void) {
     SValue x = vtop[-1];
     int cbase = tp_temp_index_const(&vtop[0], "__fpoly3");
     save_reg(REG_FRET);
@@ -5855,7 +5526,7 @@ void gen_builtin_fpoly3(void) {
 }
 
 /* void __qsetfmt(int ggml_type_id) */
-void gen_builtin_qsetfmt(void) {
+static void gen_builtin_qsetfmt(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_QSETFMT);
@@ -5863,7 +5534,7 @@ void gen_builtin_qsetfmt(void) {
     vtop--;
 }
 
-void gen_builtin_csub0(void) {
+static void gen_builtin_csub0(void) {
     /* CSUB0: Check subscript from 0.
      * __csub0(index, bound) → sets error flag if index >= bound (unsigned).
      * Returns index (unchanged). Useful for array bounds checking.
@@ -5879,7 +5550,7 @@ void gen_builtin_csub0(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_fmul(void) {
+static void gen_builtin_fmul(void) {
     /* FMUL: Fractional multiply.
      * __fmul(a, b) → (a * b) >> 31 (signed, round-to-nearest).
      * Operands interpreted as fractions in [-1, +1).
@@ -6168,6 +5839,279 @@ static int tp_try_inline_local_zero_memset(int nb_args)
 // 
 //     vtop -= 3;  /* Pop all 3 parameters */
 // }
+
+/*************************************************************/
+/* Builtin dispatch: the one entry tccgen.c calls.  Every generator above
+ * is reached only through this table. */
+/*************************************************************/
+
+typedef void (*tp_builtin_gen_fn)(void);
+enum {
+    TP_BUILTIN_ANY,
+    TP_BUILTIN_T425,
+    TP_BUILTIN_T805,
+    TP_BUILTIN_FPU,
+    TP_BUILTIN_TVX,
+    TP_BUILTIN_T9000
+};
+
+struct tp_builtin_desc {
+    int tok;
+    const char *args;
+    tp_builtin_gen_fn gen;
+    unsigned char returns_void;
+    short simple_op; /* simple instruction */
+    short vector_op; /* TVX vector instruction */
+    unsigned char cpu;
+    short scalar_op; /* TVX word or four-argument accumulating instruction */
+};
+
+static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
+{
+    static const struct tp_builtin_desc descs[] = {
+        { TOK___out,         "eee", NULL, 1, TP_OPR_OUT, 0, TP_BUILTIN_ANY },
+        { TOK___in,          "eee", NULL, 1, TP_OPR_IN, 0, TP_BUILTIN_ANY },
+        { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___outword,     "ee",  gen_builtin_outword,     1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN, 0, TP_BUILTIN_ANY },
+        /* RESETCH returns the previous channel word: NotProcess_p if idle,
+         * otherwise the descriptor of the process blocked on it. */
+        { TOK___resetch,     "e",   NULL,     0, TP_OPR_RESETCH, 0, TP_BUILTIN_ANY },
+        { TOK___move,        "eee", gen_builtin_move,        1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT, 0, TP_BUILTIN_T425 },
+        { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL, 0, TP_BUILTIN_T425 },
+        { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO, 0, TP_BUILTIN_T425 },
+        { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO, 0, TP_BUILTIN_T425 },
+        { TOK___crcbyte,     "eee", NULL,     0, TP_OPR_CRCBYTE, 0, TP_BUILTIN_T425 },
+        { TOK___crcword,     "eee", NULL,     0, TP_OPR_CRCWORD, 0, TP_BUILTIN_T425 },
+        { TOK___ldtimer,     "",    NULL,     0, TP_OPR_LDTIMER, 0, TP_BUILTIN_ANY },
+        { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER, 0, TP_BUILTIN_ANY },
+        { TOK___mint,        "",    NULL,        0, TP_OPR_MINT, 0, TP_BUILTIN_ANY },
+        { TOK___ldpri,       "",    NULL,       0, TP_OPR_LDPRI, 0, TP_BUILTIN_ANY },
+        { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP, 0, TP_BUILTIN_ANY },
+        { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP, 0, TP_BUILTIN_ANY },
+        { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP, 0, TP_BUILTIN_ANY },
+        { TOK___stopp, "", NULL, 1, TP_OPR_STOPP, 0, TP_BUILTIN_ANY },
+        { TOK___alt, "", NULL, 1, TP_OPR_ALT, 0, TP_BUILTIN_ANY },
+        { TOK___altwt, "", NULL, 1, TP_OPR_ALTWT, 0, TP_BUILTIN_ANY },
+        { TOK___altend, "", NULL, 1, TP_OPR_ALTEND, 0, TP_BUILTIN_ANY },
+        { TOK___talt, "", NULL, 1, TP_OPR_TALT, 0, TP_BUILTIN_ANY },
+        { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT, 0, TP_BUILTIN_ANY },
+        { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC, 0, TP_BUILTIN_ANY },
+        { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS, 0, TP_BUILTIN_ANY },
+        { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT, 0, TP_BUILTIN_ANY },
+        { TOK___disc,        "eee", NULL,        0, TP_OPR_DISC, 0, TP_BUILTIN_ANY },
+        { TOK___diss,        "ee",  NULL,        0, TP_OPR_DISS, 0, TP_BUILTIN_ANY },
+        { TOK___dist,        "eee", NULL,        0, TP_OPR_DIST, 0, TP_BUILTIN_ANY },
+        /* saveh/savel write two queue pointers; the st* forms set one. */
+        { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH, 0, TP_BUILTIN_ANY },
+        { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL, 0, TP_BUILTIN_ANY },
+        { TOK___sthf,        "e",   NULL, 1, TP_OPR_STHF, 0, TP_BUILTIN_ANY },
+        { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB, 0, TP_BUILTIN_ANY },
+        { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF, 0, TP_BUILTIN_ANY },
+        { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB, 0, TP_BUILTIN_ANY },
+        /* GAJW returns the old workspace; WCNT returns the word offset. */
+        { TOK___gajw,        "e",   NULL,        0, TP_OPR_GAJW, 0, TP_BUILTIN_ANY },
+        { TOK___wcnt,        "e",   NULL,        0, TP_OPR_WCNT, 0, TP_BUILTIN_ANY },
+        { TOK___seterr, "", NULL, 1, TP_OPR_SETERR, 0, TP_BUILTIN_ANY },
+        { TOK___testerr,     "",    NULL,     0, TP_OPR_TESTERR, 0, TP_BUILTIN_ANY },
+        { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___testhalterr, "",    NULL, 0, TP_OPR_TESTHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR, 0, TP_BUILTIN_ANY },
+        { TOK___testpranal,  "",    NULL,  0, TP_OPR_TESTPRANAL, 0, TP_BUILTIN_ANY },
+        { TOK___norm,        "e",   gen_builtin_norm,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0, 0, 0, TP_BUILTIN_ANY },
+        { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK_builtin_popcountl, "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bitrevword,  "e",   gen_builtin_bitrevword,  0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___bitrevnbits, "ee",  gen_builtin_bitrevnbits, 0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___csub0,       "ee",  gen_builtin_csub0,       0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___fmul,        "ee",  gen_builtin_fmul,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___lddevid,     "",    gen_builtin_lddevid,     0, 0, 0, TP_BUILTIN_T805 },
+        { TOK___fpchkerr,    "",    gen_builtin_fpchkerr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fptesterr,   "",    gen_builtin_fptesterr,   0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpseterr,    "",    gen_builtin_fpseterr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpclrerr,    "",    gen_builtin_fpclrerr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpint,       "e",   gen_builtin_fpint,       0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrp,     "e",   gen_builtin_fpintrp,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrm,     "e",   gen_builtin_fpintrm,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrz,     "e",   gen_builtin_fpintrz,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fprem,       "ee",  gen_builtin_fprem,       0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpsqrt,      "e",   gen_builtin_fpsqrt,      0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___fpabs,       "e",   gen_builtin_fpabs,       0, 0, 0, TP_BUILTIN_ANY },
+        /* TVX (MXFP4 / bfloat16) */
+        { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bf16pack,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16PACK },
+        { TOK___bf16unpkh,   "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16UNPKH },
+        { TOK___mxfp4tof32,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4TOR32 },
+        { TOK___f32tomxfp4,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4 },
+        { TOK___mxe8m0tof32, "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0TOR32 },
+        { TOK___mxe8m0of,    "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0OF },
+        { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16dot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16DOT },
+        { TOK___mxfp4gemv,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMV },
+        { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___f32tomxfp4x8,"e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4X8 },
+        { TOK___bf16mul2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16MUL2 },
+        { TOK___bf16add2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16ADD2 },
+        { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4gemvbf, "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMVBF },
+        { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN, TP_BUILTIN_TVX },
+        { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN, TP_BUILTIN_TVX },
+        { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN, TP_BUILTIN_TVX },
+        { TOK___vrmsnorm,    "eee", NULL, 1, 0, TP_OPR_VRMSNORM, TP_BUILTIN_TVX },
+        { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN, TP_BUILTIN_TVX },
+        { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___q8dot,       "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOT },
+        { TOK___q8dotbf,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOTBF },
+        { TOK___iq1mdot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ1MDOT },
+        { TOK___iq2xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ2XXSDOT },
+        { TOK___iq3xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ3XXSDOT },
+        { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qdot,        "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_QDOT },
+        { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32, TP_BUILTIN_TVX },
+        { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT, TP_BUILTIN_TVX },
+        { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF, TP_BUILTIN_TVX },
+        { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftransp,     "eee", gen_builtin_ftransp,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS, TP_BUILTIN_TVX },
+        { TOK___frsqrtb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRSQRT },
+        { TOK___frecipb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRECIP },
+        { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB, TP_BUILTIN_TVX },
+        { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE, TP_BUILTIN_TVX },
+        { TOK___ftcull,      "eee", gen_builtin_ftcull,      0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___tskin,       "eee", gen_builtin_tskin,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___flitb,       "eee", gen_builtin_flitb,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qgemm,       "eee", gen_builtin_qgemm,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vblend8,     "eee", NULL, 1, 0, TP_OPR_VBLEND8, TP_BUILTIN_TVX },
+        { TOK___vfill,       "eee", NULL, 1, 0, TP_OPR_VFILL, TP_BUILTIN_TVX },
+        { TOK___vfill2d,     "eee", NULL, 1, 0, TP_OPR_VFILL2D, TP_BUILTIN_TVX },
+        { TOK___csumb,       "eee", gen_builtin_csumb,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vblend2d,    "eee", NULL, 1, 0, TP_OPR_VBLEND2D, TP_BUILTIN_TVX },
+        { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vq8k,        "ee",  NULL, 1, 0, TP_OPR_VQ8K, TP_BUILTIN_TVX },
+        { TOK___vq80,        "ee",  NULL, 1, 0, TP_OPR_VQ80, TP_BUILTIN_TVX },
+        { TOK___vcvt,        "eee", NULL, 1, 0, TP_OPR_VCVT, TP_BUILTIN_TVX },
+        { TOK___vxfer,       "ee",  NULL, 1, 0, TP_OPR_VXFER, TP_BUILTIN_TVX },
+        /* T9000 configuration space and VCP */
+        { TOK___ldconf,      "e",   gen_builtin_ldconf,      0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF, 0, TP_BUILTIN_T9000 },
+        { TOK___initvlcb,      "ee",   NULL, 1, TP_OPR_INITVLCB, 0, TP_BUILTIN_T9000 },
+        { TOK___sethdr,        "eee",  NULL, 1, TP_OPR_SETHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___writehdr,      "eee",  NULL, 1, TP_OPR_WRITEHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___readhdr,       "eee",  NULL, 1, TP_OPR_READHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___setchmode,     "ee",   NULL, 1, TP_OPR_SETCHMODE, 0, TP_BUILTIN_T9000 },
+        { TOK___stopch,        "e",    NULL, 1, TP_OPR_STOPCH, 0, TP_BUILTIN_T9000 },
+        { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___vin,         "eee", gen_builtin_vin,         0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___vout,          "eee",  NULL, 1, TP_OPR_VOUT, 0, TP_BUILTIN_T9000 },
+        { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___chantype,    "e",   gen_builtin_chantype,    0, 0, 0, TP_BUILTIN_T9000 },
+        /* T9000 semaphores and resource channels */
+        { TOK___semwait,       "e",    NULL, 1, TP_OPR_WAIT, 0, TP_BUILTIN_T9000 },
+        { TOK___semsignal,     "e",    NULL, 1, TP_OPR_SIGNAL, 0, TP_BUILTIN_T9000 },
+        { TOK___mkrc,          "eee",  NULL, 1, TP_OPR_MKRC, 0, TP_BUILTIN_T9000 },
+        { TOK___unmkrc,        "e",    NULL, 1, TP_OPR_UNMKRC, 0, TP_BUILTIN_T9000 },
+        { TOK___grant,         "ee",   NULL, 1, TP_OPR_GRANT, 0, TP_BUILTIN_T9000 },
+        { TOK___enbg,          "ee",   NULL, 1, TP_OPR_ENBG, 0, TP_BUILTIN_T9000 },
+        { TOK___disg,        "eee", gen_builtin_disg,        0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___irdsq,         "eee",  NULL, 1, TP_OPR_IRDSQ, 0, TP_BUILTIN_T9000 },
+        { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___stresptr,      "ee",   NULL, 1, TP_OPR_STRESPTR, 0, TP_BUILTIN_T9000 },
+        /* T9 FPU Temps T0-T7 */
+        { TOK___tld,         "e",   gen_builtin_tld,         0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___tst,         "ee",  gen_builtin_tst,         1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___tclr,        "e",   gen_builtin_tclr,        1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2ldm,       "ee",  gen_builtin_f2ldm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f4ldm,       "ee",  gen_builtin_f4ldm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2ldma,      "ee",  gen_builtin_f2ldma,      1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2stm,       "ee",  gen_builtin_f2stm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fmvmul4,     "ee",  gen_builtin_fmvmul4,     0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fmvmul4st,   "eee", gen_builtin_fmvmul4st,   1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fpoly3,      "ee",  gen_builtin_fpoly3,      0, 0, 0, TP_BUILTIN_T9000 },
+        { 0,                 NULL,  NULL,                    0 }
+    };
+    const struct tp_builtin_desc *desc;
+
+    for (desc = descs; desc->tok != 0; ++desc) {
+        if (desc->tok == tok)
+            return desc;
+    }
+    return NULL;
+}
+
+ST_FUNC int gen_transputer_builtin_call(int tok)
+{
+    const struct tp_builtin_desc *desc;
+
+    desc = tp_find_builtin_desc(tok);
+    if (!desc)
+        return 0;
+    /* FPU-only generators diagnose after parsing their operands. */
+    if (desc->cpu == TP_BUILTIN_TVX && !tp_tvx()) {
+        const struct tp_soft_tvx_desc *soft = tp_find_soft_tvx(tok);
+        if (!soft)
+            tcc_error("%s is a TVX instruction with no software "
+                      "version, not available without -mt9000tvx",
+                      get_tok_str(tok, NULL));
+        parse_builtin_params(0, desc->args);
+        save_reg(REG_IRET);
+        tp_soft_tvx_call(soft);
+        return 1;
+    }
+    if (desc->cpu == TP_BUILTIN_T9000 && !tcc_state->tp_t9000)
+        tcc_error("%s is a T9000 instruction, not available with -m%s",
+                  get_tok_str(tok, NULL), tp_target_name(tcc_state));
+    if ((desc->cpu == TP_BUILTIN_T425 || desc->cpu == TP_BUILTIN_T805) &&
+        tp_t414())
+        tcc_error("%s is a T425 instruction, not available with -mt414",
+                  get_tok_str(tok, NULL));
+    if (desc->cpu == TP_BUILTIN_T805 && tcc_state->tp_t800)
+        tcc_error("%s is a T805 instruction, not available with -mt800",
+                  get_tok_str(tok, NULL));
+
+    parse_builtin_params(0, desc->args);
+    /* Integer results land in REG_IRET, which may still hold a pending
+     * call result on the vstack (`icall() + __ldtimer()`); without a spill
+     * both operands would name the builtin's result.  Spilling after the
+     * arguments are parsed also covers an argument that is that result. */
+    save_reg(REG_IRET);
+    if (desc->scalar_op && strlen(desc->args) == 4)
+        tp_gen_tvx_dot4(desc->scalar_op);
+    else if (desc->scalar_op && !desc->args[1])
+        tp_gen_tvx_unary(desc->scalar_op);
+    else if (desc->scalar_op)
+        tp_gen_tvx_binary(desc->scalar_op);
+    else if (desc->vector_op && !desc->args[2])
+        tp_gen_vec2(desc->vector_op);
+    else if (desc->vector_op)
+        tp_gen_vec3(desc->vector_op);
+    else if (desc->simple_op && !desc->args[0] && !desc->returns_void)
+        tp_gen_flag_result(desc->simple_op);
+    else if (desc->simple_op && !desc->args[0])
+        emit_instr(TP_OP_OPR, desc->simple_op);
+    else if (desc->simple_op && !desc->args[1])
+        tp_emit_1op(desc->simple_op);
+    else if (desc->simple_op && !desc->args[2])
+        tp_emit_2op(desc->simple_op, 1, 0);
+    else if (desc->simple_op)
+        tp_emit_3op(desc->simple_op, 2, 1, 0);
+    else
+        desc->gen();
+    if (desc->simple_op && desc->args[0] && !desc->returns_void)
+        tp_builtin_word_result();
+    if (desc->returns_void)
+        tp_builtin_return_void();
+    return 1;
+}
 
 /*************************************************************/
 /* Function Prologue/Epilogue */

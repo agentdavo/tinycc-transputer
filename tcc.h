@@ -1926,12 +1926,8 @@ ST_FUNC void tp_cmp_hint_branch_true(int on);
 #define TP_LOOP_POOL_CLOSE()  tp_loop_pool_close()
 #define TP_LOOP_POOL_UNSAFE() tp_loop_pool_unsafe()
 
-/* Transputer intrinsic generator functions (called from tccgen.c) */
-/* Channel I/O */
-void gen_builtin_outbyte(void);
-void gen_builtin_outword(void);
-/* Memory operations */
-void gen_builtin_move(void);
+/* A call to a transputer builtin: parse its arguments and generate it.
+   Returns 0 if `tok` is not one. */
 ST_FUNC int gen_transputer_builtin_call(int tok);
 /* T800 pointer arithmetic fast paths */
 ST_DATA int tp_ptr_add_is_addr;       /* final `+` of a pointer computation */
