@@ -5,7 +5,9 @@
 #   SHADOWS BUMP SPECULAR STATS CAMERA_PATH (0|1, default 1 1 1 0 1)
 #   TIMEOUT (seconds, default 3600)  WORK (parent of the run directory)
 #   TCC_DIR / T4_BIN select the toolchain and emulator.
-#   CYCLES=1 times in estimated T800 cycles per node instead of host time.
+#   CYCLES=1 times in estimated T800 cycles instead of host time: exact for
+#   one node; t4 keeps the count per host thread, which in a threaded
+#   network is not one node's (2 nodes reported 4x the 1-node frame).
 #   PROFILE=N samples IPtr every N instructions (t4 T4_IPTR_SAMPLE) and
 #   stops the emulator after the last frame; profile.py summarises them.
 # Prints the run directory; screenshots are screenshot_N.bmp there.
@@ -44,8 +46,7 @@ for ((n = 0; n < NODES; n++)); do
     "$R/transputer-netload" "n$n.elf" "n$n.btl" >"n$n.netload.log" 2>&1 || { cat "n$n.netload.log" >&2; exit 1; }
 done
 export SPYNET="$WORK/scene.map" T4_NODE_BTL="$WORK/n%d.btl"
-# CYCLES=1: each node's timer counts its own estimated T800 cycles (t4
-# T4_EST_CYCLES), independent of host load; blocked time is not counted.
+# CYCLES=1: the timer counts estimated T800 cycles (t4 T4_EST_CYCLES).
 if [[ ${CYCLES:-0} == 1 ]]; then export T4_EST_CYCLES=1; else unset T4_EST_CYCLES; fi
 env -u DISPLAY T4_UART_CONSOLE=0 T4_UART_LOG="$WORK/scene.uart" T4_PRESENT_ON_FLIP=1 \
     timeout -k 5 "${TIMEOUT:-3600}" "$T4" "${T4_FLAGS[@]}" -sb "$WORK/n0.btl" 2>&1 | tail -c 1000000 >scene.out &
