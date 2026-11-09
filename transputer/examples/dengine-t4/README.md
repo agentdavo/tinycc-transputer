@@ -1,7 +1,151 @@
-# dEngine on T4: matrix bridge and compatibility target
+# dEngine on T4
 
-This is a small stepping stone towards running Fabien Sanglard's dEngine on
-T4. It compiles **the original `src/matrix.c` from the separate dEngine clone**
+## The original renderer (`port/`)
+
+`port/` runs Fabien Sanglard's dEngine itself on emulated T800s: its
+unmodified `src/*.c` from the separate checkout (all of it except
+`renderer_fixed.c`, the OpenGL ES 1.1 path), with the original scene, map,
+OBJ and MD5 loaders, CPU skeletal animation, camera-path playback and
+`renderer_progr.c` drawing with the original GLSL uber, shadow-generator and
+text shaders. Nothing upstream is copied or patched; the port supplies what
+the iOS application and its system libraries supplied:
+
+| File | Replaces |
+|---|---|
+| `libc.c`, `include/` | the C library: stdio over a read-only ROM, printf/scanf, strtod, a heap, a software libm |
+| `mkrom.py`, `romfs.c`, `rom.S` | the application bundle: the files the scene references, linked into every image |
+| `png.c` | UIImage/CoreGraphics PNG decoding (premultiplied RGBA, rows top first) |
+| `pvrtc.c` | the GPU's PVRTC 2/4bpp decoding, for `glCompressedTexImage2D` |
+| `gles2.c`, `include/OpenGLES/` | OpenGL ES 2.0: textures, FBOs and renderbuffers, buffers, shaders and programs, clipping, rasterisation, depth, blending |
+| `dengine_app.c` | `EAGLView.m`: start-up, the PNG loader hook, the per-frame call |
+| `node.c`, `boot.S`, `host_main.c` | the device: a T4 node driver, or a host driver for the same code |
+
+Shaders go through a preprocessor (`#define`/`#undef`/`#ifdef` and `#if`
+on `defined`) and the bounded compiler in `../distributed-fb`
+(`glsl_fragment_compiler.c`, unchanged). At link time each stage is
+decoded into scalar operations on its register file, its helper functions
+inlined, then copy propagation and dead-code elimination: the uber fragment
+shader runs 62 operations per pixel (82 compiler instructions), the shadow
+generator 26.
+
+Start-up follows the iOS view: the ES 2.0 renderer, the user defaults
+(high material quality; shadow, bump and specular mapping on; statistics
+off), then the window framebuffer bound, as `createFramebuffer` did after
+`dEngine_Init` had left the shadow FBO bound. Each frame follows
+`-drawView:` with `PLAY_VIDEO`: the first frame starts
+`data/cameraPath/fps.cp`, then `dEngine_HostFrame()` runs. The clock is a
+frame clock (`FRAME_MS`, 33 ms), so every node computes the same frame;
+`START_MS` moves the engine's clock on after the camera path has set it.
+The buffer is the iPhone's 320x480 portrait one; node 0 shows it turned
+to landscape, 480x320, as the phone was held.
+
+```sh
+# Host build of the same code: PPM frames, quick checks
+bash transputer/examples/dengine-t4/port/build.sh host /tmp/dh
+(cd /tmp/dh && ./dengine-host --rom rom.bin --out f --frames 2)
+
+# NODES emulated T800s; screenshots in the printed run directory
+NODES=8 FRAMES=4 START_MS=9000 bash transputer/examples/dengine-t4/port/run-scene.sh
+
+# 1, 2, 4, 8, 16 and 32 nodes must give identical frames, equal to the host's
+bash transputer/examples/dengine-t4/port/test-scene.sh
+```
+
+`TCC_DIR` selects the toolchain (it needs 9f993df1, below), `LOW_QUALITY=1`
+the PVRTC material set, `SHADOWS`/`BUMP`/`SPECULAR`/`STATS`/`CAMERA_PATH`
+the settings, `BAND_ROWS` the band height and `PROFILE=N` an IPtr profile
+(`profile.py`). `test_pvrtc.c` checks the PVRTC decoder against the PNGs
+the PVR files were made from (mean error 1-7 levels on diffuse maps), and
+`compose_bands.py` checks host frames drawn by separate "nodes".
+
+**Verification.** On one T800 the captured frames match the host build
+pixel for pixel, and every node count gives the same bytes; the host and
+T800 builds share the libc and libm, and the compilers keep the same IEEE
+operations (no contraction), so this compares the transputer compiler with
+gcc on the whole engine. Each optimisation below was checked to leave the
+frames bit-identical on the host, across quality, shadow, bump, specular
+and statistics settings.
+
+**Distribution.** The window is cut into 5-row bands; node n draws bands
+t with t % N == n and sends them, checksummed, up a binary link tree.
+The shadow map is split the same way: `deGlDistributeFramebuffer` limits a
+node to its rows of the shadow FBO, and when dEngine unbinds the FBO the
+GL calls the node's gather, which sends its rows up the tree and receives
+the whole map back, before the main pass samples it - what a multi-GPU
+driver does with a shared render target. Each node first runs only the
+position slice of the vertex program, and gives the rest only to triangles
+that face the camera and cover one of its rows. Rasterisation is
+deterministic per row (spans from fixed edge formulas, values from plane
+equations at each row's first pixel), which is what makes every node count
+produce the same image.
+
+**Performance.** On one node, frame 1 took about 290k ticks (64 us, t4's
+host clock) with the first working interpreter, 164k once the code was
+decoded to scalar operations, and 112-136k with copy propagation, lazy
+vertex shading and the texture fast path. t4's cycle model put one frame,
+before the texture fast path, at about 0.58G estimated T800 cycles: about
+half a minute for a 20 MHz T800. A profile of that node (`PROFILE=150000`): the shader interpreter
+49%, texture sampling 28%, rasterisation 11%, pixel writes 8%; dEngine's
+own code - MD5 skinning, camera, scene update - under 0.01%.
+
+`timing.sh`, fastest of frames 1-5 (ticks; render, gather and band
+collection on node 0):
+
+| Nodes | Ticks | Speed-up | Render | Gather | Bands |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 135665 | 1.00 | 134778 | 0 | 887 |
+| 2 | 75586 | 1.79 | 72794 | 1898 | 2792 |
+| 4 | 44466 | 3.05 | 42418 | 3444 | 2045 |
+| 8 | 32738 | 4.14 | 29080 | 3807 | 3658 |
+| 16 | 28471 | 4.77 | 21805 | 3513 | 6660 |
+| 32 | 28613 | 4.74 | 17625 | 4024 | 10985 |
+
+These are host-time samples on a busy machine: the same build measured
+42.8k ticks at 4 nodes and 23.2k at 16 in a quieter run. The emulator had
+20 host cores, so 32 node threads get about 0.6 of a core each; at 32
+nodes the frame time is the host's total CPU, not the program (node 0's
+own render still falls from 21.8k to 17.6k, and its wait for the other
+nodes' bands grows). What the program itself repeats on every node is
+now small: positions for all vertices, the culling and row tests per
+triangle, and dEngine's frame update. The shadow-map exchange costs
+2-4k ticks. `CYCLES=1` cannot replace host time here: t4 counts cycles per
+host thread, and in a threaded network those are not one node's.
+
+t4 does not model T800 link speed (its threaded links copy memory). Per
+frame, the shadow map (1.38 MB) goes down every tree link and the bands
+(614 KB) converge on node 0; at a T800 link's 20 Mbit/s, about 1.7 MB/s,
+the map alone is about 0.8 s per link, so on real hardware the exchange
+would dominate long before 32 nodes.
+
+**Memory.** A node is a 64 MiB T800 (`t4 -sm 26`): the image with its
+4.3 MB ROM, a heap that skips t4's framebuffer window at 0x81E00000 (peak
+about 25 MB, of which 12.8 MB is dEngine's transient OBJ vertex cache), and
+the workspace 1 MiB below the top of RAM. t4 enters a BTL with WPtr at the
+end of the image, so `boot.S` sets the workspace absolutely.
+
+**Differences from the iPhone.** Colour is RGBA8 (the view was RGB565),
+depth is a 32-bit float (the shadow FBO asked for 16 bits), and textures
+are sampled at level 0 with the magnification filter (dEngine creates no
+mipmaps). The shader compiler accepts only what dEngine's shaders need;
+points and lines are not drawn and there is no stencil buffer. GLSL's
+undefined `pow` of a negative base gives 0, as on GPUs that clamp.
+Two upstream quirks are handled in the platform: `FS_OpenFile` callocs a
+file's exact size and `LoadShader` passes it to `glShaderSource` as a
+C string, so `calloc` adds a zero byte; `E_Sys_Milliseconds` takes a zero
+seconds count for "not started", so the clock starts at 1000 s. The low
+quality material list names `jumbodoor_s.png.pvr`, which the checkout lacks;
+the engine reports it, as it would on the phone.
+
+**A compiler bug it found.** dEngine's `gluLookAt` stores
+`- DotProduct(vEye, vU)` through a pointer. `tp_stmt_end` took the
+negation's `mint; xor` for address code and stored the sum unnegated, so
+the light's matrix was wrong and the shadow pass drew nothing. Fixed in
+9f993df1 (`transputer/tests/test_fp_neg_store.c`).
+
+## Earlier previews (before the port)
+
+The matrix bridge was a small stepping stone towards running Fabien
+Sanglard's dEngine on T4. It compiles **the original `src/matrix.c` from the separate dEngine clone**
 into each T800 program and uses that code for rotation, camera matrices and
 perspective division. The existing T4 software rasterizer, test texture,
 four-node transport, and double-buffered display produce the visible cube.
@@ -247,7 +391,10 @@ node counts. The first four captured frames also matched a host build of the
 bridge pixel-for-pixel. Host and T800 tests of the original matrix functions
 passed.
 
-## What the real programmable renderer needs
+### What the real programmable renderer needed
+
+This was written before `port/`, which now supplies all of it with its own
+GL layer; the bounded bridge below remains as it was.
 
 The source's `renderer_progr.c` directly calls shader creation/compilation and
 linking, attributes and uniforms, indexed drawing, texture allocation and
