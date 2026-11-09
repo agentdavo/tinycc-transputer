@@ -814,26 +814,10 @@ struct TCCState {
     unsigned char gnu89_inline; /* treat 'extern inline' like 'static inline' */
     unsigned char unwind_tables; /* create eh_frame section */
 #ifdef TCC_TARGET_TRANSPUTER
-    /* -mt9000: allow the IMS T9000-only opcodes (ls/ss/lsx/lbx/xsword/
-       xbword/ssub).  Default 0 == plain T805 codegen.  -mt805/-mt800/-mt425/
-       -mt414 clear it again (last option on the command line wins). */
-    unsigned char tp_t9000;
-    /* -mt425: the IMS T425 - the T805's integer instructions and no FPU.
-       Floating point becomes calls to the soft-float helpers in
-       transputer-libtcc1-t425.a.  Also clears tp_t9000.  -mt414 sets it
-       too, and tp_t414 as well. */
-    unsigned char tp_t425;
-    /* -mt414: the IMS T414 - the T425 without dup, wsubdb, pop, the
-       move2d group, crcword/crcbyte, bitcnt and the bit reversals. */
-    unsigned char tp_t414;
-    /* -mt800: the original IMS T800 - the T805 without what the T805
-       shares with the T425 and the T800 lacks: pop, the timer enables,
-       ldmemstartval, the j0 break group, lddevid and start.  -mt805 is
-       the T805, as -mt800 was before. */
-    unsigned char tp_t800;
-    /* -mt9000tvx: the T9000 with the TVX extension (opr #1C0-#1FA), the
-       only target whose TVX builtins compile; predefines __TVX__. */
-    unsigned char tp_tvx;
+    /* The part compiled for, as the set of what it has beyond the T414
+       (TP_EF_*, one of TP_ISA_*).  -m<part> chooses it and the last one on
+       the command line wins (tp_select_target); the default is the T9000. */
+    unsigned char tp_isa;
     /* A -mt option was given, so a link refuses objects compiled for a
        part with more than that one (TP_EF_* in their e_flags). */
     unsigned char tp_link_check;
@@ -1955,7 +1939,26 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
 #define TP_EF_FPU     0x04  /* the T800 floating-point unit */
 #define TP_EF_T9000   0x08  /* T9000 instructions */
 #define TP_EF_TVX     0x10  /* the TVX extension */
-ST_FUNC unsigned tp_target_flags(TCCState *s1);
+/* The parts -m selects, as what each has:
+     T414   the base instruction set
+     T425   + dup, wsubdb, ... and pop, lddevid, ...; still no FPU, so
+            floating point is calls into transputer-libtcc1-t425.a
+     T800   the T414 + dup, wsubdb, ... and the FPU, without pop, lddevid
+     T805   the T425 with the FPU
+     T9000  + ls/ss/lsx/lbx/xsword/xbword/ssub and the T9000 FPU additions
+     T9000TVX  + the TVX extension (opr #1C0-#1FA); predefines __TVX__ */
+#define TP_ISA_T414     0
+#define TP_ISA_T425     (TP_EF_T800OPS | TP_EF_T805OPS)
+#define TP_ISA_T800     (TP_EF_T800OPS | TP_EF_FPU)
+#define TP_ISA_T805     (TP_ISA_T425 | TP_EF_FPU)
+#define TP_ISA_T9000    (TP_ISA_T805 | TP_EF_T9000)
+#define TP_ISA_T9000TVX (TP_ISA_T9000 | TP_EF_TVX)
+/* Does the part compiled for have all of the TP_EF_* in `f`? */
+#define tp_has(s1, f) (((s1)->tp_isa & (f)) == (f))
+/* Take `name` ("t800", "t9000tvx", ...) as the part to compile for;
+   0 if it does not name one. */
+ST_FUNC int tp_select_target(TCCState *s1, const char *name);
+/* The -m option that selects the current part, less its "-m". */
 ST_FUNC const char *tp_target_name(TCCState *s1);
 ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
                                   const char *member);

@@ -38,36 +38,42 @@ static int tp_patch_iprel(uint8_t *slot, int width, int op, uint32_t addr, uint3
  * one, TVX code anywhere but -mt9000tvx.  A link without -m takes anything.
  * Objects from before 2026-11-03 carry 0 and so pass everywhere.
  */
-ST_FUNC unsigned tp_target_flags(TCCState *s1)
-{
-    unsigned f;
+static const struct { const char *name; unsigned char isa; } tp_parts[] = {
+    { "t9000tvx", TP_ISA_T9000TVX },
+    { "t9000",    TP_ISA_T9000 },
+    { "t805",     TP_ISA_T805 },
+    { "no-t9000", TP_ISA_T805 },
+    { "t800",     TP_ISA_T800 },
+    { "t425",     TP_ISA_T425 },
+    { "t414",     TP_ISA_T414 },
+};
 
-    if (s1->tp_t414)
-        return 0;
-    if (s1->tp_t425)
-        return TP_EF_T800OPS | TP_EF_T805OPS;
-    if (s1->tp_t800)
-        return TP_EF_T800OPS | TP_EF_FPU;
-    f = TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU;      /* the T805 */
-    if (s1->tp_t9000)
-        f |= TP_EF_T9000;
-    if (s1->tp_tvx)
-        f |= TP_EF_TVX;
-    return f;
+/* The first name in tp_parts for a part with exactly `isa`, or NULL. */
+static const char *tp_part_name(unsigned isa)
+{
+    int k;
+
+    for (k = 0; k < countof(tp_parts); k++)
+        if (tp_parts[k].isa == isa)
+            return tp_parts[k].name;
+    return NULL;
 }
 
-/* The -m option that selects the current target, less its "-m". */
+ST_FUNC int tp_select_target(TCCState *s1, const char *name)
+{
+    int k;
+
+    for (k = 0; k < countof(tp_parts); k++)
+        if (!strcmp(name, tp_parts[k].name)) {
+            s1->tp_isa = tp_parts[k].isa;
+            return 1;
+        }
+    return 0;
+}
+
 ST_FUNC const char *tp_target_name(TCCState *s1)
 {
-    if (s1->tp_t414)
-        return "t414";
-    if (s1->tp_t425)
-        return "t425";
-    if (s1->tp_t800)
-        return "t800";
-    if (!s1->tp_t9000)
-        return "t805";
-    return s1->tp_tvx ? "t9000tvx" : "t9000";
+    return tp_part_name(s1->tp_isa);
 }
 
 /* An object being linked carries `flags` in its e_flags; `member` names it
@@ -79,17 +85,10 @@ ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
         "T800 instructions", "T805 instructions", "the FPU",
         "T9000 instructions", "TVX"
     };
-    static const struct { unsigned flags; const char *name; } parts[] = {
-        { TP_EF_T800OPS | TP_EF_T805OPS, "-mt425" },
-        { TP_EF_T800OPS | TP_EF_FPU, "-mt800" },
-        { TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU, "-mt805" },
-        { TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU | TP_EF_T9000, "-mt9000" },
-        { TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU | TP_EF_T9000 | TP_EF_TVX,
-          "-mt9000tvx" },
-    };
-    unsigned extra = flags & ~tp_target_flags(s1) & ((TP_EF_TVX << 1) - 1);
+    unsigned extra = flags & ~s1->tp_isa & ((TP_EF_TVX << 1) - 1);
     char needs[96];
-    const char *built = NULL;
+    /* 0 is also what objects from before the flags existed carry */
+    const char *built = flags ? tp_part_name(flags) : NULL;
     int k;
 
     s1->tp_isa_used |= flags;
@@ -105,14 +104,11 @@ ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
             pstrcat(needs, sizeof needs,
                     (extra & (extra - 1)) ? ", " : " and ");
     }
-    for (k = 0; k < countof(parts); k++)
-        if (parts[k].flags == flags)
-            built = parts[k].name;
     return tcc_error_noabort("%s%s%s%s%s needs %s, which -m%s does not have; "
                              "rebuild it for -m%s or link for a bigger part",
                              member ? "archive member " : "this object",
                              member ? member : "",
-                             built ? " (compiled for " : "",
+                             built ? " (compiled for -m" : "",
                              built ? built : "", built ? ")" : "",
                              needs, tp_target_name(s1), tp_target_name(s1));
 }
@@ -3576,7 +3572,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
        T414 (-mt414 on the link command), which has less on-chip RAM. */
     uint32_t base_addr = xip_mode ? 0x7F001000u
                          : s1->has_text_addr ? s1->text_addr
-                         : s1->tp_t414 ? 0x80000048u : 0x80000070u;
+                         : s1->tp_isa == TP_ISA_T414 ? 0x80000048u : 0x80000070u;
     uint32_t total_size = 0;
     uint32_t total_memsz = 0;  /* includes BSS (p_memsz) */
     uint32_t current_addr = base_addr;

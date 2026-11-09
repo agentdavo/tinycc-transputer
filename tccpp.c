@@ -3593,9 +3593,9 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
       putdef(cs, "__ARM_PCS_VFP");
 #endif
 #ifdef TCC_TARGET_TRANSPUTER
-    if (s1->tp_t425)
+    if (!tp_has(s1, TP_EF_FPU))
       putdef(cs, "__SOFTFP__");
-    if (s1->tp_tvx) {
+    if (tp_has(s1, TP_EF_TVX)) {
       putdef(cs, "__TVX__");
       putdef(cs, "__MXFP4__");
     }

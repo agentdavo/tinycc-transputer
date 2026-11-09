@@ -104,7 +104,7 @@ static void emit_instr(int opc, int v);
 static void tp_push_sv(SValue *sv);
 static void tp_push_float_sv(SValue *sv);
 static void tp_store_fpu_result_to_slot(int slot, int bt);
-static int tp_t425(void);
+static int tp_soft_float(void);
 static int tp_t414(void);
 static int tp_tvx(void);
 static int tp_try_inline_local_zero_memset(int nb_args);
@@ -1418,9 +1418,15 @@ static void Tp_WSUBDB(void) { Tp_OPR_BINARY(TP_OPR_WSUBDB); }
 #define TP_T9K_SSUB     16
 #define TP_T9K_FPU      32   /* fpge, fpmulby2/divby2, fprz/rn, fpr32/64 cvts */
 #define TP_T9K_GTU      64
+/* Does the part compiled for have `f` (TP_EF_*)? */
+static int tp_isa_has(unsigned f)
+{
+    return tcc_state && tp_has(tcc_state, f);
+}
+
 static int tp_t9k_mask = -1;
 static int tp_have_t9000_feat(int feat) {
-    if (!(tcc_state && tcc_state->tp_t9000))
+    if (!tp_isa_has(TP_EF_T9000))
         return 0;
     if (tp_t9k_mask < 0) {
         const char *e = getenv("TP_T9K_MASK");
@@ -1429,24 +1435,25 @@ static int tp_have_t9000_feat(int feat) {
     return (tp_t9k_mask & feat) != 0;
 }
 
-/* -mt425: the IMS T425 has the T805's integer instructions and no FPU. */
-static int tp_t425(void)
+/* -mt425 and -mt414: no FPU, so floating point is calls to the soft-float
+ * helpers in the part's transputer-libtcc1. */
+static int tp_soft_float(void)
 {
-    return tcc_state && tcc_state->tp_t425;
+    return tcc_state && !tp_has(tcc_state, TP_EF_FPU);
 }
 
-/* -mt414: the IMS T414 also lacks what the T425 added - dup and wsubdb
- * among what the code generator emits (Norcroft xpuops.h). */
+/* -mt414: the IMS T414 lacks what the T425 and the T800 added - dup and
+ * wsubdb among what the code generator emits (Norcroft xpuops.h). */
 static int tp_t414(void)
 {
-    return tcc_state && tcc_state->tp_t414;
+    return tcc_state && !tp_has(tcc_state, TP_EF_T800OPS);
 }
 
 /* -mt9000tvx: the only target with the TVX extension.  Everywhere else the
  * 16-bit float conversions call the helpers in lib/transputer/transputer-f16.c. */
 static int tp_tvx(void)
 {
-    return tcc_state && tcc_state->tp_tvx;
+    return tp_isa_has(TP_EF_TVX);
 }
 
 /* -mt800 and -mt414: the original T800 and the T414 lack what the T805
@@ -1454,7 +1461,7 @@ static int tp_tvx(void)
  * generator emits (xpuops.h marks pop "T425 only"). */
 static int tp_no_t805_ops(void)
 {
-    return tcc_state && (tcc_state->tp_t414 || tcc_state->tp_t800);
+    return tcc_state && !tp_has(tcc_state, TP_EF_T805OPS);
 }
 static void Tp_LS(void)     { Tp_OPR_UNARY(TP_OPR_LS); }
 static void Tp_LSX(void)    { Tp_OPR_UNARY(TP_OPR_LSX); }
@@ -3754,7 +3761,7 @@ ST_FUNC void gen_cvt_itof(int t) {
     int sbt = vtop->type.t & (VT_BTYPE | VT_UNSIGNED);
     SValue sv;
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_itof(t);
         return;
     }
@@ -3863,7 +3870,7 @@ store:
 ST_FUNC void gen_cvt_ftoi(int t) {
     SValue sv = vtop[0];
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_ftoi(t);
         return;
     }
@@ -3975,7 +3982,7 @@ ST_FUNC void gen_cvt_ftof(int t) {
     int dst_is_db = (dbt == VT_DOUBLE || dbt == VT_LDOUBLE);
     SValue sv = vtop[0];
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_ftof(t);
         return;
     }
@@ -4422,7 +4429,7 @@ static void tp_builtin_word_result(void)
  * overflow, division by zero or a non-finite fpint.  T800 and later. */
 static void tp_need_fpu(int tok)
 {
-    if (tp_t425())
+    if (tp_soft_float())
         tcc_error("%s is an FPU instruction, not available with -m%s",
                   get_tok_str(tok, NULL), tp_target_name(tcc_state));
 }
@@ -4772,7 +4779,7 @@ static void tp_gen_fpu_unary(int t9k_opr, int fpentry_code, int is_sqrt)
     int bt = vtop->type.t & VT_BTYPE;
     int is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         int hi;
 
         if (is_sqrt) {
@@ -6067,14 +6074,14 @@ ST_FUNC int gen_transputer_builtin_call(int tok)
         tp_soft_tvx_call(soft);
         return 1;
     }
-    if (desc->cpu == TP_BUILTIN_T9000 && !tcc_state->tp_t9000)
+    if (desc->cpu == TP_BUILTIN_T9000 && !tp_isa_has(TP_EF_T9000))
         tcc_error("%s is a T9000 instruction, not available with -m%s",
                   get_tok_str(tok, NULL), tp_target_name(tcc_state));
     if ((desc->cpu == TP_BUILTIN_T425 || desc->cpu == TP_BUILTIN_T805) &&
         tp_t414())
         tcc_error("%s is a T425 instruction, not available with -mt414",
                   get_tok_str(tok, NULL));
-    if (desc->cpu == TP_BUILTIN_T805 && tcc_state->tp_t800)
+    if (desc->cpu == TP_BUILTIN_T805 && tp_no_t805_ops())
         tcc_error("%s is a T805 instruction, not available with -mt800",
                   get_tok_str(tok, NULL));
 
@@ -6128,7 +6135,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
     }
 
     /* This output now holds code for the target (its e_flags). */
-    tcc_state->tp_isa_used |= tp_target_flags(tcc_state);
+    tcc_state->tp_isa_used |= tcc_state->tp_isa;
     transputer_func_reset();
     func_start_ind = ind;
     func_start_sym = func_sym;
@@ -11300,7 +11307,7 @@ static int tp_shift_mask_fold(void)
             return 0;
 
     /* The byte form needs x's own load just before the shift. */
-    if (!(tcc_state && tcc_state->tp_t9000) &&
+    if (!tp_isa_has(TP_EF_T9000) &&
         (k == 8 || k == 16 || k == 24) && m <= 0xff &&
         tp_hist_n > nwin && tp_hist[nwin].end == tp_hist[nwin - 1].off &&
         tp_hist[nwin].opc == TP_OP_LDL &&
@@ -13643,7 +13650,7 @@ ST_FUNC void gen_opf(int op) {
         return;
     }
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_opf(op);
         return;
     }

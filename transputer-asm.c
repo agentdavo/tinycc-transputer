@@ -1025,7 +1025,7 @@ ST_FUNC void asm_opcode(TCCState *s1, int t)
     func_uses_inline_asm = 1;
     /* Hand-written code is taken to be for the target it is assembled for
      * (the output's e_flags). */
-    s1->tp_isa_used |= tp_target_flags(s1);
+    s1->tp_isa_used |= s1->tp_isa;
 
     while (t == TOK_LINEFEED) {
         next();
