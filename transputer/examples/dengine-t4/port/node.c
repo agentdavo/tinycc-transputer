@@ -72,6 +72,13 @@
 #ifndef ROTATE_DISPLAY
 #define ROTATE_DISPLAY 1
 #endif
+/* Split the shadow map's rows over the nodes too (gather_shadow). */
+#ifndef SHADOW_SPLIT
+#define SHADOW_SPLIT 1
+#endif
+#ifndef SHADOW_BAND
+#define SHADOW_BAND 5
+#endif
 
 #define BANDS (HEIGHT / BAND_ROWS)
 #define BAND_WORDS (BAND_ROWS * WIDTH)
@@ -93,6 +100,8 @@
 
 void __in(int, Channel *, void *);
 void __out(int, Channel *, const void *);
+
+extern unsigned int shadowFBOId;   /* renderer_progr.c */
 
 /* Patched by the linker with the end of the image (transputer-link.c). */
 unsigned int __linker_end = 0x5a5a5a5au;
@@ -132,8 +141,19 @@ void de_platform_out_of_memory(size_t request)
 static unsigned char *color;
 static float *depth;
 static unsigned char owned[HEIGHT];
-static unsigned int band[BAND_WORDS];
-static unsigned int header[4];   /* frame, band, checksum, render ticks */
+
+/* Transport. Bands are numbered 0..total-1 and band b belongs to node
+ * b % NNODES. Each node sends its own bands and its whole subtree's up to
+ * its parent as one message pair - four words per band (frame, band,
+ * checksum, the drawing node's render ticks), then the bands' data in the
+ * same order - so a link carries two messages a phase however many bands
+ * cross it. t4 hands each message between node threads, and per-band
+ * messages made that the cost of a frame at 16 and 32 nodes. */
+static unsigned int current_frame, current_render_ticks;
+static unsigned int frame_meta[4 * BANDS], *frame_data;
+static unsigned int *shadow_meta;
+static unsigned char *shadow_data, *shadow_src;
+static unsigned int shadow_band_bytes;
 
 static unsigned int checksum(const unsigned int *p, int n)
 {
@@ -142,11 +162,45 @@ static unsigned int checksum(const unsigned int *p, int n)
     return h;
 }
 
-/* Display rows (top first) of band t as ARGB words. */
-static void pack_band(int t)
+/* Bands of `total` owned by the nodes of the subtree rooted at `root`. */
+static int subtree_count(int root, int total)
+{
+    int i, j, count = 0;
+    for (i = root; i < NNODES; i++) {
+        j = i;
+        while (j > root) j = (j - 1) / 2;
+        if (j == root && i < total) count += (total - 1 - i) / NNODES + 1;
+    }
+    return count;
+}
+
+/* This node's bands and its subtree's, into meta/data; sent to the parent
+ * unless this is node 0. Returns how many bands are there. */
+static int collect(int total, unsigned int band_bytes, unsigned int *meta, unsigned char *data,
+                   void (*own)(int band, unsigned char *dst, unsigned int *meta4))
+{
+    int n = 0, b, child;
+    for (b = NODE; b < total; b += NNODES, n++) own(b, data + (size_t)n * band_bytes, meta + 4 * n);
+    for (child = 1; child <= 2; child++) {
+        int root = NODE * 2 + child, m;
+        if (root >= NNODES) continue;
+        m = subtree_count(root, total);
+        __in(m * 16, LINKIN(child), meta + 4 * n);
+        __in((int)((unsigned int)m * band_bytes), LINKIN(child), data + (size_t)n * band_bytes);
+        n += m;
+    }
+#if NODE != 0
+    __out(n * 16, LINKOUT(0), meta);
+    __out((int)((unsigned int)n * band_bytes), LINKOUT(0), data);
+#endif
+    return n;
+}
+
+/* Display rows (top first) of window band t as ARGB words. */
+static void own_frame_band(int t, unsigned char *dst, unsigned int *meta)
 {
     int r, x;
-    unsigned int *o = band;
+    unsigned int *o = (unsigned int *)dst;
     for (r = t * BAND_ROWS; r < (t + 1) * BAND_ROWS; r++) {
         const unsigned int *p = (const unsigned int *)(color + (size_t)(HEIGHT - 1 - r) * WIDTH * 4u);
         for (x = 0; x < WIDTH; x++) {
@@ -154,31 +208,67 @@ static void pack_band(int t)
             *o++ = (w & 0xff00ff00u) | ((w >> 16) & 0xffu) | ((w & 0xffu) << 16);
         }
     }
+    meta[0] = current_frame; meta[1] = (unsigned int)t;
+    meta[2] = checksum((const unsigned int *)dst, BAND_WORDS); meta[3] = current_render_ticks;
 }
 
-static int subtree_bands(int root)
+/* Rows of shadow-map band t, which this node drew. */
+static void own_shadow_band(int t, unsigned char *dst, unsigned int *meta)
 {
-    int i, j, total = 0;
-    for (i = root; i < NNODES; i++) {
-        j = i;
-        while (j > root) j = (j - 1) / 2;
-        if (j == root && i < BANDS) total += (BANDS - 1 - i) / NNODES + 1;
+    memcpy(dst, shadow_src + (size_t)t * shadow_band_bytes, shadow_band_bytes);
+    meta[0] = current_frame; meta[1] = (unsigned int)t;
+    meta[2] = checksum((const unsigned int *)dst, (int)(shadow_band_bytes / 4u)); meta[3] = 0;
+}
+
+static unsigned int gather_ticks;
+static int gather_bad;
+
+/* The shadow map's other rows (deGlDistributeFramebuffer): every node's
+ * bands go up to node 0, which then sends the whole map down, each node
+ * passing it on to its children. */
+static void gather_shadow(unsigned char *rgba, int w, int h, int band_rows)
+{
+    unsigned int start = (unsigned int)Time(), map_bytes = (unsigned int)w * (unsigned int)h * 4u;
+    int bands = h / band_rows, n, k, child;
+    shadow_band_bytes = (unsigned int)w * 4u * (unsigned int)band_rows;
+    if (h % band_rows) de_platform_fatal("shadow map height is not a multiple of SHADOW_BAND");
+    if (!shadow_data) {
+        shadow_data = malloc(map_bytes);
+        shadow_meta = malloc((size_t)bands * 16u);
+        if (!shadow_data || !shadow_meta) de_platform_fatal("no memory for the shadow map exchange");
     }
-    return total;
+    shadow_src = rgba;
+    n = collect(bands, shadow_band_bytes, shadow_meta, shadow_data, own_shadow_band);
+#if NODE == 0
+    if (n != bands) gather_bad++;
+    for (k = 0; k < n; k++) {
+        const unsigned int *m = shadow_meta + 4 * k;
+        const unsigned char *d = shadow_data + (size_t)k * shadow_band_bytes;
+        if ((int)m[1] >= bands || m[0] != current_frame || m[2] != checksum((const unsigned int *)d, (int)(shadow_band_bytes / 4u))) { gather_bad++; continue; }
+        if ((int)m[1] % NNODES != 0) memcpy(rgba + (size_t)m[1] * shadow_band_bytes, d, shadow_band_bytes);
+    }
+#else
+    (void)k;
+    __in((int)map_bytes, LINKIN(0), rgba);
+#endif
+    for (child = 1; child <= 2; child++)
+        if (NODE * 2 + child < NNODES) __out((int)map_bytes, LINKOUT(child), rgba);
+    (void)n;
+    gather_ticks += (unsigned int)Time() - start;
 }
 
 #if NODE == 0
 static int seen[BANDS], bad;
 static unsigned int max_ticks, min_ticks;
 
-static void accept(const unsigned int *h, const unsigned int *data, unsigned int frame, unsigned int base)
+static void accept(const unsigned int *meta, const unsigned int *data, unsigned int base)
 {
-    int t = (int)h[1], r, x;
+    int t = (int)meta[1], r, x;
     if (t < 0 || t >= BANDS) { bad++; return; }
-    if (h[0] != frame || h[2] != checksum(data, BAND_WORDS) || seen[t]) bad++;
+    if (meta[0] != current_frame || meta[2] != checksum(data, BAND_WORDS) || seen[t]) bad++;
     seen[t] = 1;
-    if (h[3] > max_ticks) max_ticks = h[3];
-    if (h[3] < min_ticks) min_ticks = h[3];
+    if (meta[3] > max_ticks) max_ticks = meta[3];
+    if (meta[3] < min_ticks) min_ticks = meta[3];
     for (r = 0; r < BAND_ROWS; r++) {
         int row = t * BAND_ROWS + r;
         const unsigned int *p = data + r * WIDTH;
@@ -207,7 +297,8 @@ int test_main(void)
     de_rom_mount(de_rom_image, (unsigned long)(de_rom_image_end - de_rom_image));
     color = malloc((size_t)WIDTH * HEIGHT * 4u);
     depth = malloc((size_t)WIDTH * HEIGHT * sizeof(float));
-    if (!color || !depth) de_platform_fatal("no memory for the window");
+    frame_data = malloc((size_t)BANDS * BAND_WORDS * 4u);
+    if (!color || !depth || !frame_data) de_platform_fatal("no memory for the window");
     memset(color, 0, (size_t)WIDTH * HEIGHT * 4u);
     for (y = 0; y < HEIGHT; y++) owned[y] = ((HEIGHT - 1 - y) / BAND_ROWS) % NNODES == NODE;
     deGlSetWindow(WIDTH, HEIGHT, color, depth, NNODES > 1 ? owned : 0);
@@ -216,18 +307,23 @@ int test_main(void)
     s.shadows = SHADOWS; s.bump = BUMP; s.specular = SPECULAR; s.stats = STATS;
     s.camera_path = CAMERA_PATH; s.start_ms = START_MS; s.frame_ms = FRAME_MS;
     de_app_init(&s);
+#if NNODES > 1 && SHADOW_SPLIT
+    if (!deGlDistributeFramebuffer(shadowFBOId, SHADOW_BAND, NNODES, NODE, gather_shadow))
+        de_platform_fatal("cannot distribute the shadow framebuffer");
+#endif
 #if NODE == 0
     init_ticks = (unsigned int)Time() - t0;
     printf("DENGINE INIT nodes %d bands %d ticks %u heap peak %u live %u\n", NNODES, BANDS, init_ticks,
            (unsigned)de_heap_peak(), (unsigned)de_heap_live());
 #endif
     for (frame = 0; frame < FRAMES; frame++) {
-        int child, t;
+        int child, n;
         unsigned int render_start, render_ticks;
         de_gl_stats st;
 #if NODE == 0
-        unsigned int start = (unsigned int)Time(), elapsed;
+        unsigned int start = (unsigned int)Time(), elapsed, bands_start;
         unsigned int base = FB_BASE + ((frame & 1u) ? 0u : FRAME_BYTES);
+        int t, k;
         for (t = 0; t < BANDS; t++) seen[t] = 0;
         max_ticks = 0; min_ticks = 0xffffffffu;
 #else
@@ -235,49 +331,40 @@ int test_main(void)
 #endif
         for (child = 1; child <= 2; child++)
             if (NODE * 2 + child < NNODES) __out(sizeof(frame), LINKOUT(child), &frame);
+        current_frame = frame;
+        gather_ticks = 0;
         render_start = (unsigned int)Time();
         deGlStats(0, 1);
         de_app_frame();
         render_ticks = (unsigned int)Time() - render_start;
         deGlStats(&st, 0);
-        for (t = NODE; t < BANDS; t += NNODES) {
-            pack_band(t);
-            header[0] = frame; header[1] = (unsigned int)t; header[2] = checksum(band, BAND_WORDS); header[3] = render_ticks;
+        current_render_ticks = render_ticks;
 #if NODE == 0
-            accept(header, band, frame, base);
-#else
-            __out(sizeof(header), LINKOUT(0), header);
-            __out(sizeof(band), LINKOUT(0), band);
+        bands_start = (unsigned int)Time();
 #endif
-        }
-        for (child = 1; child <= 2; child++) {
-            int root = NODE * 2 + child, n;
-            if (root >= NNODES) continue;
-            for (n = 0; n < subtree_bands(root); n++) {
-                __in(sizeof(header), LINKIN(child), header);
-                __in(sizeof(band), LINKIN(child), band);
+        n = collect(BANDS, BAND_WORDS * 4u, frame_meta, (unsigned char *)frame_data, own_frame_band);
 #if NODE == 0
-                accept(header, band, frame, base);
-#else
-                __out(sizeof(header), LINKOUT(0), header);
-                __out(sizeof(band), LINKOUT(0), band);
-#endif
-            }
-        }
-#if NODE == 0
+        if (n != BANDS) bad++;
+        for (k = 0; k < n; k++) accept(frame_meta + 4 * k, frame_data + (size_t)k * BAND_WORDS, base);
         for (t = 0; t < BANDS; t++) if (!seen[t]) bad++;
         elapsed = (unsigned int)Time() - start;
         REG(0xA0000014u) = base;
-        printf("DENGINE FRAME %u t=%u ticks %u render %u max %u min %u draws %lu verts %lu tris %lu clipped %lu culled %lu frags %lu shaded %lu\n",
-               frame, de_app_simulation_time(), elapsed, render_ticks, max_ticks, min_ticks, st.draws, st.vertices,
-               st.triangles, st.clipped, st.culled, st.fragments, st.shaded);
+        printf("DENGINE FRAME %u t=%u ticks %u render %u gather %u bands %u max %u min %u draws %lu verts %lu tris %lu clipped %lu culled %lu frags %lu shaded %lu\n",
+               frame, de_app_simulation_time(), elapsed, render_ticks, gather_ticks, (unsigned int)Time() - bands_start,
+               max_ticks, min_ticks, st.draws, st.vertices, st.triangles, st.clipped, st.culled, st.fragments, st.shaded);
 #if CAPTURE
         REG(0xA0000018u) = 1;
 #endif
+#else
+        (void)n;
 #endif
     }
 #if NODE == 0
-    uart_text(bad ? "DENGINE BAD\n" : "DENGINE OK\n");
+    uart_text(bad || gather_bad ? "DENGINE BAD\n" : "DENGINE OK\n");
+#endif
+#ifdef PROFILE_EXIT
+    /* Stop the emulator (t4 -se) so its IPtr samples are written out. */
+    __seterr();
 #endif
     halt();
     return 0;

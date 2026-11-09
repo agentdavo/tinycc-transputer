@@ -16,4 +16,13 @@ typedef struct {
     unsigned long fragments, depth_rejected, shaded;
 } de_gl_stats;
 void deGlStats(de_gl_stats *out, int reset);
+
+/* Distributed rendering into a framebuffer object, as a multi-GPU driver
+ * splits a render target: this context draws and clears only the colour
+ * rows of `framebuffer` in bands b with b % nodes == node (bands of
+ * band_rows rows from row 0). When the framebuffer is unbound after being
+ * drawn, `gather` is called with its colour attachment so the platform can
+ * fetch the other rows before anything samples it. */
+typedef void (*de_gl_gather)(unsigned char *rgba, int width, int height, int band_rows);
+int deGlDistributeFramebuffer(GLuint framebuffer, int band_rows, int nodes, int node, de_gl_gather gather);
 #endif

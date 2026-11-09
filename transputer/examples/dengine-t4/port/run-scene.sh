@@ -5,6 +5,9 @@
 #   SHADOWS BUMP SPECULAR STATS CAMERA_PATH (0|1, default 1 1 1 0 1)
 #   TIMEOUT (seconds, default 3600)  WORK (parent of the run directory)
 #   TCC_DIR / T4_BIN select the toolchain and emulator.
+#   CYCLES=1 times in estimated T800 cycles per node instead of host time.
+#   PROFILE=N samples IPtr every N instructions (t4 T4_IPTR_SAMPLE) and
+#   stops the emulator after the last frame; profile.py summarises them.
 # Prints the run directory; screenshots are screenshot_N.bmp there.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -20,7 +23,10 @@ BUILD=${BUILD:-$WORK/build}
 if [[ ! -f $BUILD/obj/rom.o || -n ${REBUILD:-} ]]; then bash "$HERE/build.sh" t4 "$BUILD" >build.log 2>&1 || { cat build.log >&2; exit 1; }; fi
 DEFS=(-DNNODES="$NODES" -DFRAMES="$FRAMES" -DCAPTURE="$CAPTURE" -DSTART_MS="${START_MS:-0}" -DFRAME_MS="${FRAME_MS:-33}"
       -DBAND_ROWS="${BAND_ROWS:-5}" -DLOW_QUALITY="${LOW_QUALITY:-0}" -DSHADOWS="${SHADOWS:-1}" -DBUMP="${BUMP:-1}"
-      -DSPECULAR="${SPECULAR:-1}" -DSTATS="${STATS:-0}" -DCAMERA_PATH="${CAMERA_PATH:-1}")
+      -DSPECULAR="${SPECULAR:-1}" -DSTATS="${STATS:-0}" -DCAMERA_PATH="${CAMERA_PATH:-1}"
+      -DSHADOW_SPLIT="${SHADOW_SPLIT:-1}" -DSHADOW_BAND="${SHADOW_BAND:-5}")
+T4_FLAGS=(-s8 -sm 26 -ss -st -sn "-$NODES")
+if [[ -n ${PROFILE:-} ]]; then DEFS+=(-DPROFILE_EXIT=1); T4_FLAGS+=(-se); export T4_IPTR_SAMPLE=$PROFILE; fi
 {
     echo 'Connect HOST to processor 0 link 0'
     for ((n = 1; n < NODES; n++)); do
@@ -38,14 +44,17 @@ for ((n = 0; n < NODES; n++)); do
     "$R/transputer-netload" "n$n.elf" "n$n.btl" >"n$n.netload.log" 2>&1 || { cat "n$n.netload.log" >&2; exit 1; }
 done
 export SPYNET="$WORK/scene.map" T4_NODE_BTL="$WORK/n%d.btl"
-env -u DISPLAY -u T4_EST_CYCLES T4_UART_CONSOLE=0 T4_UART_LOG="$WORK/scene.uart" T4_PRESENT_ON_FLIP=1 \
-    timeout -k 5 "${TIMEOUT:-3600}" "$T4" -s8 -sm 26 -ss -st -sn "-$NODES" -sb "$WORK/n0.btl" 2>&1 | tail -c 1000000 >scene.out &
+# CYCLES=1: each node's timer counts its own estimated T800 cycles (t4
+# T4_EST_CYCLES), independent of host load; blocked time is not counted.
+if [[ ${CYCLES:-0} == 1 ]]; then export T4_EST_CYCLES=1; else unset T4_EST_CYCLES; fi
+env -u DISPLAY T4_UART_CONSOLE=0 T4_UART_LOG="$WORK/scene.uart" T4_PRESENT_ON_FLIP=1 \
+    timeout -k 5 "${TIMEOUT:-3600}" "$T4" "${T4_FLAGS[@]}" -sb "$WORK/n0.btl" 2>&1 | tail -c 1000000 >scene.out &
 pid=$!
 # $! is the pipeline's tail; the emulator is found by its unique image path.
 stop_t4() { pkill -f -- "-sb $WORK/n0.btl" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
 trap stop_t4 EXIT
 while kill -0 "$pid" 2>/dev/null; do
-    if grep -qaE 'DENGINE (OK|BAD|FATAL|EXIT)' scene.uart 2>/dev/null; then break; fi
+    if [[ -z ${PROFILE:-} ]] && grep -qaE 'DENGINE (OK|BAD|FATAL|EXIT)' scene.uart 2>/dev/null; then break; fi
     sleep 1
 done
 if ! grep -qa 'DENGINE OK' scene.uart 2>/dev/null; then

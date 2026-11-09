@@ -24,17 +24,17 @@
 
 _start:
     /*
-     * === Phase 1: Relocate workspace above code ===
-     * After BTL load: IPtr = WPtr = MemStart (0x80000070)
-     * We need WPtr well above all code+data.
-     * Use AJW +0x4000 words = +0x10000 bytes (64 KiB) to avoid
-     * stack/image overlap on larger test binaries.
+     * === Phase 1: Workspace near the top of a 64 MiB node ===
+     * t4 enters a BTL with WPtr at the end of the loaded image, not at
+     * MemStart, so a relative AJW lands wherever the image ends: for this
+     * multi-megabyte image tests/test_boot.S's AJW put the stack past the
+     * end of RAM. Set it absolutely, 1 MiB below the top of RAM (t4 -sm 26:
+     * 0x80000070-0x8400006F): mint; ldc #03F00070; sum; gajw.
      */
-#if 1 /* dEngine port: the image is megabytes, so the workspace goes to 63 MiB */
-    .byte 0x2F, 0x2C, 0x20, 0x20, 0x20, 0xB0 /* ajw 0xFC0000 words: 63 MiB */
-#else
-    .byte 0x24, 0x20, 0x20, 0x20, 0xB0  /* ajw 0x4000 */
-#endif
+    .byte 0x24, 0xF2                                /* mint */
+    .byte 0x23, 0x2F, 0x20, 0x20, 0x20, 0x27, 0x40  /* ldc #03F00070 */
+    .byte 0x25, 0xF2                                /* sum */
+    .byte 0x23, 0xFC                                /* gajw: WPtr = #83F00070 */
 
     /*
      * === Phase 2: Initialize processor state ===

@@ -74,6 +74,8 @@ typedef struct {
     const unsigned char *rgba;
     int w, h, linear;
     GLenum wrap_s, wrap_t;
+    int wmask, hmask;      /* size - 1 for a power-of-two REPEAT axis, else -1 */
+    float fw, fh;
 } sampler;
 
 typedef struct {
@@ -90,6 +92,11 @@ typedef struct {
     GLenum color_type; GLuint color;   /* GL_TEXTURE or GL_RENDERBUFFER */
     GLuint depth;                      /* renderbuffer */
     GLuint stencil;
+    /* deGlDistributeFramebuffer: the rows this context draws, and the
+     * platform's gather, called when the framebuffer is unbound dirty. */
+    unsigned char *owned;
+    int owned_rows, band_rows, dirty;
+    de_gl_gather gather;
 } framebuffer;
 
 typedef struct {
@@ -103,6 +110,11 @@ typedef struct {
 
 typedef struct { char name[32]; int width, vreg, freg, vsampler, fsampler, unit; } uniform_info;
 typedef struct { char name[32]; int width, reg, location; } attrib_info;
+
+/* Linked code for the interpreter: compiler instructions decoded into scalar
+ * operations on pointers into the register file (see decode_program). */
+typedef struct { int op; float *d, *a, *b; int aux; } fop;
+typedef struct { fop *ops; int count, cap; float scratch[4]; } fast_code;
 
 typedef struct {
     GLuint vs_name, fs_name;
@@ -121,6 +133,10 @@ typedef struct {
     int varying_floats;
     unsigned char vary_vreg[MAX_VARYING_FLOATS], vary_freg[MAX_VARYING_FLOATS], vary_comp[MAX_VARYING_FLOATS];
     int vsamplers, fsamplers;
+    fast_code vfast, ffast;
+    /* Only what gl_Position needs, and whether running it first pays. */
+    fast_code vpos;
+    int vpos_split;
 } program;
 
 typedef struct {
@@ -204,6 +220,8 @@ void deGlInit(void)
     black_texture_object.width = black_texture_object.height = 1;
     black_texture_object.s.rgba = black_texel; black_texture_object.s.w = black_texture_object.s.h = 1;
     black_texture_object.s.wrap_s = black_texture_object.s.wrap_t = GL_REPEAT;
+    black_texture_object.s.wmask = black_texture_object.s.hmask = 0;
+    black_texture_object.s.fw = black_texture_object.s.fh = 1.0f;
 }
 
 void deGlSetWindow(int width, int height, unsigned char *color, float *depth, const unsigned char *owned)
@@ -446,6 +464,9 @@ static void texture_update(texture *t)
     t->s.rgba = t->rgba; t->s.w = t->width; t->s.h = t->height;
     t->s.wrap_s = t->wrap_s; t->s.wrap_t = t->wrap_t;
     t->s.linear = filter == GL_LINEAR;
+    t->s.fw = (float)t->width; t->s.fh = (float)t->height;
+    t->s.wmask = t->wrap_s == GL_REPEAT && power_of_two(t->width) ? t->width - 1 : -1;
+    t->s.hmask = t->wrap_t == GL_REPEAT && power_of_two(t->height) ? t->height - 1 : -1;
 }
 static texture *texture_named(GLuint name, int create)
 {
@@ -725,14 +746,37 @@ void glGenFramebuffers(GLsizei n, GLuint *names)
         if (!f || !table_put(&gl.framebuffers, names[i], f)) { set_error(GL_OUT_OF_MEMORY); return; }
     }
 }
-void glBindFramebuffer(GLenum target, GLuint name)
+static GLenum framebuffer_status(const framebuffer *f, target *out);
+void glBindFramebuffer(GLenum target_enum, GLuint name)
 {
-    if (target != GL_FRAMEBUFFER) { set_error(GL_INVALID_ENUM); return; }
+    framebuffer *old;
+    if (target_enum != GL_FRAMEBUFFER) { set_error(GL_INVALID_ENUM); return; }
     if (name && !table_get(&gl.framebuffers, name)) {
         framebuffer *f = calloc(1, sizeof(framebuffer));
         if (!f || !table_put(&gl.framebuffers, name, f)) { set_error(GL_OUT_OF_MEMORY); return; }
     }
+    old = table_get(&gl.framebuffers, gl.framebuffer_binding);
     gl.framebuffer_binding = name;
+    if (old && old != table_get(&gl.framebuffers, name) && old->gather && old->dirty) {
+        target t;
+        old->dirty = 0;
+        if (framebuffer_status(old, &t) == GL_FRAMEBUFFER_COMPLETE && t.color)
+            old->gather(t.color, t.width, t.height, old->band_rows);
+    }
+}
+
+int deGlDistributeFramebuffer(GLuint name, int band_rows, int nodes, int node, de_gl_gather gather)
+{
+    framebuffer *f = table_get(&gl.framebuffers, name);
+    target t;
+    int y;
+    if (!f || band_rows < 1 || nodes < 1 || node < 0 || node >= nodes || framebuffer_status(f, &t) != GL_FRAMEBUFFER_COMPLETE) return 0;
+    free(f->owned);
+    f->owned = malloc((size_t)t.height);
+    if (!f->owned) return 0;
+    for (y = 0; y < t.height; y++) f->owned[y] = (y / band_rows) % nodes == node;
+    f->owned_rows = t.height; f->band_rows = band_rows; f->gather = gather; f->dirty = 0;
+    return 1;
 }
 static framebuffer *bound_framebuffer(GLenum target)
 {
@@ -837,7 +881,8 @@ static int current_target(target *t)
     {
         framebuffer *f = table_get(&gl.framebuffers, gl.framebuffer_binding);
         if (!f || framebuffer_status(f, t) != GL_FRAMEBUFFER_COMPLETE) { set_error(GL_INVALID_FRAMEBUFFER_OPERATION); return 0; }
-        t->owned = 0;
+        t->owned = f->owned && f->owned_rows == t->height ? f->owned : 0;
+        if (f->gather) f->dirty = 1;
         return 1;
     }
 }
@@ -1180,9 +1225,14 @@ static int validate_code(const tg_glsl_fragment_program *ir, int samplers)
     return ir->entry_pc <= ir->instruction_count;
 }
 
+#define FAST_SLOTS (TG_VM_REGS * 4 + 4)
+static int decode_program(fast_code *fc, const tg_glsl_fragment_program *ir, float (*reg)[4], const unsigned char *outputs);
+
 static void free_executable(program *p)
 {
     free(p->vs); free(p->fs); free(p->vregs); free(p->fregs);
+    free(p->vfast.ops); free(p->ffast.ops); free(p->vpos.ops);
+    memset(&p->vfast, 0, sizeof(p->vfast)); memset(&p->ffast, 0, sizeof(p->ffast)); memset(&p->vpos, 0, sizeof(p->vpos));
     p->vs = p->fs = 0; p->vregs = p->fregs = 0;
     p->attrib_count = p->uniform_count = p->varying_floats = 0;
 }
@@ -1282,6 +1332,41 @@ void glLinkProgram(GLuint pname)
         p->attribs[i].location = j; used |= 1 << j;
     }
     if (!add_uniforms(p, p->vs, 1) || !add_uniforms(p, p->fs, 0)) { link_fail(p, "uniform declarations disagree or too many uniforms"); return; }
+    {
+        /* What each stage must leave: gl_Position and the varyings the
+         * fragment shader reads; gl_FragColor. */
+        unsigned char *vout = calloc(FAST_SLOTS, 1), *fout = calloc(FAST_SLOTS, 1);
+        int ok;
+        if (!vout || !fout) { free(vout); free(fout); link_fail(p, "out of memory"); return; }
+        for (i = 0; i < 4; i++) { vout[p->vs_out * 4 + i] = 1; fout[p->fs_out * 4 + i] = 1; }
+        for (i = 0; i < p->varying_floats; i++) vout[p->vary_vreg[i] * 4 + p->vary_comp[i]] = 1;
+        ok = decode_program(&p->vfast, p->vs, p->vregs, vout) && decode_program(&p->ffast, p->fs, p->fregs, fout);
+        if (ok) {
+            memset(vout, 0, FAST_SLOTS);
+            for (i = 0; i < 4; i++) vout[p->vs_out * 4 + i] = 1;
+            ok = decode_program(&p->vpos, p->vs, p->vregs, vout);
+        }
+        free(vout); free(fout);
+        if (!ok) { link_fail(p, "code could not be decoded"); return; }
+        /* Positions first only if the rest of the vertex program is a
+         * good part of it: the shadow pass's is almost all position. */
+        p->vpos_split = p->vpos.count * 4 < p->vfast.count * 3;
+#ifdef DE_GL_TRACE
+        printf("[gltrace] link %u: vertex %d instructions -> %d ops (position %d%s), fragment %d -> %d ops, %d varying floats\n",
+               pname, p->vs->instruction_count, p->vfast.count, p->vpos.count, p->vpos_split ? ", split" : "",
+               p->fs->instruction_count, p->ffast.count, p->varying_floats);
+        {
+            static const char *names[] = {"mov", "add", "sub", "mul", "div", "max", "pow", "gt", "fract", "dot2", "dot3", "dot4",
+                                          "cross", "norm2", "norm3", "norm4", "tex", "mat4"};
+            int counts[18], k;
+            memset(counts, 0, sizeof(counts));
+            for (k = 0; k < p->ffast.count; k++) counts[p->ffast.ops[k].op]++;
+            printf("[gltrace]   fragment ops:");
+            for (k = 0; k < 18; k++) if (counts[k]) printf(" %s %d", names[k], counts[k]);
+            printf("\n");
+        }
+#endif
+    }
     p->linked = GL_TRUE;
 }
 void glUseProgram(GLuint name)
@@ -1534,25 +1619,38 @@ static int wrap_index(int i, int n, GLenum mode)
     i %= n;
     return i < 0 ? i + n : i;
 }
-/* Coordinates are clamped to +-2^20 before conversion: GLSL leaves huge or
- * NaN coordinates' results undefined, C leaves their conversion undefined. */
-static float safe_coord(float c) { return c > -1048576.0f ? (c < 1048576.0f ? c : 1048576.0f) : -1048576.0f; }
 static int floor_int(float v) { int i = (int)v; return (float)i > v ? i - 1 : i; }
+/* GLSL leaves huge or NaN coordinates' results undefined and C their
+ * conversion: coordinates are clamped to +-2^20, and the texel position to
+ * +-2^30. Inline throughout: this runs for every texture2D. */
+#define SAFE_COORD(c) ((c) > -1048576.0f ? ((c) < 1048576.0f ? (c) : 1048576.0f) : -1048576.0f)
+#define SAFE_TEXEL(c) ((c) > -1073741824.0f ? ((c) < 1073741824.0f ? (c) : 1073741824.0f) : -1073741824.0f)
+#define FLOOR_INT(v, out) do { int fi_ = (int)(v); (out) = (float)fi_ > (v) ? fi_ - 1 : fi_; } while (0)
 static void sample2d(const sampler *t, float s, float tc, float *out)
 {
-    float u = safe_coord(s) * (float)t->w, v = safe_coord(tc) * (float)t->h;
+    float u, v;
+    s = SAFE_COORD(s); tc = SAFE_COORD(tc);
+    u = s * t->fw; v = tc * t->fh;
+    u = SAFE_TEXEL(u); v = SAFE_TEXEL(v);
     if (!t->linear) {
-        const unsigned char *p = t->rgba + ((size_t)wrap_index(floor_int(v), t->h, t->wrap_t) * (size_t)t->w + (size_t)wrap_index(floor_int(u), t->w, t->wrap_s)) * 4u;
+        int i, j;
+        const unsigned char *p;
+        FLOOR_INT(u, i); FLOOR_INT(v, j);
+        i = t->wmask >= 0 ? i & t->wmask : wrap_index(i, t->w, t->wrap_s);
+        j = t->hmask >= 0 ? j & t->hmask : wrap_index(j, t->h, t->wrap_t);
+        p = t->rgba + ((size_t)j * (size_t)t->w + (size_t)i) * 4u;
         out[0] = byte_to_float[p[0]]; out[1] = byte_to_float[p[1]]; out[2] = byte_to_float[p[2]]; out[3] = byte_to_float[p[3]];
     } else {
         int i0, j0, i1, j1, k;
         float fx, fy;
         const unsigned char *a, *b, *c, *d;
         u -= 0.5f; v -= 0.5f;
-        i0 = floor_int(u); j0 = floor_int(v);
+        FLOOR_INT(u, i0); FLOOR_INT(v, j0);
         fx = u - (float)i0; fy = v - (float)j0;
-        i1 = wrap_index(i0 + 1, t->w, t->wrap_s); j1 = wrap_index(j0 + 1, t->h, t->wrap_t);
-        i0 = wrap_index(i0, t->w, t->wrap_s); j0 = wrap_index(j0, t->h, t->wrap_t);
+        if (t->wmask >= 0) { i1 = (i0 + 1) & t->wmask; i0 &= t->wmask; }
+        else { i1 = wrap_index(i0 + 1, t->w, t->wrap_s); i0 = wrap_index(i0, t->w, t->wrap_s); }
+        if (t->hmask >= 0) { j1 = (j0 + 1) & t->hmask; j0 &= t->hmask; }
+        else { j1 = wrap_index(j0 + 1, t->h, t->wrap_t); j0 = wrap_index(j0, t->h, t->wrap_t); }
         a = t->rgba + ((size_t)j0 * (size_t)t->w + (size_t)i0) * 4u;
         b = t->rgba + ((size_t)j0 * (size_t)t->w + (size_t)i1) * 4u;
         c = t->rgba + ((size_t)j1 * (size_t)t->w + (size_t)i0) * 4u;
@@ -1670,6 +1768,331 @@ static void vm_exec(float (*reg)[4], const tg_vm_instruction *code, int count, i
     }
 }
 
+/* --------------------------------------------------- decoded interpreter */
+/* At link time each stage's code is decoded once into scalar operations on
+ * pointers into the program's register file: a vector operation becomes one
+ * operation per component (broadcasts, swizzles and component writes become
+ * plain moves), the helper functions are inlined at each call, and writes
+ * nobody reads are dropped. Dot products, the matrix product, cross,
+ * normalize and texture2D stay whole. Every value is computed with the same
+ * float operations in the same order as vm_exec, so results are identical;
+ * the per-fragment loop loses the decoding, the width loops and the calls. */
+enum { F_MOV, F_ADD, F_SUB, F_MUL, F_DIV, F_MAX, F_POW, F_GT, F_FRACT,
+       F_DOT2, F_DOT3, F_DOT4, F_CROSS, F_NORM2, F_NORM3, F_NORM4, F_TEX, F_MAT4 };
+
+static fop *fast_emit(fast_code *fc, int op, float *d, float *a, float *b, int aux)
+{
+    fop *o;
+    if (fc->count == fc->cap) {
+        int cap = fc->cap ? fc->cap * 2 : 64;
+        fop *ops = realloc(fc->ops, (size_t)cap * sizeof(fop));
+        if (!ops) return 0;
+        fc->ops = ops; fc->cap = cap;
+    }
+    o = &fc->ops[fc->count++];
+    o->op = op; o->d = d; o->a = a; o->b = b; o->aux = aux;
+    return o;
+}
+
+/* Component-wise operation: results go straight to d unless a later
+ * component reads one that an earlier one writes (a broadcast or swizzle of
+ * the destination), in which case they go through scratch first. */
+static int fast_vector(fast_code *fc, int op, float *d, float *const *src_a, float *const *src_b, int w)
+{
+    int i, j, hazard = 0;
+    for (i = 0; i < w && !hazard; i++)
+        for (j = i + 1; j < w; j++)
+            if (src_a[j] == d + i || (src_b && src_b[j] == d + i)) { hazard = 1; break; }
+    for (i = 0; i < w; i++) {
+        float *out = hazard ? fc->scratch + i : d + i;
+        if (op == F_MOV && out == src_a[i]) continue;
+        if (!fast_emit(fc, op, out, src_a[i], src_b ? src_b[i] : 0, 0)) return 0;
+    }
+    if (hazard)
+        for (i = 0; i < w; i++) if (!fast_emit(fc, F_MOV, d + i, fc->scratch + i, 0, 0)) return 0;
+    return 1;
+}
+
+static int decode_range(fast_code *fc, const tg_glsl_fragment_program *ir, float (*reg)[4], int pc, int depth)
+{
+    for (; pc < ir->instruction_count; pc++) {
+        const tg_vm_instruction *in = &ir->code[pc];
+        float *d = reg[in->dst], *a = reg[in->a], *b = reg[in->b], *sa[4], *sb[4];
+        int w = in->width, i, op;
+        switch (in->op) {
+        case TG_VM_RETURN:
+            return depth ? 1 : 0;
+        case TG_VM_CALL:
+            if (depth == 8 || !decode_range(fc, ir, reg, in->aux, depth + 1)) return 0;
+            continue;
+        case TG_VM_MOV:
+            for (i = 0; i < w; i++) sa[i] = a + ((in->flags & 1) ? 0 : i);
+            if (!fast_vector(fc, F_MOV, d, sa, 0, w)) return 0;
+            continue;
+        case TG_VM_ADD: case TG_VM_SUB: case TG_VM_MUL: case TG_VM_DIV: case TG_VM_MAX: case TG_VM_POW:
+            op = in->op == TG_VM_ADD ? F_ADD : in->op == TG_VM_SUB ? F_SUB : in->op == TG_VM_MUL ? F_MUL :
+                 in->op == TG_VM_DIV ? F_DIV : in->op == TG_VM_MAX ? F_MAX : F_POW;
+            for (i = 0; i < w; i++) { sa[i] = a + ((in->flags & 1) ? 0 : i); sb[i] = b + ((in->flags & 2) ? 0 : i); }
+            if (!fast_vector(fc, op, d, sa, sb, w)) return 0;
+            continue;
+        case TG_VM_FRACT:
+            for (i = 0; i < w; i++) sa[i] = a + i;
+            if (!fast_vector(fc, F_FRACT, d, sa, 0, w)) return 0;
+            continue;
+        case TG_VM_SWIZZLE:
+            for (i = 0; i < w; i++) sa[i] = a + ((in->aux >> (2 * i)) & 3);
+            if (!fast_vector(fc, F_MOV, d, sa, 0, w)) return 0;
+            continue;
+        case TG_VM_SET_COMPONENT:
+            if (d + in->aux != a && !fast_emit(fc, F_MOV, d + in->aux, a, 0, 0)) return 0;
+            continue;
+        case TG_VM_GREATER: op = F_GT; break;
+        case TG_VM_DOT: op = w == 2 ? F_DOT2 : w == 3 ? F_DOT3 : w == 4 ? F_DOT4 : F_MUL; break;
+        case TG_VM_CROSS: op = F_CROSS; break;
+        case TG_VM_NORMALIZE: op = w == 2 ? F_NORM2 : w == 3 ? F_NORM3 : w == 4 ? F_NORM4 : -1; break;
+        case TG_VM_TEXTURE2D: op = F_TEX; break;
+        case TG_VM_MAT4_VEC4: op = F_MAT4; break;
+        default: return 0;
+        }
+        if (op < 0) {
+            /* normalize() of a scalar: sign, or 0 */
+            if (!fast_emit(fc, F_NORM2, d, a, 0, 1)) return 0;
+        } else if (!fast_emit(fc, op, d, a, b, in->aux)) return 0;
+    }
+    return !depth;
+}
+
+/* What an operation reads and writes, as float offsets: the register file's
+ * 640 floats, then the 4 scratch floats (FAST_SLOTS). */
+static int fast_slot(const fast_code *fc, float (*reg)[4], const float *p)
+{
+    if (p >= fc->scratch && p < fc->scratch + 4) return TG_VM_REGS * 4 + (int)(p - fc->scratch);
+    return (int)(p - &reg[0][0]);
+}
+static int fast_writes(const fop *o, int *n)
+{
+    switch (o->op) {
+    case F_CROSS: *n = 3; break;
+    case F_NORM2: *n = o->aux == 1 ? 1 : 2; break;
+    case F_NORM3: *n = 3; break;
+    case F_NORM4: case F_TEX: case F_MAT4: *n = 4; break;
+    default: *n = 1;
+    }
+    return 1;
+}
+static int fast_reads(const fop *o, const float **p, int *n)
+{
+    int k = 0, i;
+    switch (o->op) {
+    case F_MOV: case F_FRACT: p[k++] = o->a; break;
+    case F_DOT2: case F_DOT3: case F_DOT4: {
+        int w = o->op == F_DOT2 ? 2 : o->op == F_DOT3 ? 3 : 4;
+        for (i = 0; i < w; i++) { p[k++] = o->a + i; p[k++] = o->b + i; }
+        break;
+    }
+    case F_CROSS: for (i = 0; i < 3; i++) { p[k++] = o->a + i; p[k++] = o->b + i; } break;
+    case F_NORM2: case F_NORM3: case F_NORM4: {
+        int w = o->op == F_NORM2 ? (o->aux == 1 ? 1 : 2) : o->op == F_NORM3 ? 3 : 4;
+        for (i = 0; i < w; i++) p[k++] = o->a + i;
+        break;
+    }
+    case F_TEX: p[k++] = o->a; p[k++] = o->a + 1; break;
+    case F_MAT4: for (i = 0; i < 16; i++) p[k++] = o->a + i; for (i = 0; i < 4; i++) p[k++] = o->b + i; break;
+    default: p[k++] = o->a; p[k++] = o->b; break;
+    }
+    *n = k;
+    return 1;
+}
+
+/* Drops operations whose results nothing reads: live at the end are the
+ * outputs and anything read before it is written (a value carried from the
+ * previous invocation, which this keeps exactly as it was). */
+static void fast_dead_code(fast_code *fc, float (*reg)[4], const unsigned char *outputs)
+{
+    unsigned char *live = calloc(FAST_SLOTS, 1), *written = calloc(FAST_SLOTS, 1);
+    const float *reads[24];
+    int i, j, k, n, m, keep_count = 0;
+    if (!live || !written) { free(live); free(written); return; }
+    for (i = 0; i < FAST_SLOTS; i++) live[i] = outputs[i];
+    for (i = 0; i < fc->count; i++) {
+        fast_reads(&fc->ops[i], reads, &n);
+        for (k = 0; k < n; k++) { int s = fast_slot(fc, reg, reads[k]); if (!written[s]) live[s] = 1; }
+        fast_writes(&fc->ops[i], &m);
+        for (k = 0; k < m; k++) written[fast_slot(fc, reg, fc->ops[i].d + k)] = 1;
+    }
+    for (i = fc->count - 1; i >= 0; i--) {
+        fop *o = &fc->ops[i];
+        int needed = 0;
+        fast_writes(o, &m);
+        for (k = 0; k < m; k++) if (live[fast_slot(fc, reg, o->d + k)]) needed = 1;
+        if (!needed) { o->op = -1; continue; }
+        for (k = 0; k < m; k++) live[fast_slot(fc, reg, o->d + k)] = 0;
+        fast_reads(o, reads, &n);
+        for (k = 0; k < n; k++) live[fast_slot(fc, reg, reads[k])] = 1;
+    }
+    for (i = 0, j = 0; i < fc->count; i++) if (fc->ops[i].op >= 0) { fc->ops[j++] = fc->ops[i]; keep_count++; }
+    fc->count = keep_count;
+    free(live); free(written);
+}
+
+/* One float in and one out: operands that can be redirected one by one. */
+static int fast_scalar(int op)
+{
+    return op == F_MOV || op == F_ADD || op == F_SUB || op == F_MUL || op == F_DIV ||
+           op == F_MAX || op == F_POW || op == F_GT || op == F_FRACT;
+}
+static int fast_single_output(int op) { return fast_scalar(op) || op == F_DOT2 || op == F_DOT3 || op == F_DOT4; }
+static int fast_op_reads(const fast_code *fc, float (*reg)[4], const fop *o, int slot)
+{
+    const float *reads[24];
+    int n, k;
+    if (o->op < 0) return 0;
+    fast_reads(o, reads, &n);
+    for (k = 0; k < n; k++) if (fast_slot(fc, reg, reads[k]) == slot) return 1;
+    return 0;
+}
+static int fast_op_writes(const fast_code *fc, float (*reg)[4], const fop *o, int slot)
+{
+    int m, k;
+    if (o->op < 0) return 0;
+    fast_writes(o, &m);
+    for (k = 0; k < m; k++) if (fast_slot(fc, reg, o->d + k) == slot) return 1;
+    return 0;
+}
+
+/* Is the value in `slot` after op i read again (before it is rewritten,
+ * or at the end, where `live_out` says what is read)? */
+static int fast_read_after(const fast_code *fc, float (*reg)[4], int i, int slot, const unsigned char *live_out)
+{
+    int j;
+    for (j = i + 1; j < fc->count; j++) {
+        if (fast_op_reads(fc, reg, &fc->ops[j], slot)) return 1;
+        if (fast_op_writes(fc, reg, &fc->ops[j], slot)) return 0;
+    }
+    return live_out[slot];
+}
+
+/* The compiler parks every expression in a temporary and moves it to its
+ * variable, and swizzles copy components: most decoded operations are
+ * moves. For `mov d <- s`: if s was made by a single-output operation k
+ * and has no other reader, k writes d itself; otherwise later scalar
+ * operations read s in place of d while neither is rewritten. Only where
+ * intermediate values are kept changes, so results stay the same. */
+static void fast_copy_propagate(fast_code *fc, float (*reg)[4], const unsigned char *live_out)
+{
+    int i, j, k;
+    for (i = 0; i < fc->count; i++) {
+        fop *mv = &fc->ops[i];
+        int d, src, ok;
+        if (mv->op != F_MOV) continue;
+        d = fast_slot(fc, reg, mv->d); src = fast_slot(fc, reg, mv->a);
+        if (d == src) { mv->op = -1; continue; }
+        for (k = i - 1; k >= 0 && !fast_op_writes(fc, reg, &fc->ops[k], src); k--) ;
+        if (k >= 0 && fast_single_output(fc->ops[k].op) && !fast_read_after(fc, reg, i, src, live_out)) {
+            ok = 1;
+            for (j = k + 1; j < i && ok; j++)
+                if (fast_op_reads(fc, reg, &fc->ops[j], src) || fast_op_reads(fc, reg, &fc->ops[j], d) ||
+                    fast_op_writes(fc, reg, &fc->ops[j], d)) ok = 0;
+            if (ok) { fc->ops[k].d = mv->d; mv->op = -1; continue; }
+        }
+        for (j = i + 1; j < fc->count; j++) {
+            fop *o = &fc->ops[j];
+            if (o->op < 0) continue;
+            if (fast_scalar(o->op)) {
+                if (o->a == mv->d) o->a = mv->a;
+                if (o->op != F_MOV && o->op != F_FRACT && o->b == mv->d) o->b = mv->a;
+            }
+            if (fast_op_writes(fc, reg, o, d) || fast_op_writes(fc, reg, o, src)) break;
+        }
+    }
+    for (i = 0, j = 0; i < fc->count; i++) if (fc->ops[i].op >= 0) fc->ops[j++] = fc->ops[i];
+    fc->count = j;
+}
+
+/* Live at the end: the outputs, and whatever is read before it is written
+ * (a value carried over from the previous invocation). */
+static unsigned char *fast_live_out(fast_code *fc, float (*reg)[4], const unsigned char *outputs)
+{
+    unsigned char *live = calloc(FAST_SLOTS, 1), *written = calloc(FAST_SLOTS, 1);
+    const float *reads[24];
+    int i, k, n, m;
+    if (!live || !written) { free(live); free(written); return 0; }
+    for (i = 0; i < FAST_SLOTS; i++) live[i] = outputs[i];
+    for (i = 0; i < fc->count; i++) {
+        fast_reads(&fc->ops[i], reads, &n);
+        for (k = 0; k < n; k++) { int sl = fast_slot(fc, reg, reads[k]); if (!written[sl]) live[sl] = 1; }
+        fast_writes(&fc->ops[i], &m);
+        for (k = 0; k < m; k++) written[fast_slot(fc, reg, fc->ops[i].d + k)] = 1;
+    }
+    free(written);
+    return live;
+}
+
+static int decode_program(fast_code *fc, const tg_glsl_fragment_program *ir, float (*reg)[4], const unsigned char *outputs)
+{
+    unsigned char *live_out;
+    fc->count = 0;
+    if (!decode_range(fc, ir, reg, ir->entry_pc, 0)) return 0;
+    fast_dead_code(fc, reg, outputs);
+    live_out = fast_live_out(fc, reg, outputs);
+    if (live_out) {
+#ifndef DE_GL_NO_COPY_PROPAGATION
+        fast_copy_propagate(fc, reg, live_out);
+#endif
+        free(live_out);
+        fast_dead_code(fc, reg, outputs);
+    }
+    return 1;
+}
+
+static void fast_exec(const fast_code *fc, const sampler *const *tex)
+{
+    const fop *o = fc->ops, *end = o + fc->count;
+    for (; o < end; o++) {
+        float *d = o->d, *a = o->a, *b = o->b;
+        switch (o->op) {
+        case F_MOV: *d = *a; break;
+        case F_ADD: *d = *a + *b; break;
+        case F_SUB: *d = *a - *b; break;
+        case F_MUL: *d = *a * *b; break;
+        case F_DIV: *d = *a / *b; break;
+        case F_MAX: *d = *a > *b ? *a : *b; break;
+        case F_POW: *d = vm_pow(*a, *b); break;
+        case F_GT: *d = *a > *b ? 1.0f : 0.0f; break;
+        case F_FRACT: {
+            float v = *a;
+            *d = (v != v || v > 8388608.0f || v < -8388608.0f) ? 0.0f : v - (float)floor_int(v);
+            break;
+        }
+        case F_DOT2: *d = a[0] * b[0] + a[1] * b[1]; break;
+        case F_DOT3: *d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; break;
+        case F_DOT4: *d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]; break;
+        case F_CROSS: {
+            float x = a[1] * b[2] - a[2] * b[1], y = a[2] * b[0] - a[0] * b[2], z = a[0] * b[1] - a[1] * b[0];
+            d[0] = x; d[1] = y; d[2] = z;
+            break;
+        }
+        case F_NORM2: case F_NORM3: case F_NORM4: {
+            int w = o->op == F_NORM2 ? (o->aux == 1 ? 1 : 2) : o->op == F_NORM3 ? 3 : 4, i;
+            float sum = a[0] * a[0];
+            for (i = 1; i < w; i++) sum += a[i] * a[i];
+            if (sum > 0.0f) { sum = 1.0f / vm_sqrt(sum); for (i = 0; i < w; i++) d[i] = a[i] * sum; }
+            else for (i = 0; i < w; i++) d[i] = 0.0f;
+            break;
+        }
+        case F_TEX: { float r[4]; sample2d(tex[o->aux], a[0], a[1], r); d[0] = r[0]; d[1] = r[1]; d[2] = r[2]; d[3] = r[3]; break; }
+        case F_MAT4: {
+            float r0 = a[0] * b[0] + a[4] * b[1] + a[8] * b[2] + a[12] * b[3];
+            float r1 = a[1] * b[0] + a[5] * b[1] + a[9] * b[2] + a[13] * b[3];
+            float r2 = a[2] * b[0] + a[6] * b[1] + a[10] * b[2] + a[14] * b[3];
+            float r3 = a[3] * b[0] + a[7] * b[1] + a[11] * b[2] + a[15] * b[3];
+            d[0] = r0; d[1] = r1; d[2] = r2; d[3] = r3;
+            break;
+        }
+        }
+    }
+}
+
 /* ---------------------------------------------------------------- drawing */
 typedef struct { float x, y, z, iw, v[MAX_VARYING_FLOATS]; } window_vertex;
 
@@ -1682,8 +2105,11 @@ static struct {
     float vx, vy, vw, vh;
     /* Vertex cache, indexed by vertex number. */
     float *cache;
-    unsigned int *stamp, *outcode;
+    unsigned int *stamp, *full_stamp, *outcode;
     unsigned int cache_cap, generation;
+    /* prefix[y] = owned rows below y, for the target's `owned` mask */
+    int *prefix, prefix_rows;
+    const unsigned char *prefix_mask;
 } draw;
 
 static const sampler *unit_sampler(int unit)
@@ -1715,13 +2141,10 @@ static unsigned int clip_outcode(const float *c)
     return code;
 }
 
-static float *shade_vertex(unsigned int index)
+static float *shade_vertex(unsigned int index);
+static void fetch_attributes(program *p, unsigned int index)
 {
-    float *out = draw.cache + (size_t)index * (size_t)draw.stride;
-    program *p = draw.p;
     int i, k;
-    if (draw.stamp[index] == draw.generation) return out;
-    draw.stamp[index] = draw.generation;
     for (i = 0; i < p->attrib_count; i++) {
         const attrib_info *ai = &p->attribs[i];
         const attrib_array *a = &gl.arrays[ai->location];
@@ -1742,7 +2165,40 @@ static float *shade_vertex(unsigned int index)
         }
         for (k = 0; k < 4; k++) dst[k] = gl.generic[ai->location][k];
     }
+}
+
+/* A vertex's clip position and outcode, from the position slice of the
+ * program when that pays (vpos_split), else from the whole program. */
+static float *vertex_position(unsigned int index)
+{
+    float *out = draw.cache + (size_t)index * (size_t)draw.stride;
+    program *p = draw.p;
+    int k;
+    if (draw.stamp[index] == draw.generation) return out;
+    draw.stamp[index] = draw.generation;
+    if (!p->vpos_split) return shade_vertex(index);
+    fetch_attributes(p, index);
+    fast_exec(&p->vpos, draw.vtex);
+    for (k = 0; k < 4; k++) out[k] = p->vregs[p->vs_out][k];
+    draw.outcode[index] = clip_outcode(out);
+    return out;
+}
+
+/* Every output of a vertex. The position the whole program computes is
+ * the one the slice computed: the same operations on the same inputs. */
+static float *shade_vertex(unsigned int index)
+{
+    float *out = draw.cache + (size_t)index * (size_t)draw.stride;
+    program *p = draw.p;
+    int i, k;
+    if (draw.full_stamp[index] == draw.generation) return out;
+    draw.full_stamp[index] = draw.stamp[index] = draw.generation;
+    fetch_attributes(p, index);
+#ifdef DE_GL_SLOW_VM
     vm_exec(p->vregs, p->vs->code, p->vs->instruction_count, p->vs->entry_pc, draw.vtex);
+#else
+    fast_exec(&p->vfast, draw.vtex);
+#endif
     for (k = 0; k < 4; k++) out[k] = p->vregs[p->vs_out][k];
     for (k = 0; k < draw.nv; k++) out[4 + k] = p->vregs[p->vary_vreg[k]][p->vary_comp[k]];
     draw.outcode[index] = clip_outcode(out);
@@ -1773,6 +2229,8 @@ static float *shade_vertex(unsigned int index)
 }
 
 static unsigned char to_byte(float c) { if (!(c > 0.0f)) return 0; if (c >= 1.0f) return 255; return (unsigned char)(int)(c * 255.0f + 0.5f); }
+/* to_byte(clampf01(c)), inline for the unblended write */
+#define TO_BYTE(c) ((unsigned char)(!((c) > 0.0f) ? 0 : (c) >= 1.0f ? 255 : (int)((c) * 255.0f + 0.5f)))
 
 static float blend_term(GLenum f, const float *s, const float *d, int k)
 {
@@ -1835,6 +2293,8 @@ static void raster_triangle(const window_vertex *a0, const window_vertex *b0, co
     float zx, zy, wx, wy, vx[MAX_VARYING_FLOATS], vy[MAX_VARYING_FLOATS];
     int nv = draw.nv, k, j, jmin, jmax, front;
     program *p = draw.p;
+    int plain_write = !gl.blend && gl.color_mask[0] && gl.color_mask[1] && gl.color_mask[2] && gl.color_mask[3];
+    int depth_on = gl.depth_test && draw.t.depth != 0, depth_less = gl.depth_func == GL_LESS;
     dx1 = b0->x - a0->x; dy1 = b0->y - a0->y; dx2 = c0->x - a0->x; dy2 = c0->y - a0->y;
     area = dx1 * dy2 - dx2 * dy1;
     if (!(area > 0.0f) && !(area < 0.0f)) return;
@@ -1883,14 +2343,22 @@ static void raster_triangle(const window_vertex *a0, const window_vertex *b0, co
         color = draw.t.color ? draw.t.color + ((size_t)j * (size_t)draw.t.width + (size_t)i0) * 4u : 0;
         depth = draw.t.depth ? draw.t.depth + (size_t)j * (size_t)draw.t.width + (size_t)i0 : 0;
         for (i = i0; i < i1; i++) {
+            float zc = z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z;
             gl.stats.fragments++;
-            if (!(gl.depth_test && depth) || depth_pass(z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z, *depth)) {
+            if (!depth_on || (depth_less ? zc < *depth : depth_pass(zc, *depth))) {
                 float w = 1.0f / iw, *out;
-                if (gl.depth_test && depth && gl.depth_mask) *depth = z < 0.0f ? 0.0f : z > 1.0f ? 1.0f : z;
+                if (depth_on && gl.depth_mask) *depth = zc;
                 for (k = 0; k < nv; k++) p->fregs[p->vary_freg[k]][p->vary_comp[k]] = q[k] * w;
+#ifdef DE_GL_SLOW_VM
                 vm_exec(p->fregs, p->fs->code, p->fs->instruction_count, p->fs->entry_pc, draw.ftex);
+#else
+                fast_exec(&p->ffast, draw.ftex);
+#endif
                 out = p->fregs[p->fs_out];
-                if (color) write_pixel(color, out);
+                if (color) {
+                    if (plain_write) { color[0] = TO_BYTE(out[0]); color[1] = TO_BYTE(out[1]); color[2] = TO_BYTE(out[2]); color[3] = TO_BYTE(out[3]); }
+                    else write_pixel(color, out);
+                }
                 gl.stats.shaded++;
             } else gl.stats.depth_rejected++;
             z += zx; iw += wx;
@@ -1960,11 +2428,35 @@ static void clip_and_draw(const float *a, const float *b, const float *c, unsign
     for (i = 1; i + 1 < count; i++) raster_triangle(&w[0], &w[i], &w[i + 1]);
 }
 
+static float window_x(const float *c) { float iw = 1.0f / c[3]; return draw.vx + (c[0] * iw + 1.0f) * draw.vw; }
+static float window_y(const float *c) { float iw = 1.0f / c[3]; return draw.vy + (c[1] * iw + 1.0f) * draw.vh; }
+
 static void draw_triangle(unsigned int ia, unsigned int ib, unsigned int ic)
 {
-    float *a = shade_vertex(ia), *b = shade_vertex(ib), *c = shade_vertex(ic);
+    float *a = vertex_position(ia), *b = vertex_position(ib), *c = vertex_position(ic);
     unsigned int oa = draw.outcode[ia], ob = draw.outcode[ib], oc = draw.outcode[ic];
     if (oa & ob & oc) return;
+    if (!(oa | ob | oc)) {
+        /* Before the rest of the vertex program runs: a triangle that is
+         * culled, or covers none of this context's rows, draws nothing.
+         * The tests repeat raster_triangle's own arithmetic on the same
+         * values (to_window's x and y), so they decide as it would. */
+        float ax = window_x(a), ay = window_y(a), bx = window_x(b), by = window_y(b), cx = window_x(c), cy = window_y(c);
+        float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+        int front, jmin, jmax;
+        if (!(area > 0.0f) && !(area < 0.0f)) return;
+        front = (area > 0.0f) == (gl.front_face == GL_CCW);
+        if (gl.cull && (gl.cull_face == GL_FRONT_AND_BACK || (gl.cull_face == GL_FRONT) == front)) { gl.stats.culled++; return; }
+        if (draw.t.owned) {
+            float ymin = ay < by ? (ay < cy ? ay : cy) : (by < cy ? by : cy);
+            float ymax = ay > by ? (ay > cy ? ay : cy) : (by > cy ? by : cy);
+            jmin = ceil_int(ymin - 0.5f); jmax = ceil_int(ymax - 0.5f);
+            if (jmin < draw.clip_y0) jmin = draw.clip_y0;
+            if (jmax > draw.clip_y1) jmax = draw.clip_y1;
+            if (jmin >= jmax || draw.prefix[jmax] == draw.prefix[jmin]) return;
+        }
+    }
+    a = shade_vertex(ia); b = shade_vertex(ib); c = shade_vertex(ic);
     if (!(oa | ob | oc)) {
         window_vertex w[3];
         to_window(a, &w[0]); to_window(b, &w[1]); to_window(c, &w[2]);
@@ -2009,10 +2501,26 @@ static int begin_draw(GLenum mode, unsigned int vertices)
         outcode = realloc(draw.outcode, (size_t)cap * sizeof(unsigned int));
         if (!outcode) { set_error(GL_OUT_OF_MEMORY); return 0; }
         draw.outcode = outcode;
+        stamp = realloc(draw.full_stamp, (size_t)cap * sizeof(unsigned int));
+        if (!stamp) { set_error(GL_OUT_OF_MEMORY); return 0; }
+        draw.full_stamp = stamp;
         memset(draw.stamp + draw.cache_cap, 0, (size_t)(cap - draw.cache_cap) * sizeof(unsigned int));
+        memset(draw.full_stamp + draw.cache_cap, 0, (size_t)(cap - draw.cache_cap) * sizeof(unsigned int));
         draw.cache_cap = cap;
     }
-    if (++draw.generation == 0) { memset(draw.stamp, 0, (size_t)draw.cache_cap * sizeof(unsigned int)); draw.generation = 1; }
+    if (++draw.generation == 0) {
+        memset(draw.stamp, 0, (size_t)draw.cache_cap * sizeof(unsigned int));
+        memset(draw.full_stamp, 0, (size_t)draw.cache_cap * sizeof(unsigned int));
+        draw.generation = 1;
+    }
+    if (draw.t.owned && (draw.prefix_mask != draw.t.owned || draw.prefix_rows != draw.t.height)) {
+        int y, *prefix = realloc(draw.prefix, (size_t)(draw.t.height + 1) * sizeof(int));
+        if (!prefix) { set_error(GL_OUT_OF_MEMORY); return 0; }
+        draw.prefix = prefix;
+        prefix[0] = 0;
+        for (y = 0; y < draw.t.height; y++) prefix[y + 1] = prefix[y] + (draw.t.owned[y] != 0);
+        draw.prefix_mask = draw.t.owned; draw.prefix_rows = draw.t.height;
+    }
     gl.stats.draws++;
     return 1;
 }
