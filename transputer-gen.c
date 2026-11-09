@@ -12757,6 +12757,41 @@ static int tp_next_kept(const int *keep, int n, int i)
     return i;
 }
 
+/* The integer stack effect of an entry of an address computation: how many
+ * values it needs on the stack and how many it leaves (net).  0 for anything
+ * not modelled, which is then not part of an address. */
+static int tp_addr_effect(const struct tp_hist_ent *h, int *need, int *delta)
+{
+    *need = 0;
+    *delta = 1;
+    if (h->kind == TP_HIST_LOCAL)
+        return h->opc == TP_OP_LDL || h->opc == TP_OP_LDLP;
+    if (h->kind != TP_HIST_INSTR)
+        return 0;
+    switch (h->opc) {
+    case TP_OP_LDL: case TP_OP_LDLP: case TP_OP_LDC:
+        return 1;
+    case TP_OP_ADC: case TP_OP_LDNL: case TP_OP_LDNLP: case TP_OP_EQC:
+        *need = 1; *delta = 0;
+        return 1;
+    case TP_OP_OPR:
+        switch (h->val) {
+        case TP_OPR_MINT:
+            return 1;
+        case TP_OPR_NOT: case TP_OPR_LB:
+            *need = 1; *delta = 0;
+            return 1;
+        case TP_OPR_SUM: case TP_OPR_DIFF: case TP_OPR_PROD: case TP_OPR_AND:
+        case TP_OPR_OR: case TP_OPR_XOR: case TP_OPR_BSUB: case TP_OPR_WSUB:
+        case TP_OPR_WSUBDB: case TP_OPR_SHL: case TP_OPR_SHR:
+            *need = 2; *delta = -1;
+            return 1;
+        }
+        return 0;
+    }
+    return 0;
+}
+
 /* A statement-ending double assignment can write FA straight to its local.
  * Accept only the exact low/high copy, optionally preceded by gv() moving
  * the high word to another float slot.  No address evaluation or other
@@ -12918,25 +12953,34 @@ ST_FUNC void tp_stmt_end(void)
                 if (c >= n || !(w[c].kind == TP_HIST_INSTR &&
                                 w[c].opc == TP_OP_LDL && w[c].val == x))
                     continue;
-                /* the store: a local's stl, or an address (computed
-                 * from what it pushes itself, so nothing that depends on
-                 * the stack's shape, and not on the FPU) and stnl */
-                for (d = tp_next_kept(keep, n, c); d < n;
-                     d = tp_next_kept(keep, n, d)) {
-                    if (w[d].kind == TP_HIST_LOCAL) {
-                        if (w[d].opc == TP_OP_STL)
+                /* the store: a local's stl, or an address and stnl.  The
+                 * address is computed from what it pushes itself above the
+                 * loaded x - never consuming x, which stnl must find under
+                 * it - so nothing depends on the stack's shape below, and
+                 * not on the FPU.  `x = -(a + b)` parks the sum and flips
+                 * its sign in A with `ldl x; mint; xor`: that pops x, and
+                 * taking it for address code lost the negation. */
+                {
+                    int depth = 0, need, delta;
+
+                    for (d = tp_next_kept(keep, n, c); d < n;
+                         d = tp_next_kept(keep, n, d)) {
+                        if (w[d].kind == TP_HIST_LOCAL &&
+                            w[d].opc == TP_OP_STL)
                             break;
-                        continue;           /* an address pushed */
-                    }
-                    if (w[d].opc == TP_OP_STNL)
-                        break;
-                    if (w[d].opc == TP_OP_STL || tp_ent_reads(&w[d], x) ||
-                        tp_ent_is_fpu(&w[d]) ||
-                        (w[d].opc == TP_OP_OPR &&
-                         (w[d].val == TP_OPR_REV || w[d].val == TP_OPR_DUP ||
-                          w[d].val == TP_OPR_SB || w[d].val == TP_OPR_SS))) {
-                        d = n;
-                        break;
+                        if (w[d].kind == TP_HIST_INSTR &&
+                            w[d].opc == TP_OP_STNL) {
+                            if (depth != 1)
+                                d = n;
+                            break;
+                        }
+                        if (tp_ent_reads(&w[d], x) || tp_ent_is_fpu(&w[d]) ||
+                            !tp_addr_effect(&w[d], &need, &delta) ||
+                            need > depth) {
+                            d = n;
+                            break;
+                        }
+                        depth += delta;
                     }
                 }
                 if (d >= n ||

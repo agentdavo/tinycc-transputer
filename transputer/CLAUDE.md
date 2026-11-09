@@ -911,6 +911,12 @@ the occam compiler does, and what new codegen should be held to:
   one; pushes, pops, stores, compares and `fprev` carry FC along.  A first
   cut that kept three products on the stack for `a*b + (c*d + e*f)` lost
   the first one (`test_fpu_resident`'s `dot3` caught it).
+- A rule that treats code between two instructions as "address code" must
+  model its stack depth, not list instructions to avoid: `tp_stmt_end`'s
+  `ldlp x; fpstnlsn; ldl x; <addr>; stnl` took `gen_opf(TOK_NEG)`'s
+  `mint; xor` (which pops x) for address code, so `m[0] = -(a + b)`
+  stored a + b - dEngine's gluLookAt came out with its translation's sign
+  flipped (2026-11-09, `tp_addr_effect`, `test_fp_neg_store.c`).
 - `CValue.i` is a `uint64_t`, so `sv->c.i < 0` is never true: the
   "canonical spilled copy" branches in `load()` and `tp_emit_float_addr`
   never run, and a register lvalue is always loaded from its register.
