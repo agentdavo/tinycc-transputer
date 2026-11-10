@@ -11,9 +11,6 @@
  *  some are on when merely set, some when non-empty, some are off when
  *  they start with '0', some carry a number, a mask or a name to filter
  *  by.  The note says which.
- *
- *  tccgen.c reads a few T4_* switches of its own under
- *  TCC_TARGET_TRANSPUTER; they are not in this table.
  */
 #ifndef TRANSPUTER_KNOBS_H
 #define TRANSPUTER_KNOBS_H
@@ -69,6 +66,13 @@
     K(T4_CALL_EMIT_TRACE, "n: trace the first n call, j and cj bytes emitted") \
     K(T4_CALL_EMIT_SHORT, "n: the same, for short encodings only") \
     K(T4_CALL_EMIT_FILTER, "name: limit T4_CALL_EMIT_SHORT to a file or function") \
+    /* the front end, under TCC_TARGET_TRANSPUTER */ \
+    K(T4_SWITCH_JT, "n: non-zero compiles dense switches to jump tables, 0 never; overrides -mjump-tables") \
+    K(T4_SYM_TRACE, "name: trace relocations emitted against symbols containing it") \
+    K(T4_IPREL_NONFUNC_WARN, "non-empty: report a call relocation against a non-function") \
+    K(T4_IPREL_DIAG, "non-empty: describe every call relocation emitted") \
+    K(T4_GRELOC_WARN, "non-empty: warn when a relocation's symbol index is repaired or dropped") \
+    K(T4_LDC_SYM_DIAG, "non-empty: report a constant that names a symbol being given VT_SYM") \
     /* linker: behaviour */ \
     K(T4_XIP_LINK, "non-empty: execute-in-place layout, text at 0x7F001000") \
     K(T4_ICF, "0: no identical code folding") \

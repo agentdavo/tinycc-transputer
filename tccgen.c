@@ -93,13 +93,15 @@ ST_DATA int func_ind; /* function start address */
 static int func_old;
 ST_DATA const char *funcname;
 #ifdef TCC_TARGET_TRANSPUTER
+#include "transputer-knobs.h"
+
 static int tcc_trace_func_enabled = -1;
 static char tcc_trace_func_name[64];
 
 static int tcc_trace_func_active(void) {
     const char *env;
     if (tcc_trace_func_enabled == -1) {
-        env = getenv("TCC_TRACE_FUNC");
+        env = tp_knob(TPK_TCC_TRACE_FUNC);
         if (env && *env) {
             pstrcpy(tcc_trace_func_name, sizeof(tcc_trace_func_name), env);
             tcc_trace_func_enabled = 1;
@@ -722,102 +724,9 @@ ST_FUNC void put_extern_sym(Sym *sym, Section *s, addr_t value, unsigned long si
 ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
                      addr_t addend)
 {
-#ifdef TCC_TARGET_TRANSPUTER
-    static int reloc_log = -1;
-    static const char *reloc_sym_filter;
-    static int reloc_type_filter;
-    static int sym_trace = -1;
-    static const char *sym_trace_filter;
-    static int iprel_nonfunc_warn = -1;
-    static int greloc_warn = -1;
-    static int iprel_diag = -1;
-#endif
     int c = 0;
 #ifdef TCC_TARGET_TRANSPUTER
-    if (reloc_log < 0) {
-        const char *env = getenv("T4_RELOC_LOG");
-        reloc_log = env && *env;
-        reloc_sym_filter = getenv("T4_RELOC_SYM");
-        reloc_type_filter = -1;
-        env = getenv("T4_RELOC_TYPE");
-        if (env && *env)
-            reloc_type_filter = (int)strtol(env, NULL, 0);
-    }
-    if (sym_trace < 0) {
-        const char *env = getenv("T4_SYM_TRACE");
-        sym_trace = env && *env;
-        sym_trace_filter = env;
-    }
-    if (iprel_nonfunc_warn < 0) {
-        const char *env = getenv("T4_IPREL_NONFUNC_WARN");
-        iprel_nonfunc_warn = env && *env;
-    }
-    if (greloc_warn < 0) {
-        const char *env = getenv("T4_GRELOC_WARN");
-        greloc_warn = env && *env;
-    }
-    if (iprel_diag < 0) {
-        const char *env = getenv("T4_IPREL_DIAG");
-        iprel_diag = env && *env;
-    }
-
-    /* Bug detection: IPREL32 should only be used for function calls */
-    if (type == R_TRANSPUTER_IPREL32 && sym) {
-        int bt = sym->type.t & VT_BTYPE;
-        /* IPREL32 is only valid for function calls (bt == VT_FUNC).
-         * If we're emitting IPREL32 for a non-function symbol, that's a bug! */
-        if (bt != VT_FUNC && iprel_nonfunc_warn) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            fprintf(stderr,
-                    "BUG_IPREL32_NONFUNCTION: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx\n",
-                    get_tok_str(sym->v, NULL), bt, func, fname,
-                    file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset);
-        }
-        if (iprel_diag) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            uint8_t op = 0;
-            if (s && s->data && offset < s->data_offset)
-                op = ((uint8_t *)s->data)[offset];
-            fprintf(stderr,
-                    "IPREL_DIAG: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
-                    get_tok_str(sym->v, NULL), bt, func, fname,
-                    file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset, op);
-        }
-    }
-    if ((type == R_TRANSPUTER_IPREL32 || type == R_TRANSPUTER_LDC_ABS) && sym && reloc_log) {
-        const char *name = get_tok_str(sym->v, NULL);
-        if ((!reloc_sym_filter || strstr(name, reloc_sym_filter)) &&
-            (reloc_type_filter < 0 || reloc_type_filter == type)) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            uint8_t op = 0;
-            if (s && s->data && offset < s->data_offset)
-                op = ((uint8_t *)s->data)[offset];
-            fprintf(stderr,
-                    "RELOC_EMIT: sym=%s type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
-                    name, type, func, fname, file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset, op);
-        }
-    }
-    if (sym && sym_trace && sym_trace_filter) {
-        const char *name = get_tok_str(sym->v, NULL);
-        if (name && strstr(name, sym_trace_filter)) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            uint8_t op = 0;
-            int bt = sym->type.t & VT_BTYPE;
-            if (s && s->data && offset < s->data_offset)
-                op = ((uint8_t *)s->data)[offset];
-            fprintf(stderr,
-                    "SYM_RELOC: sym=%s bt=0x%x type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
-                    name, bt, type, func, fname, file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset, op);
-        }
-    }
+    tp_greloca_trace(s, sym, offset, type);
 #endif
 
     if (nocode_wanted && s == cur_text_section)
@@ -836,7 +745,7 @@ ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
             /* This indicates memory corruption - skip creating relocation */
             const char *name = (sym->v > 0 && sym->v < 100000) ?
                 get_tok_str(sym->v, NULL) : "<corrupt>";
-            if (greloc_warn) {
+            if (tp_knob_on(TPK_T4_GRELOC_WARN)) {
                 tcc_warning("greloca: symbol %s has corrupt index %d, skipping relocation",
                             name, sym->c);
             }
@@ -850,7 +759,7 @@ ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
                 if (IS_ENUM_VAL(sym->type.t)) {
                     return;
                 }
-                if (greloc_warn) {
+                if (tp_knob_on(TPK_T4_GRELOC_WARN)) {
                     tcc_warning("greloca: symbol %s has invalid index %d (max=%d), recreating",
                                 sym->v ? get_tok_str(sym->v, NULL) : "<unknown>",
                                 sym->c, max_syms);
@@ -2209,7 +2118,7 @@ ST_FUNC int gv(int rc)
         && vtop->sym
         && !(vtop->r & VT_SYM)
         && !IS_ENUM_VAL(vtop->sym->type.t)) {
-        const char *diag = getenv("T4_LDC_SYM_DIAG");
+        const char *diag = tp_knob(TPK_T4_LDC_SYM_DIAG);
         if (diag && *diag) {
             const char *fname = file ? file->filename : "<unknown>";
             const char *func = funcname ? funcname : "<no func>";
@@ -9126,7 +9035,7 @@ again:
              * store_type) during early kernel boot, which nobody has
              * retested since.  gcase() compares.
              */
-            const char *jt = getenv("T4_SWITCH_JT");
+            const char *jt = tp_knob(TPK_T4_SWITCH_JT);
             int use_jt = tcc_state->tp_jump_tables;
             if (jt && *jt)
                 use_jt = (int)strtoul(jt, NULL, 0) != 0;

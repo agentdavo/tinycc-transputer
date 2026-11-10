@@ -1935,6 +1935,9 @@ ST_FUNC void tp_label_here(void);
 /* gen_op says whether an operand of the binary operation it is about to do
    is a volatile read; returns the previous setting, to give back after it */
 ST_FUNC int tp_opf_set_volatile(int on);
+/* greloca() is about to emit this relocation: the back end's traces */
+ST_FUNC void tp_greloca_trace(Section *s, Sym *sym, unsigned long offset,
+                              int type);
 /* char/short to int conversion via XWORD sign extension */
 ST_FUNC void gen_cvt_csti(int t);
 

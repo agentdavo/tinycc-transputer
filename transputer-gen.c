@@ -255,6 +255,79 @@ static void tp_areg_invalidate(void) { tp_areg_tag = TP_AREG_TAG_NONE; }
 
 static int tp_fpu_take_resident(SValue *sv, int is_db);
 
+/* What the environment asks to see of a relocation as tccgen.c's greloca()
+ * emits it: T4_IPREL_NONFUNC_WARN, T4_IPREL_DIAG, T4_RELOC_LOG (with
+ * T4_RELOC_SYM and T4_RELOC_TYPE) and T4_SYM_TRACE. */
+ST_FUNC void tp_greloca_trace(Section *s, Sym *sym, unsigned long offset,
+                              int type)
+{
+    static int reloc_type_filter = -2;
+    const char *reloc_sym_filter = tp_knob(TPK_T4_RELOC_SYM);
+
+    if (reloc_type_filter == -2) {
+        const char *env = tp_knob(TPK_T4_RELOC_TYPE);
+        reloc_type_filter = env && *env ? (int)strtol(env, NULL, 0) : -1;
+    }
+
+    /* Bug detection: IPREL32 should only be used for function calls */
+    if (type == R_TRANSPUTER_IPREL32 && sym) {
+        int bt = sym->type.t & VT_BTYPE;
+        /* IPREL32 is only valid for function calls (bt == VT_FUNC).
+         * If we're emitting IPREL32 for a non-function symbol, that's a bug! */
+        if (bt != VT_FUNC && tp_knob_on(TPK_T4_IPREL_NONFUNC_WARN)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            fprintf(stderr,
+                    "BUG_IPREL32_NONFUNCTION: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx\n",
+                    get_tok_str(sym->v, NULL), bt, func, fname,
+                    file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset);
+        }
+        if (tp_knob_on(TPK_T4_IPREL_DIAG)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "IPREL_DIAG: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    get_tok_str(sym->v, NULL), bt, func, fname,
+                    file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+    if ((type == R_TRANSPUTER_IPREL32 || type == R_TRANSPUTER_LDC_ABS) && sym && tp_knob_on(TPK_T4_RELOC_LOG)) {
+        const char *name = get_tok_str(sym->v, NULL);
+        if ((!reloc_sym_filter || strstr(name, reloc_sym_filter)) &&
+            (reloc_type_filter < 0 || reloc_type_filter == type)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "RELOC_EMIT: sym=%s type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    name, type, func, fname, file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+    if (sym && tp_knob_on(TPK_T4_SYM_TRACE)) {
+        const char *name = get_tok_str(sym->v, NULL);
+        if (name && strstr(name, tp_knob(TPK_T4_SYM_TRACE))) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            int bt = sym->type.t & VT_BTYPE;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "SYM_RELOC: sym=%s bt=0x%x type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    name, bt, type, func, fname, file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+}
+
 /* Fold `ADC k` into the word offset of the LDNL/STNL that follows it.
  *
  * LDNL/STNL already take a word displacement from the base in AReg, and on
