@@ -8691,28 +8691,37 @@ static int tp_shift_count_masked(void)
     return 0;
 }
 
-ST_FUNC void gen_opi(int op) {
+/* What the stages of gen_opi() share: the operator, which the first stage
+ * may replace by an equivalent one, and the folds decided while the
+ * operands are pushed, which say what the emitters find on the stack. */
+struct tp_opi {
+    int op;
     int cmp_zero_true;
-    int shl_add_opt = 0;
-    int mul_const_opt = 0;
-    int mul_const_val = 0;
-    int eqc_const_opt = 0;
-    int eqc_const_val = 0;
-    int adc_const_opt = 0;
-    int adc_const_val = 0;
+    int shl_add_opt;
+    int mul_const_opt;
+    int mul_const_val;
+    int eqc_const_opt;
+    int eqc_const_val;
+    int adc_const_opt;
+    int adc_const_val;
     /* x >> K with a literal K: the shift count can be pushed *after* xdble
      * instead of being parked in a workspace slot across it.  See TOK_SAR. */
-    int sar_const_opt = 0;
-    int sar_const_val = 0;
-    int mod_pow2_opt = 0;   /* unsigned modulo power-of-2: x % N -> x & (N-1) */
-    int mod_pow2_mask = 0;
+    int sar_const_opt;
+    int sar_const_val;
+    int mod_pow2_opt;   /* unsigned modulo power-of-2: x % N -> x & (N-1) */
+    int mod_pow2_mask;
     /* Shift count is a literal already in 0..31, so the runtime
      * "LDC 31; AND" clamp is provably a no-op and can be dropped. */
-    int shift_const_ok = 0;
+    int shift_const_ok;
+};
 
+/* Put the operator in the form that costs least: the operands may be
+ * exchanged and the relation replaced by its mirror or complement. */
+static void tp_opi_canonical(struct tp_opi *o)
+{
     /* UMULL leaves its high word in REG_IRE2, which may still hold the high
      * half of a pending long long call result (`get_u64() + x * y`). */
-    if (op == TOK_UMULL)
+    if (o->op == TOK_UMULL)
         save_reg(REG_IRE2);
 
     /* `a < b` and `a >= b` used to emit REV before GT, because GT computes
@@ -8733,441 +8742,454 @@ ST_FUNC void gen_opi(int op) {
      * The peephole rule that was supposed to catch this pattern reports zero
      * hits on every function, so it never fired; removing the REV at the
      * source is the fix. */
-    if (op == TOK_LT || op == TOK_GE) {
+    if (o->op == TOK_LT || o->op == TOK_GE) {
         SValue tmp = vtop[-1];
         vtop[-1] = vtop[0];
         vtop[0] = tmp;
-        op = (op == TOK_LT) ? TOK_GT : TOK_LE;
+        o->op = (o->op == TOK_LT) ? TOK_GT : TOK_LE;
     }
 
     /* Strict compare against a literal at a loop back-edge: produce the
      * complement so the result can be tagged "zero is true" and gjmp_cond
      * needs no EQC 0. */
-    cmp_zero_true = tp_cmp_complement_vs_literal(&op);
+    o->cmp_zero_true = tp_cmp_complement_vs_literal(&o->op);
 
     /* The unsigned relations, likewise.  With GTU, a <u b is b >u a with no
      * REV.  Without it the mint/xor sequence is the other way round - REV
      * comes free with a <u b and costs one for a >u b - so there the swap
      * goes towards TOK_ULT/TOK_UGE.  A literal compare the complement has
      * already rewritten is left as it is. */
-    if (!cmp_zero_true) {
+    if (!o->cmp_zero_true) {
         int to = 0;
         if (tp_have_t9000_feat(TP_T9K_GTU)) {
-            if (op == TOK_ULT) to = TOK_UGT;
-            else if (op == TOK_UGE) to = TOK_ULE;
+            if (o->op == TOK_ULT) to = TOK_UGT;
+            else if (o->op == TOK_UGE) to = TOK_ULE;
         } else {
-            if (op == TOK_UGT) to = TOK_ULT;
-            else if (op == TOK_ULE) to = TOK_UGE;
+            if (o->op == TOK_UGT) to = TOK_ULT;
+            else if (o->op == TOK_ULE) to = TOK_UGE;
         }
         if (to) {
             tp_cmp_swap_operands();
-            op = to;
+            o->op = to;
+        }
+    }
+}
+
+/* Transputer: comparison operations need explicit operand loading.
+ *
+ * For arithmetic ops (+, -, etc.), the operands are typically already
+ * on the eval stack from preceding load/computation instructions.
+ * These work "by construction" — TCC's generic layer generates loads
+ * that happen to leave values on the Transputer eval stack.
+ *
+ * For comparison ops (==, !=, >, <, etc.), this doesn't work after
+ * function calls because the eval stack is corrupted by the CALL
+ * instruction's return value. We must explicitly load operands.
+ *
+ * We use tp_push_sv() which always generates code to push a value
+ * onto the eval stack, handling all SValue types correctly. */
+/* Always explicitly push both operands onto the hardware eval stack.
+ * TCC's generic layer may leave values in workspace-backed "registers"
+ * (workspace slots) rather than on the eval stack. On the Transputer,
+ * all binary operations (arithmetic, logic, comparisons) operate on
+ * AReg and BReg, so we must ensure both values are pushed. */
+/* Transputer-specific gv2: for two word-size local lvalues, emit
+ * LDL directly from local offsets and STL to allocated registers.
+ * This produces LDL a; STL r1; LDL b; STL r2 (4 insns) which is
+ * the same as normal gv2. BUT: tp_push_sv then does LDL r1; LDL r2
+ * (2 more insns). With the DUP/areg_tag tracker, the second load
+ * might be optimized. The real win comes when we later skip the
+ * tp_push_sv reload by keeping values on the eval stack.
+ *
+ * For now, this function is identical to gv2 for the common case
+ * but lays the groundwork for direct eval-stack loading. */
+/* Push both operands straight from where they are.  Returns 0, with
+ * nothing emitted, when an operand needs gv2() first. */
+static int tp_opi_push_direct(struct tp_opi *o)
+{
+    int v1 = vtop[-1].r & VT_VALMASK;
+    int v2 = vtop[0].r & VT_VALMASK;
+
+    /* Classify operands */
+    /* (a word of a packed local at a misaligned offset is not one LDL:
+     * tp_word_unaligned) */
+    int first_local = (vtop[-1].r & VT_LVAL) && v1 == VT_LOCAL &&
+                      !(vtop[-1].r & VT_SYM) && !(vtop[-1].c.i & 3) &&
+                      get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
+    int second_local = (vtop[0].r & VT_LVAL) && v2 == VT_LOCAL &&
+                       !(vtop[0].r & VT_SYM) && !(vtop[0].c.i & 3) &&
+                       get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
+    int first_const = (v1 == VT_CONST) && !(vtop[-1].r & VT_SYM);
+    int second_const = (v2 == VT_CONST) && !(vtop[0].r & VT_SYM);
+
+    /* A value already materialised in a general workspace-slot register
+     * costs exactly one LDL r to push — the same as a local. Without this,
+     * (register op X) forms fell through to gv2 and emitted the
+     * five-instruction spill dance `STL a; LDC k; STL b; LDL a; LDL b`
+     * ahead of the real operation. That is the single most common waste in
+     * kernel code: ~184k sites, ~738 KB of .text.
+     *
+     * Restricted to TREG_W0..NB_REGS-1: slots 0-2 are the hardware A/B/C
+     * eval-stack registers and 3-5 are the FPU slots, none of which follow
+     * the plain "value lives in workspace slot r" rule. VT_MUSTCAST must be
+     * excluded too — bypassing gv2 would skip a required narrowing cast. */
+    int first_reg = !(vtop[-1].r & (VT_LVAL | VT_SYM | VT_MUSTCAST |
+                                    VT_MUSTBOUND | VT_BOUNDED)) &&
+                    v1 >= TREG_W0 && v1 < NB_REGS &&
+                    get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
+    int second_reg = !(vtop[0].r & (VT_LVAL | VT_SYM | VT_MUSTCAST |
+                                    VT_MUSTBOUND | VT_BOUNDED)) &&
+                     v2 >= TREG_W0 && v2 < NB_REGS &&
+                     get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
+
+
+    /* Exclude 3-operand ops and special cases from direct path */
+    int exclude = o->op == TOK_UMULL || o->op == TOK_ADDC1 || o->op == TOK_SUBC1 ||
+                  o->op == TOK_ADDC2 || o->op == TOK_SUBC2 ||
+                  o->op == TOK_UDIV || o->op == TOK_UMOD ||
+                  o->op == TOK_A_SHL || o->op == TOK_A_SAR || o->op == TOK_NEG;
+
+    /* Plain shifts are NOT excluded: SHL/SHR/SAR all want AReg=count,
+     * BReg=value, which is exactly the operand order CASE 1/2/3 produce.
+     * Excluding them forced every shift down the gv2 spill path, which
+     * cost 8 extra bytes per constant shift (the dominant kernel form:
+     * `x >> LITERAL` in field extracts and bitmap indexing). */
+    int is_shift = (o->op == TOK_SHL || o->op == TOK_SHR || o->op == TOK_SAR);
+    int second_folded;
+
+    /* A literal count already in range makes the runtime clamp dead. */
+    if ((is_shift || o->op == TOK_A_SHL || o->op == TOK_A_SAR) && second_const) {
+        unsigned long cnt = (unsigned long)vtop[0].c.i;
+        if (cnt <= 31)
+            o->shift_const_ok = 1;
+    }
+
+    /* Constant-RHS folds, decided once for every direct case below.
+     * `direct_ready` jumps past the block that used to compute these, so
+     * without this the fast paths emitted `LDC k; SUM` where the slow path
+     * would have emitted a single `ADC k`. That matters enormously: every
+     * struct field access is lowered by tccgen as `pointer + constant`
+     * (see the TOK_ARROW case in tccgen.c), so ADC folding applies to
+     * essentially all field addressing in the kernel.
+     *
+     * When a fold fires, the second operand must NOT be pushed — the
+     * folded instruction carries the literal itself. */
+    if (!exclude && second_const) {
+        long c = (long)vtop[0].c.i;
+        switch (o->op) {
+        case '+': case TOK_A_ADD:
+            if (!tp_adc_would_trap()) {
+                o->adc_const_opt = 1; o->adc_const_val = (int)c;
+            }
+            break;
+        case '-': case TOK_A_SUB:
+            if (!tp_adc_would_trap()) {
+                o->adc_const_opt = 1; o->adc_const_val = -(int)c;
+            }
+            break;
+        case TOK_EQ: case TOK_NE:
+            o->eqc_const_opt = 1; o->eqc_const_val = (int)c;
+            break;
+        case '*': case TOK_A_MUL:
+            if (tp_mul_const_strength(c, &o->mul_const_val))
+                o->mul_const_opt = 1;
+            break;
+        case TOK_SHL:
+            if (c == 1 || c == 2)
+                o->shl_add_opt = (int)c;
+            break;
+        case TOK_SAR: case TOK_A_SAR:
+            /* Only for counts the runtime clamp would have passed
+               through unchanged.  Negative counts, and counts above 31,
+               keep the generic path and its LDC 31; AND clamp, so
+               behaviour there is exactly as before. */
+            if (c >= 0 && c <= 31) {
+                o->sar_const_opt = 1; o->sar_const_val = (int)c;
+            }
+            break;
+        default:
+            break;
         }
     }
 
-    /* Transputer: comparison operations need explicit operand loading.
-     *
-     * For arithmetic ops (+, -, etc.), the operands are typically already
-     * on the eval stack from preceding load/computation instructions.
-     * These work "by construction" — TCC's generic layer generates loads
-     * that happen to leave values on the Transputer eval stack.
-     *
-     * For comparison ops (==, !=, >, <, etc.), this doesn't work after
-     * function calls because the eval stack is corrupted by the CALL
-     * instruction's return value. We must explicitly load operands.
-     *
-     * We use tp_push_sv() which always generates code to push a value
-     * onto the eval stack, handling all SValue types correctly. */
-    /* Always explicitly push both operands onto the hardware eval stack.
-     * TCC's generic layer may leave values in workspace-backed "registers"
-     * (workspace slots) rather than on the eval stack. On the Transputer,
-     * all binary operations (arithmetic, logic, comparisons) operate on
-     * AReg and BReg, so we must ensure both values are pushed. */
-    /* Transputer-specific gv2: for two word-size local lvalues, emit
-     * LDL directly from local offsets and STL to allocated registers.
-     * This produces LDL a; STL r1; LDL b; STL r2 (4 insns) which is
-     * the same as normal gv2. BUT: tp_push_sv then does LDL r1; LDL r2
-     * (2 more insns). With the DUP/areg_tag tracker, the second load
-     * might be optimized. The real win comes when we later skip the
-     * tp_push_sv reload by keeping values on the eval stack.
-     *
-     * For now, this function is identical to gv2 for the common case
-     * but lays the groundwork for direct eval-stack loading. */
-    {
-        int v1 = vtop[-1].r & VT_VALMASK;
-        int v2 = vtop[0].r & VT_VALMASK;
+    /* True when the constant RHS is folded into the operation and so must
+     * not be materialised on the eval stack. */
+    second_folded = o->adc_const_opt || o->eqc_const_opt ||
+                    o->mul_const_opt || o->shl_add_opt || o->sar_const_opt;
 
-        /* Classify operands */
-        /* (a word of a packed local at a misaligned offset is not one LDL:
-         * tp_word_unaligned) */
-        int first_local = (vtop[-1].r & VT_LVAL) && v1 == VT_LOCAL &&
-                          !(vtop[-1].r & VT_SYM) && !(vtop[-1].c.i & 3) &&
-                          get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
-        int second_local = (vtop[0].r & VT_LVAL) && v2 == VT_LOCAL &&
-                           !(vtop[0].r & VT_SYM) && !(vtop[0].c.i & 3) &&
-                           get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
-        int first_const = (v1 == VT_CONST) && !(vtop[-1].r & VT_SYM);
-        int second_const = (v2 == VT_CONST) && !(vtop[0].r & VT_SYM);
-
-        /* A value already materialised in a general workspace-slot register
-         * costs exactly one LDL r to push — the same as a local. Without this,
-         * (register op X) forms fell through to gv2 and emitted the
-         * five-instruction spill dance `STL a; LDC k; STL b; LDL a; LDL b`
-         * ahead of the real operation. That is the single most common waste in
-         * kernel code: ~184k sites, ~738 KB of .text.
-         *
-         * Restricted to TREG_W0..NB_REGS-1: slots 0-2 are the hardware A/B/C
-         * eval-stack registers and 3-5 are the FPU slots, none of which follow
-         * the plain "value lives in workspace slot r" rule. VT_MUSTCAST must be
-         * excluded too — bypassing gv2 would skip a required narrowing cast. */
-        int first_reg = !(vtop[-1].r & (VT_LVAL | VT_SYM | VT_MUSTCAST |
-                                        VT_MUSTBOUND | VT_BOUNDED)) &&
-                        v1 >= TREG_W0 && v1 < NB_REGS &&
-                        get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
-        int second_reg = !(vtop[0].r & (VT_LVAL | VT_SYM | VT_MUSTCAST |
-                                        VT_MUSTBOUND | VT_BOUNDED)) &&
-                         v2 >= TREG_W0 && v2 < NB_REGS &&
-                         get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
-
-
-        /* Exclude 3-operand ops and special cases from direct path */
-        int exclude = op == TOK_UMULL || op == TOK_ADDC1 || op == TOK_SUBC1 ||
-                      op == TOK_ADDC2 || op == TOK_SUBC2 ||
-                      op == TOK_UDIV || op == TOK_UMOD ||
-                      op == TOK_A_SHL || op == TOK_A_SAR || op == TOK_NEG;
-
-        /* Plain shifts are NOT excluded: SHL/SHR/SAR all want AReg=count,
-         * BReg=value, which is exactly the operand order CASE 1/2/3 produce.
-         * Excluding them forced every shift down the gv2 spill path, which
-         * cost 8 extra bytes per constant shift (the dominant kernel form:
-         * `x >> LITERAL` in field extracts and bitmap indexing). */
-        int is_shift = (op == TOK_SHL || op == TOK_SHR || op == TOK_SAR);
-        int second_folded;
-
-        /* A literal count already in range makes the runtime clamp dead. */
-        if ((is_shift || op == TOK_A_SHL || op == TOK_A_SAR) && second_const) {
-            unsigned long cnt = (unsigned long)vtop[0].c.i;
-            if (cnt <= 31)
-                shift_const_ok = 1;
-        }
-
-        /* Constant-RHS folds, decided once for every direct case below.
-         * `direct_ready` jumps past the block that used to compute these, so
-         * without this the fast paths emitted `LDC k; SUM` where the slow path
-         * would have emitted a single `ADC k`. That matters enormously: every
-         * struct field access is lowered by tccgen as `pointer + constant`
-         * (see the TOK_ARROW case in tccgen.c), so ADC folding applies to
-         * essentially all field addressing in the kernel.
-         *
-         * When a fold fires, the second operand must NOT be pushed — the
-         * folded instruction carries the literal itself. */
-        if (!exclude && second_const) {
-            long c = (long)vtop[0].c.i;
-            switch (op) {
-            case '+': case TOK_A_ADD:
-                if (!tp_adc_would_trap()) {
-                    adc_const_opt = 1; adc_const_val = (int)c;
-                }
-                break;
-            case '-': case TOK_A_SUB:
-                if (!tp_adc_would_trap()) {
-                    adc_const_opt = 1; adc_const_val = -(int)c;
-                }
-                break;
-            case TOK_EQ: case TOK_NE:
-                eqc_const_opt = 1; eqc_const_val = (int)c;
-                break;
-            case '*': case TOK_A_MUL:
-                if (tp_mul_const_strength(c, &mul_const_val))
-                    mul_const_opt = 1;
-                break;
-            case TOK_SHL:
-                if (c == 1 || c == 2)
-                    shl_add_opt = (int)c;
-                break;
-            case TOK_SAR: case TOK_A_SAR:
-                /* Only for counts the runtime clamp would have passed
-                   through unchanged.  Negative counts, and counts above 31,
-                   keep the generic path and its LDC 31; AND clamp, so
-                   behaviour there is exactly as before. */
-                if (c >= 0 && c <= 31) {
-                    sar_const_opt = 1; sar_const_val = (int)c;
-                }
-                break;
-            default:
-                break;
-            }
-        }
-
-        /* True when the constant RHS is folded into the operation and so must
-         * not be materialised on the eval stack. */
-        second_folded = adc_const_opt || eqc_const_opt ||
-                        mul_const_opt || shl_add_opt || sar_const_opt;
-
-        if (!exclude && first_local && second_local) {
-            /* CASE 1: local op local → LDL a; LDL b */
-            int off1 = vtop[-1].c.i;
-            int off2 = vtop[0].c.i;
-            abcreg_stack_depth = 0;
-            if (off1 == off2 && !tp_t414()) {
-                emit_local_op(TP_OP_LDL, off1);
-                Tp_DUP();
-            } else {
-                emit_local_op(TP_OP_LDL, off1);
-                emit_local_op(TP_OP_LDL, off2);
-            }
-            vtop[-1].r = get_reg(RC_INT);
-            goto direct_ready;
-        }
-
-        if (!exclude && first_local && second_const) {
-            /* CASE 2: local op const → LDL a; LDC const */
-            abcreg_stack_depth = 0;
-            emit_local_op(TP_OP_LDL, vtop[-1].c.i);
-            if (!second_folded)
-                tp_ldc_pooled((int)vtop[0].c.i);
-            vtop[-1].r = get_reg(RC_INT);
-            goto direct_ready;
-        }
-
-        if (!exclude && first_const && second_local) {
-            /* CASE 3: const op local → LDC const; LDL b */
-            abcreg_stack_depth = 0;
-            if ((op == '*' || op == TOK_A_MUL) &&
-                tp_mul_const_strength((long)vtop[-1].c.i, &mul_const_val)) {
-                emit_local_op(TP_OP_LDL, vtop[0].c.i);
-                mul_const_opt = 1;
-            } else {
-                tp_ldc_pooled((int)vtop[-1].c.i);
-                emit_local_op(TP_OP_LDL, vtop[0].c.i);
-            }
-            vtop[-1].r = get_reg(RC_INT);
-            goto direct_ready;
-        }
-
-        /* CASES 4-8: one or both operands already live in a workspace-slot
-         * register. Push directly with LDL instead of round-tripping through
-         * gv2's freshly allocated spill slots. The first operand's register is
-         * reused as the destination — it is consumed by this operation anyway,
-         * and reusing it avoids a get_reg() call that could spill a live value
-         * after we have already pushed onto the eval stack. */
-        if (!exclude && (first_reg || second_reg) &&
-            (first_reg || first_local || first_const) &&
-            (second_reg || second_local || second_const)) {
-            int dest;
-            abcreg_stack_depth = 0;
-
-            /* Push first operand. The common shape is that the value was just
-             * computed and stored into v1 by the previous operation, so try to
-             * cancel that store instead of reloading it. */
-            if (first_reg)
-                tp_push_reg_or_cancel_stl(v1, &vtop[-1]);
-            else if (first_local)
-                emit_local_op(TP_OP_LDL, vtop[-1].c.i);
-            else
-                tp_ldc_pooled((int)vtop[-1].c.i);
-
-            /* Push second operand, unless it was folded into the operation. */
-            if (second_folded) {
-                /* nothing to push — the literal rides in the instruction */
-            } else if (second_reg) {
-                if (first_reg && v1 == v2 && !tp_t414())
-                    Tp_DUP();
-                else
-                    Tp_LDL(v2);
-            } else if (second_local) {
-                emit_local_op(TP_OP_LDL, vtop[0].c.i);
-            } else {
-                tp_ldc_pooled((int)vtop[0].c.i);
-            }
-
-            /* Plain assignment, as CASES 1-3 do: the result is a fresh value
-             * in a register, so every other r-flag (VT_LVAL, VT_SYM,
-             * VT_MUSTCAST, ...) must be cleared, not carried over. */
-            dest = first_reg ? v1 : (second_reg ? v2 : get_reg(RC_INT));
-            vtop[-1].r = dest;
-            goto direct_ready;
-        }
-
-        /* Standard path: gv2 */
-        gv2(RC_INT, RC_INT);
-    }
-    {
-        SValue sv_first = vtop[-1];
-        SValue sv_second = vtop[0];
-        int first_is_imm_const = ((sv_first.r & VT_VALMASK) == VT_CONST) && !(sv_first.r & VT_SYM);
-        int second_is_imm_const = ((sv_second.r & VT_VALMASK) == VT_CONST) && !(sv_second.r & VT_SYM);
-
-        /* Spill/reload desync guard:
-         * For arithmetic/comparison, a scalar local can transiently appear as
-         * VT_LOCAL without VT_LVAL. Treat it as a value load in this context.
-         * Keep pointer/array/function operands untouched (address semantics). */
-        if (!(sv_first.r & VT_LVAL) && (sv_first.r & VT_VALMASK) == VT_LOCAL) {
-            int bt1 = sv_first.type.t & VT_BTYPE;
-            if (!(sv_first.type.t & (VT_ARRAY | VT_VLA)) && bt1 != VT_PTR && bt1 != VT_FUNC) {
-                tp_debug_log_vt_local_normalize(&sv_first, "lhs");
-                sv_first.r |= VT_LVAL;
-            }
-        }
-        if (!(sv_second.r & VT_LVAL) && (sv_second.r & VT_VALMASK) == VT_LOCAL) {
-            int bt2 = sv_second.type.t & VT_BTYPE;
-            if (!(sv_second.type.t & (VT_ARRAY | VT_VLA)) && bt2 != VT_PTR && bt2 != VT_FUNC) {
-                tp_debug_log_vt_local_normalize(&sv_second, "rhs");
-                sv_second.r |= VT_LVAL;
-            }
-        }
-
-        if (op == '*' || op == TOK_A_MUL) {
-            /* PROD latency depends on AReg; keep immediate constant in AReg. */
-            if (first_is_imm_const && !second_is_imm_const) {
-                SValue tmp = sv_first;
-                sv_first = sv_second;
-                sv_second = tmp;
-                first_is_imm_const = 0;
-                second_is_imm_const = 1;
-            }
-            /* Strength reduction for multiply by constants.
-             * DUP+SUM = 2 cycles vs PROD's 30+ cycles.
-             * x*0 → 0
-             * x*1 → x
-             * x*(-1) → -x
-             * x*2 → DUP;SUM
-             * x*3 → DUP;SUM;(orig);SUM (save x, x*2, add x)
-             * x*4 → DUP;SUM;DUP;SUM
-             * x*8 → DUP;SUM;DUP;SUM;DUP;SUM
-             * x*(1<<N), N>=4 → LDC N; SHL */
-            if (second_is_imm_const) {
-                long c = sv_second.c.i;
-                if (tp_mul_const_strength(c, &mul_const_val)) {
-                    mul_const_opt = 1;
-                }
-            }
-        }
-
-        /* Modulo power-of-2: x % N -> x & (N-1).
-         * Only valid for unsigned modulo. Signed C remainder must keep the
-         * dividend sign, e.g. -9 % 8 == -1, while -9 & 7 == 7. */
-        if (op == TOK_UMOD && second_is_imm_const) {
-            long c = sv_second.c.i;
-            if (c > 0 && (c & (c - 1)) == 0) {  /* power of 2 check */
-                mod_pow2_opt = 1;
-                mod_pow2_mask = (int)(c - 1);
-            }
-        }
-
-        if ((op == TOK_A_SHL || op == TOK_SHL) && second_is_imm_const) {
-            if (sv_second.c.i == 1) {
-                shl_add_opt = 1;
-            } else if (sv_second.c.i == 2) {
-                shl_add_opt = 2;
-            }
-        }
-
-        if (op == TOK_EQ || op == TOK_NE) {
-            /* Commutative: if left is constant, swap so right is constant */
-            if (first_is_imm_const && !second_is_imm_const) {
-                SValue tmp = sv_first;
-                sv_first = sv_second;
-                sv_second = tmp;
-                first_is_imm_const = 0;
-                second_is_imm_const = 1;
-            }
-            if (second_is_imm_const) {
-                eqc_const_opt = 1;
-                eqc_const_val = sv_second.c.i;
-            }
-        }
-
-        if (op == '+' || op == TOK_A_ADD || op == '-' || op == TOK_A_SUB) {
-            /* ADC optimization: a + const → load a; ADC const (1 instruction)
-             * Also works for subtraction: a - const → ADC(-const).
-             * Commutative for +: if left is constant, swap. */
-            if ((op == '+' || op == TOK_A_ADD) && first_is_imm_const && !second_is_imm_const) {
-                SValue tmp = sv_first;
-                sv_first = sv_second;
-                sv_second = tmp;
-                first_is_imm_const = 0;
-                second_is_imm_const = 1;
-            }
-            if (second_is_imm_const && !tp_adc_would_trap()) {
-                int cval = (op == '-' || op == TOK_A_SUB) ? -(int)sv_second.c.i : (int)sv_second.c.i;
-                adc_const_opt = 1;
-                adc_const_val = cval;
-            }
-        }
-
-        if (tp_genopi_debug) {
-            fprintf(stderr, "[GEN_OPI] func=%s op=0x%x('%c') ind=0x%x "
-                    "first: r=0x%x v=0x%x c.i=%ld lval=%d  "
-                    "second: r=0x%x v=0x%x c.i=%ld lval=%d\n",
-                    funcname ? funcname : "?", op, (op > 0x20 && op < 0x7f) ? op : '?',
-                    ind,
-                    sv_first.r, sv_first.r & VT_VALMASK, (long)sv_first.c.i,
-                    (sv_first.r & VT_LVAL) != 0,
-                    sv_second.r, sv_second.r & VT_VALMASK, (long)sv_second.c.i,
-                    (sv_second.r & VT_LVAL) != 0);
-        }
+    if (!exclude && first_local && second_local) {
+        /* CASE 1: local op local → LDL a; LDL b */
+        int off1 = vtop[-1].c.i;
+        int off2 = vtop[0].c.i;
         abcreg_stack_depth = 0;
-        /* Prime CReg for 3-operand instructions (LMUL, LSUM, LDIFF, LDIV).
-         * Push the CReg value before operands so it naturally falls to CReg
-         * after two operand pushes. Eliminates STL/REV/LDL workspace thrash. */
-        if (op == TOK_UMULL || op == TOK_ADDC1 || op == TOK_SUBC1
-            || op == TOK_UDIV || op == TOK_UMOD) {
-            Tp_LDC(0);
-            abcreg_push(1);
-        } else if (op == TOK_ADDC2 || op == TOK_SUBC2) {
-            Tp_LDL(FRAME_SLOT_CARRY);
-            abcreg_push(1);
+        if (off1 == off2 && !tp_t414()) {
+            emit_local_op(TP_OP_LDL, off1);
+            Tp_DUP();
+        } else {
+            emit_local_op(TP_OP_LDL, off1);
+            emit_local_op(TP_OP_LDL, off2);
         }
-        /* Direct LDL chaining: DISABLED — gv2() already emits load
-         * instructions and updating the vstack. Adding extra LDLs on top
-         * corrupts the eval stack state. Proper fix requires either:
-         * a) Preventing gv2() from emitting loads for the direct path
-         * b) Replacing gv2() entirely with a transputer-specific loader
-         * Both are major TCC refactors. See STL-LDL-PLAN.md. */
-        tp_push_sv(&sv_first);
-        if (!shl_add_opt && !mul_const_opt && !eqc_const_opt && !adc_const_opt
-            && !mod_pow2_opt && !sar_const_opt) {
-            int same_operand = 0;
-            if (sv_first.r == sv_second.r && sv_first.c.i == sv_second.c.i)
-                same_operand = 1;
-            if (same_operand && !tp_t414()) {
+        vtop[-1].r = get_reg(RC_INT);
+        return 1;
+    }
+
+    if (!exclude && first_local && second_const) {
+        /* CASE 2: local op const → LDL a; LDC const */
+        abcreg_stack_depth = 0;
+        emit_local_op(TP_OP_LDL, vtop[-1].c.i);
+        if (!second_folded)
+            tp_ldc_pooled((int)vtop[0].c.i);
+        vtop[-1].r = get_reg(RC_INT);
+        return 1;
+    }
+
+    if (!exclude && first_const && second_local) {
+        /* CASE 3: const op local → LDC const; LDL b */
+        abcreg_stack_depth = 0;
+        if ((o->op == '*' || o->op == TOK_A_MUL) &&
+            tp_mul_const_strength((long)vtop[-1].c.i, &o->mul_const_val)) {
+            emit_local_op(TP_OP_LDL, vtop[0].c.i);
+            o->mul_const_opt = 1;
+        } else {
+            tp_ldc_pooled((int)vtop[-1].c.i);
+            emit_local_op(TP_OP_LDL, vtop[0].c.i);
+        }
+        vtop[-1].r = get_reg(RC_INT);
+        return 1;
+    }
+
+    /* CASES 4-8: one or both operands already live in a workspace-slot
+     * register. Push directly with LDL instead of round-tripping through
+     * gv2's freshly allocated spill slots. The first operand's register is
+     * reused as the destination — it is consumed by this operation anyway,
+     * and reusing it avoids a get_reg() call that could spill a live value
+     * after we have already pushed onto the eval stack. */
+    if (!exclude && (first_reg || second_reg) &&
+        (first_reg || first_local || first_const) &&
+        (second_reg || second_local || second_const)) {
+        int dest;
+        abcreg_stack_depth = 0;
+
+        /* Push first operand. The common shape is that the value was just
+         * computed and stored into v1 by the previous operation, so try to
+         * cancel that store instead of reloading it. */
+        if (first_reg)
+            tp_push_reg_or_cancel_stl(v1, &vtop[-1]);
+        else if (first_local)
+            emit_local_op(TP_OP_LDL, vtop[-1].c.i);
+        else
+            tp_ldc_pooled((int)vtop[-1].c.i);
+
+        /* Push second operand, unless it was folded into the operation. */
+        if (second_folded) {
+            /* nothing to push — the literal rides in the instruction */
+        } else if (second_reg) {
+            if (first_reg && v1 == v2 && !tp_t414())
                 Tp_DUP();
-            } else {
-                tp_push_sv(&sv_second);
+            else
+                Tp_LDL(v2);
+        } else if (second_local) {
+            emit_local_op(TP_OP_LDL, vtop[0].c.i);
+        } else {
+            tp_ldc_pooled((int)vtop[0].c.i);
+        }
+
+        /* Plain assignment, as CASES 1-3 do: the result is a fresh value
+         * in a register, so every other r-flag (VT_LVAL, VT_SYM,
+         * VT_MUSTCAST, ...) must be cleared, not carried over. */
+        dest = first_reg ? v1 : (second_reg ? v2 : get_reg(RC_INT));
+        vtop[-1].r = dest;
+        return 1;
+    }
+    return 0;
+}
+
+/* The standard path: gv2(), then push both operands. */
+static void tp_opi_push_general(struct tp_opi *o)
+{
+    SValue sv_first, sv_second;
+    int first_is_imm_const, second_is_imm_const;
+
+    gv2(RC_INT, RC_INT);
+    sv_first = vtop[-1];
+    sv_second = vtop[0];
+    first_is_imm_const = ((sv_first.r & VT_VALMASK) == VT_CONST) && !(sv_first.r & VT_SYM);
+    second_is_imm_const = ((sv_second.r & VT_VALMASK) == VT_CONST) && !(sv_second.r & VT_SYM);
+
+    /* Spill/reload desync guard:
+     * For arithmetic/comparison, a scalar local can transiently appear as
+     * VT_LOCAL without VT_LVAL. Treat it as a value load in this context.
+     * Keep pointer/array/function operands untouched (address semantics). */
+    if (!(sv_first.r & VT_LVAL) && (sv_first.r & VT_VALMASK) == VT_LOCAL) {
+        int bt1 = sv_first.type.t & VT_BTYPE;
+        if (!(sv_first.type.t & (VT_ARRAY | VT_VLA)) && bt1 != VT_PTR && bt1 != VT_FUNC) {
+            tp_debug_log_vt_local_normalize(&sv_first, "lhs");
+            sv_first.r |= VT_LVAL;
+        }
+    }
+    if (!(sv_second.r & VT_LVAL) && (sv_second.r & VT_VALMASK) == VT_LOCAL) {
+        int bt2 = sv_second.type.t & VT_BTYPE;
+        if (!(sv_second.type.t & (VT_ARRAY | VT_VLA)) && bt2 != VT_PTR && bt2 != VT_FUNC) {
+            tp_debug_log_vt_local_normalize(&sv_second, "rhs");
+            sv_second.r |= VT_LVAL;
+        }
+    }
+
+    if (o->op == '*' || o->op == TOK_A_MUL) {
+        /* PROD latency depends on AReg; keep immediate constant in AReg. */
+        if (first_is_imm_const && !second_is_imm_const) {
+            SValue tmp = sv_first;
+            sv_first = sv_second;
+            sv_second = tmp;
+            first_is_imm_const = 0;
+            second_is_imm_const = 1;
+        }
+        /* Strength reduction for multiply by constants.
+         * DUP+SUM = 2 cycles vs PROD's 30+ cycles.
+         * x*0 → 0
+         * x*1 → x
+         * x*(-1) → -x
+         * x*2 → DUP;SUM
+         * x*3 → DUP;SUM;(orig);SUM (save x, x*2, add x)
+         * x*4 → DUP;SUM;DUP;SUM
+         * x*8 → DUP;SUM;DUP;SUM;DUP;SUM
+         * x*(1<<N), N>=4 → LDC N; SHL */
+        if (second_is_imm_const) {
+            long c = sv_second.c.i;
+            if (tp_mul_const_strength(c, &o->mul_const_val)) {
+                o->mul_const_opt = 1;
             }
         }
     }
 
-direct_ready:
-    switch (op) {
+    /* Modulo power-of-2: x % N -> x & (N-1).
+     * Only valid for unsigned modulo. Signed C remainder must keep the
+     * dividend sign, e.g. -9 % 8 == -1, while -9 & 7 == 7. */
+    if (o->op == TOK_UMOD && second_is_imm_const) {
+        long c = sv_second.c.i;
+        if (c > 0 && (c & (c - 1)) == 0) {  /* power of 2 check */
+            o->mod_pow2_opt = 1;
+            o->mod_pow2_mask = (int)(c - 1);
+        }
+    }
+
+    if ((o->op == TOK_A_SHL || o->op == TOK_SHL) && second_is_imm_const) {
+        if (sv_second.c.i == 1) {
+            o->shl_add_opt = 1;
+        } else if (sv_second.c.i == 2) {
+            o->shl_add_opt = 2;
+        }
+    }
+
+    if (o->op == TOK_EQ || o->op == TOK_NE) {
+        /* Commutative: if left is constant, swap so right is constant */
+        if (first_is_imm_const && !second_is_imm_const) {
+            SValue tmp = sv_first;
+            sv_first = sv_second;
+            sv_second = tmp;
+            first_is_imm_const = 0;
+            second_is_imm_const = 1;
+        }
+        if (second_is_imm_const) {
+            o->eqc_const_opt = 1;
+            o->eqc_const_val = sv_second.c.i;
+        }
+    }
+
+    if (o->op == '+' || o->op == TOK_A_ADD || o->op == '-' || o->op == TOK_A_SUB) {
+        /* ADC optimization: a + const → load a; ADC const (1 instruction)
+         * Also works for subtraction: a - const → ADC(-const).
+         * Commutative for +: if left is constant, swap. */
+        if ((o->op == '+' || o->op == TOK_A_ADD) && first_is_imm_const && !second_is_imm_const) {
+            SValue tmp = sv_first;
+            sv_first = sv_second;
+            sv_second = tmp;
+            first_is_imm_const = 0;
+            second_is_imm_const = 1;
+        }
+        if (second_is_imm_const && !tp_adc_would_trap()) {
+            int cval = (o->op == '-' || o->op == TOK_A_SUB) ? -(int)sv_second.c.i : (int)sv_second.c.i;
+            o->adc_const_opt = 1;
+            o->adc_const_val = cval;
+        }
+    }
+
+    if (tp_genopi_debug) {
+        fprintf(stderr, "[GEN_OPI] func=%s op=0x%x('%c') ind=0x%x "
+                "first: r=0x%x v=0x%x c.i=%ld lval=%d  "
+                "second: r=0x%x v=0x%x c.i=%ld lval=%d\n",
+                funcname ? funcname : "?", o->op, (o->op > 0x20 && o->op < 0x7f) ? o->op : '?',
+                ind,
+                sv_first.r, sv_first.r & VT_VALMASK, (long)sv_first.c.i,
+                (sv_first.r & VT_LVAL) != 0,
+                sv_second.r, sv_second.r & VT_VALMASK, (long)sv_second.c.i,
+                (sv_second.r & VT_LVAL) != 0);
+    }
+    abcreg_stack_depth = 0;
+    /* Prime CReg for 3-operand instructions (LMUL, LSUM, LDIFF, LDIV).
+     * Push the CReg value before operands so it naturally falls to CReg
+     * after two operand pushes. Eliminates STL/REV/LDL workspace thrash. */
+    if (o->op == TOK_UMULL || o->op == TOK_ADDC1 || o->op == TOK_SUBC1
+        || o->op == TOK_UDIV || o->op == TOK_UMOD) {
+        Tp_LDC(0);
+        abcreg_push(1);
+    } else if (o->op == TOK_ADDC2 || o->op == TOK_SUBC2) {
+        Tp_LDL(FRAME_SLOT_CARRY);
+        abcreg_push(1);
+    }
+    /* Direct LDL chaining: DISABLED — gv2() already emits load
+     * instructions and updating the vstack. Adding extra LDLs on top
+     * corrupts the eval stack state. Proper fix requires either:
+     * a) Preventing gv2() from emitting loads for the direct path
+     * b) Replacing gv2() entirely with a transputer-specific loader
+     * Both are major TCC refactors. See STL-LDL-PLAN.md. */
+    tp_push_sv(&sv_first);
+    if (!o->shl_add_opt && !o->mul_const_opt && !o->eqc_const_opt && !o->adc_const_opt
+        && !o->mod_pow2_opt && !o->sar_const_opt) {
+        int same_operand = 0;
+        if (sv_first.r == sv_second.r && sv_first.c.i == sv_second.c.i)
+            same_operand = 1;
+        if (same_operand && !tp_t414()) {
+            Tp_DUP();
+        } else {
+            tp_push_sv(&sv_second);
+        }
+    }
+}
+
+/* The emitters.  Each returns 0 for an operator that is not its own.
+ * On entry AReg is the second operand and BReg the first, less whatever
+ * the folds left out. */
+static int tp_opi_arith(struct tp_opi *o)
+{
+    switch (o->op) {
     case TOK_A_ADD:  /* += compound assignment */
     case '+':
-        if (adc_const_opt) {
-            int w = tp_addr_disp_words(adc_const_val);
+        if (o->adc_const_opt) {
+            int w = tp_addr_disp_words(o->adc_const_val);
             if (w)
                 emit_instr(TP_OP_LDNLP, w);   /* stage 2, not stage 4 */
             else
-                emit_instr(TP_OP_ADC, adc_const_val);
+                emit_instr(TP_OP_ADC, o->adc_const_val);
         } else {
             Tp_SUM();
         }
         vtop--; break;
     case TOK_A_SUB:  /* -= compound assignment */
     case '-':
-        if (adc_const_opt) {
-            int w = tp_addr_disp_words(adc_const_val);
+        if (o->adc_const_opt) {
+            int w = tp_addr_disp_words(o->adc_const_val);
             if (w)
                 emit_instr(TP_OP_LDNLP, w);   /* already negated; stage 2 */
             else
-                emit_instr(TP_OP_ADC, adc_const_val);
+                emit_instr(TP_OP_ADC, o->adc_const_val);
         } else {
             Tp_DIFF();
         }
         vtop--; break;
     case TOK_A_MUL:  /* *= compound assignment */
     case '*':
-        if (mul_const_opt && mul_const_val == 0) {
+        if (o->mul_const_opt && o->mul_const_val == 0) {
             if (tp_no_t805_ops()) {
                 Tp_LDC(0);              /* no pop: x & 0 */
                 Tp_AND();
@@ -9177,22 +9199,22 @@ direct_ready:
             }
             vtop--; break;
         }
-        if (mul_const_opt && tp_t414() && (mul_const_val == 2
-            || mul_const_val == 4 || mul_const_val == 8)) {
+        if (o->mul_const_opt && tp_t414() && (o->mul_const_val == 2
+            || o->mul_const_val == 4 || o->mul_const_val == 8)) {
             /* the dup; sum chains below need dup */
-            Tp_LDC(mul_const_val == 2 ? 1 : mul_const_val == 4 ? 2 : 3);
+            Tp_LDC(o->mul_const_val == 2 ? 1 : o->mul_const_val == 4 ? 2 : 3);
             Tp_SHL();
             vtop--; break;
         }
-        if (mul_const_opt && tp_t414() && mul_const_val == 3) {
+        if (o->mul_const_opt && tp_t414() && o->mul_const_val == 3) {
             Tp_LDC(3);
             Tp_OPR_BINARY(TP_OPR_PROD);
             vtop--; break;
         }
-        if (mul_const_opt && mul_const_val == 1) {
+        if (o->mul_const_opt && o->mul_const_val == 1) {
             vtop--; break;
         }
-        if (mul_const_opt && mul_const_val == -1) {
+        if (o->mul_const_opt && o->mul_const_val == -1) {
             /* ~x + 1, but not with adc, the error-checking add: negating
              * MinInt overflows.  That is undefined for an int, but this is
              * also how a 64-bit multiply's cross terms take a low word of
@@ -9204,12 +9226,12 @@ direct_ready:
             Tp_SUM();
             vtop--; break;
         }
-        if (mul_const_opt && mul_const_val == 2) {
+        if (o->mul_const_opt && o->mul_const_val == 2) {
             /* x * 2 → DUP; SUM */
             Tp_DUP(); Tp_SUM();
             vtop--; break;
         }
-        if (mul_const_opt && mul_const_val == 3) {
+        if (o->mul_const_opt && o->mul_const_val == 3) {
             /* x * 3 → DUP; SUM; x; SUM (need original x)
              * But x is on eval stack — we can't easily get it back.
              * Alternative: DUP; DUP; SUM; SUM = x + x + x = 3x */
@@ -9218,20 +9240,20 @@ direct_ready:
             Tp_SUM();            /* AReg=3x */
             vtop--; break;
         }
-        if (mul_const_opt && mul_const_val == 4) {
+        if (o->mul_const_opt && o->mul_const_val == 4) {
             /* x * 4 → DUP; SUM; DUP; SUM */
             Tp_DUP(); Tp_SUM(); Tp_DUP(); Tp_SUM();
             vtop--; break;
         }
-        if (mul_const_opt && mul_const_val == 8) {
+        if (o->mul_const_opt && o->mul_const_val == 8) {
             /* x * 8 → DUP; SUM; DUP; SUM; DUP; SUM */
             Tp_DUP(); Tp_SUM(); Tp_DUP(); Tp_SUM(); Tp_DUP(); Tp_SUM();
             vtop--; break;
         }
-        if (mul_const_opt && (mul_const_val & 0x100) != 0) {
+        if (o->mul_const_opt && (o->mul_const_val & 0x100) != 0) {
             /* x * (1 << N) → x << N.  Entry has AReg=x; push N as
              * shift count so SHL sees AReg=count, BReg=value. */
-            Tp_LDC(mul_const_val & 0xff);
+            Tp_LDC(o->mul_const_val & 0xff);
             Tp_SHL();
             vtop--; break;
         }
@@ -9248,15 +9270,15 @@ direct_ready:
         abcreg_pop(1); vtop--; break;
     case TOK_A_MOD:  /* %= compound assignment */
     case '%':
-        if (mod_pow2_opt) {
-            Tp_LDC(mod_pow2_mask);
+        if (o->mod_pow2_opt) {
+            Tp_LDC(o->mod_pow2_mask);
             Tp_AND();
             vtop--; break;
         }
         Tp_OPR(TP_OPR_REM); abcreg_pop(1); vtop--; break;
     case TOK_UMOD:   /* unsigned modulo */
-        if (mod_pow2_opt) {
-            Tp_LDC(mod_pow2_mask);
+        if (o->mod_pow2_opt) {
+            Tp_LDC(o->mod_pow2_mask);
             Tp_AND();
             vtop--; break;
         }
@@ -9276,21 +9298,32 @@ direct_ready:
     case '|': Tp_OR(); vtop--; break;
     case TOK_A_XOR:  /* ^= compound assignment */
     case '^': Tp_XOR(); vtop--; break;
+    case TOK_NEG: Tp_OPR(TP_OPR_NOT); emit_instr(TP_OP_ADC, 1); break;  /* ~x + 1 = -x (two's complement) */
+    case '~': Tp_OPR(TP_OPR_NOT); break;  /* Unary - no vtop-- */
+    default:
+        return 0;
+    }
+    return 1;
+}
+
+static int tp_opi_shift(struct tp_opi *o)
+{
+    switch (o->op) {
     case TOK_A_SHL:  /* <<= compound assignment */
     case TOK_SHL:
-        if (shl_add_opt && tp_t414()) {
-            Tp_LDC(shl_add_opt);        /* no dup for x + x */
+        if (o->shl_add_opt && tp_t414()) {
+            Tp_LDC(o->shl_add_opt);        /* no dup for x + x */
             Tp_SHL();
             vtop--;
             break;
         }
-        if (shl_add_opt == 1) {
+        if (o->shl_add_opt == 1) {
             /* x << 1 == x + x */
             Tp_DUP();
             Tp_SUM();
             vtop--;
             break;
-        } else if (shl_add_opt == 2) {
+        } else if (o->shl_add_opt == 2) {
             /* x << 2 == ((x + x) + (x + x)) */
             Tp_DUP();
             Tp_SUM();
@@ -9302,19 +9335,19 @@ direct_ready:
         /* Clamp shift count to 0-31: TCWG warns count >= 32 can lock
          * the processor for minutes.  AReg=count, BReg=value.
          * A literal count already in range makes the clamp dead code. */
-        if (!shift_const_ok && !tp_shift_count_masked()) {
+        if (!o->shift_const_ok && !tp_shift_count_masked()) {
             Tp_LDC(31); Tp_AND();
         }
         Tp_SHL(); vtop--; break;
     case TOK_SHR:    /* >> logical shift right */
         /* Clamp shift count to 0-31 (same safety as SHL) */
-        if (!shift_const_ok && !tp_shift_count_masked()) {
+        if (!o->shift_const_ok && !tp_shift_count_masked()) {
             Tp_LDC(31); Tp_AND();
         }
         Tp_SHR(); vtop--; break;
     case TOK_A_SAR:  /* >>= compound assignment (arithmetic shift) */
     case TOK_SAR:    /* arithmetic shift right using XDBLE+LSHR (Compiler Guide p28) */
-        if (sar_const_opt) {
+        if (o->sar_const_opt) {
             /* Literal count: the count was NOT pushed (second_folded), so the
              * value alone is in AReg and the workspace round trip that the
              * general case needs disappears.
@@ -9331,9 +9364,9 @@ direct_ready:
              * which is register-for-register identical to what
              * `ldc K; stl s; xdble; ldl s; lshr` produced, minus the stl/ldl.
              * K == 0 is the identity, so emit nothing at all. */
-            if (sar_const_val != 0) {
+            if (o->sar_const_val != 0) {
                 Tp_OPR(TP_OPR_XDBLE);
-                Tp_LDC(sar_const_val);   /* abcreg_push(1) */
+                Tp_LDC(o->sar_const_val);   /* abcreg_push(1) */
                 Tp_OPR(TP_OPR_LSHR);
                 /* Net the LDC back out so the eval-stack depth on exit is 1,
                  * exactly what the general path's trailing abcreg_pop(1)
@@ -9348,7 +9381,7 @@ direct_ready:
         /* Entry: AReg=shift, BReg=value.
          * XDBLE sign-extends AReg into BReg:AReg (64-bit).
          * LSHR shifts CReg:BReg right by AReg bits, result in AReg. */
-        if (!shift_const_ok && !tp_shift_count_masked()) {
+        if (!o->shift_const_ok && !tp_shift_count_masked()) {
             Tp_LDC(31); Tp_AND();                /* clamp shift 0-31 */
         }
         Tp_STL(FRAME_SLOT_SCRATCH2);   /* save shift; AReg=value */
@@ -9356,7 +9389,15 @@ direct_ready:
         Tp_LDL(FRAME_SLOT_SCRATCH2);  /* AReg=shift, BReg=value, CReg=sign */
         Tp_OPR(TP_OPR_LSHR);          /* CReg:BReg >> AReg → AReg=result */
         abcreg_pop(1); vtop--; break;
+    default:
+        return 0;
+    }
+    return 1;
+}
 
+static int tp_opi_compare(struct tp_opi *o)
+{
+    switch (o->op) {
     /* Comparisons: Result 1(True) or 0(False) in AReg.
      *
      * All comparisons produce "non-zero = true" in AReg.  gvtst() calls
@@ -9369,7 +9410,7 @@ direct_ready:
      *
      * So vset_VT_CMP(TOK_NE) is correct for "non-zero = true" results. */
     case TOK_EQ:
-        if (eqc_const_opt && eqc_const_val == 0 && !tp_no_eqc0()) {
+        if (o->eqc_const_opt && o->eqc_const_val == 0 && !tp_no_eqc0()) {
             /* `x == 0` is exactly what VT_CMP(TOK_EQ) already means - "zero is
              * true" - so the value can be left raw and no instruction emitted
              * at all.  This is the mirror of the `x != 0` case below, which
@@ -9391,10 +9432,10 @@ direct_ready:
              * CJ group with its operand. */
             vtop--;
             vset_VT_CMP(TOK_EQ);
-        } else if (eqc_const_opt) {
+        } else if (o->eqc_const_opt) {
             /* EQC K: single instruction, AReg = (AReg == K) ? 1 : 0.
              * Replaces LDC K + DIFF + EQC 0 (3 instrs) with 1 instr. */
-            emit_instr(TP_OP_EQC, eqc_const_val);
+            emit_instr(TP_OP_EQC, o->eqc_const_val);
             /* EQC produces 1 if equal → non-zero = true */
             vtop--;
             vset_VT_CMP(TOK_NE);
@@ -9408,8 +9449,8 @@ direct_ready:
         }
         break;
     case TOK_NE:
-        if (eqc_const_opt) {
-            if (eqc_const_val == 0) {
+        if (o->eqc_const_opt) {
+            if (o->eqc_const_val == 0) {
                 /* `x != 0` is exactly what VT_CMP(TOK_NE) already means -
                  * "nonzero is true" - so the value can be left raw.  The
                  * previous `EQC 0; EQC 0` normalised it to 1/0 and then
@@ -9425,7 +9466,7 @@ direct_ready:
                  *   branch when false  EQC K ; EQC 0 ; CJ  (unchanged)
                  *   branch when true   EQC K ; EQC 0 ; EQC 0 ; CJ  ->  EQC K ; CJ
                  *   used as a value    EQC K ; EQC 0 ; EQC 0 ; EQC 0  ->  EQC K ; EQC 0 */
-                emit_instr(TP_OP_EQC, eqc_const_val);
+                emit_instr(TP_OP_EQC, o->eqc_const_val);
                 vtop--;
                 vset_VT_CMP(TOK_EQ);
                 break;
@@ -9445,7 +9486,7 @@ direct_ready:
     case TOK_GT:
         Tp_GT();                   /* 1 if a > b, 0 otherwise */
         vtop--;
-        vset_VT_CMP(cmp_zero_true ? TOK_EQ : TOK_NE);
+        vset_VT_CMP(o->cmp_zero_true ? TOK_EQ : TOK_NE);
         break;
     case TOK_LT:
         Tp_REV();
@@ -9471,11 +9512,70 @@ direct_ready:
         vset_VT_CMP(TOK_EQ);
         break;
 
+    /* Unsigned comparisons - XOR both operands with MinInt (0x80000000)
+     * to convert unsigned ordering to signed ordering, then use GT.
+     *
+     * Entry state: AReg = right (vtop[0]), BReg = left (vtop[-1])
+     * GT semantics: AReg = (BReg > AReg) ? 1 : 0  (signed comparison)
+     *
+     * MINT (OPR 0x42) loads 0x80000000 in a single byte — much more
+     * efficient than LDC 0x80000000 which needs 8 prefix bytes.
+     *
+     * Core XOR-both-operands sequence (from entry AReg=R, BReg=L):
+     *   MINT    → AReg=MINT, BReg=R, CReg=L
+     *   XOR     → AReg=R^MINT, BReg=L        (XOR pops CReg→BReg)
+     *   REV     → AReg=L, BReg=R^MINT
+     *   MINT    → AReg=MINT, BReg=L, CReg=R^MINT
+     *   XOR     → AReg=L^MINT, BReg=R^MINT   (XOR pops CReg→BReg)
+     *   (no REV)
+     *   GT      → (R^MINT > L^MINT) = unsigned(R > L) = unsigned(L < R)
+     *
+     * With final REV before GT:
+     *   REV     → AReg=R^MINT, BReg=L^MINT
+     *   GT      → (L^MINT > R^MINT) = unsigned(L > R)
+     */
+    case TOK_ULT:
+        /* unsigned left < right: REV + GTU → (right >u left) */
+        tp_emit_gtu(1);
+        vtop--;
+        vset_VT_CMP(TOK_NE);
+        break;
 
+    case TOK_UGE:
+        /* unsigned left >= right = !(left < right) = !(right >u left).
+         * REV + GTU yields 1 when left < right; defer the invert via
+         * VT_CMP(TOK_EQ) ("zero is true"), matching signed TOK_GE.
+         * Eager EQC 0 here + load()'s odd-op double-EQC 0 used to emit
+         * three EQC 0 bytes for `return a + b <= c` (seq_buf_can_fit). */
+        tp_emit_gtu(1);
+        vtop--;
+        vset_VT_CMP(TOK_EQ);
+        break;
 
-    case TOK_NEG: Tp_OPR(TP_OPR_NOT); emit_instr(TP_OP_ADC, 1); break;  /* ~x + 1 = -x (two's complement) */
-    case '~': Tp_OPR(TP_OPR_NOT); break;  /* Unary - no vtop-- */
+    case TOK_UGT:
+        /* unsigned left > right: GTU → (BReg >u AReg) = (left >u right) */
+        tp_emit_gtu(0);
+        vtop--;
+        vset_VT_CMP(o->cmp_zero_true ? TOK_EQ : TOK_NE);
+        break;
 
+    case TOK_ULE:
+        /* unsigned left <= right = !(left >u right). Same deferred invert
+         * as TOK_LE / TOK_UGE: GTU is 1 when left > right, so 0 means <=.
+         * ISM App B: gtu = secondary 0x5F (25 FF). Never emit non-IMS OPR. */
+        tp_emit_gtu(0);
+        vtop--;
+        vset_VT_CMP(TOK_EQ);
+        break;
+    default:
+        return 0;
+    }
+    return 1;
+}
+
+static int tp_opi_multiword(struct tp_opi *o)
+{
+    switch (o->op) {
     /* Multi-precision arithmetic (64-bit operations decomposed by gen_opl)
      *
      * Entry state after gv2 + tp_push_sv: AReg=R (vtop[0]), BReg=L (vtop[-1])
@@ -9534,65 +9634,23 @@ direct_ready:
         abcreg_pop(1);
         vtop--;
         break;
-
-    /* Unsigned comparisons - XOR both operands with MinInt (0x80000000)
-     * to convert unsigned ordering to signed ordering, then use GT.
-     *
-     * Entry state: AReg = right (vtop[0]), BReg = left (vtop[-1])
-     * GT semantics: AReg = (BReg > AReg) ? 1 : 0  (signed comparison)
-     *
-     * MINT (OPR 0x42) loads 0x80000000 in a single byte — much more
-     * efficient than LDC 0x80000000 which needs 8 prefix bytes.
-     *
-     * Core XOR-both-operands sequence (from entry AReg=R, BReg=L):
-     *   MINT    → AReg=MINT, BReg=R, CReg=L
-     *   XOR     → AReg=R^MINT, BReg=L        (XOR pops CReg→BReg)
-     *   REV     → AReg=L, BReg=R^MINT
-     *   MINT    → AReg=MINT, BReg=L, CReg=R^MINT
-     *   XOR     → AReg=L^MINT, BReg=R^MINT   (XOR pops CReg→BReg)
-     *   (no REV)
-     *   GT      → (R^MINT > L^MINT) = unsigned(R > L) = unsigned(L < R)
-     *
-     * With final REV before GT:
-     *   REV     → AReg=R^MINT, BReg=L^MINT
-     *   GT      → (L^MINT > R^MINT) = unsigned(L > R)
-     */
-    case TOK_ULT:
-        /* unsigned left < right: REV + GTU → (right >u left) */
-        tp_emit_gtu(1);
-        vtop--;
-        vset_VT_CMP(TOK_NE);
-        break;
-
-    case TOK_UGE:
-        /* unsigned left >= right = !(left < right) = !(right >u left).
-         * REV + GTU yields 1 when left < right; defer the invert via
-         * VT_CMP(TOK_EQ) ("zero is true"), matching signed TOK_GE.
-         * Eager EQC 0 here + load()'s odd-op double-EQC 0 used to emit
-         * three EQC 0 bytes for `return a + b <= c` (seq_buf_can_fit). */
-        tp_emit_gtu(1);
-        vtop--;
-        vset_VT_CMP(TOK_EQ);
-        break;
-
-    case TOK_UGT:
-        /* unsigned left > right: GTU → (BReg >u AReg) = (left >u right) */
-        tp_emit_gtu(0);
-        vtop--;
-        vset_VT_CMP(cmp_zero_true ? TOK_EQ : TOK_NE);
-        break;
-
-    case TOK_ULE:
-        /* unsigned left <= right = !(left >u right). Same deferred invert
-         * as TOK_LE / TOK_UGE: GTU is 1 when left > right, so 0 means <=.
-         * ISM App B: gtu = secondary 0x5F (25 FF). Never emit non-IMS OPR. */
-        tp_emit_gtu(0);
-        vtop--;
-        vset_VT_CMP(TOK_EQ);
-        break;
-
-    default: tcc_error("unsupported integer op 0x%x", op);
+    default:
+        return 0;
     }
+    return 1;
+}
+
+ST_FUNC void gen_opi(int op) {
+    struct tp_opi o;
+
+    memset(&o, 0, sizeof o);
+    o.op = op;
+    tp_opi_canonical(&o);
+    if (!tp_opi_push_direct(&o))
+        tp_opi_push_general(&o);
+    if (!tp_opi_arith(&o) && !tp_opi_shift(&o) && !tp_opi_compare(&o) &&
+        !tp_opi_multiword(&o))
+        tcc_error("unsupported integer op 0x%x", o.op);
 
     /* After gen_opi, the result is in AReg. For non-comparison operations,
      * store it back to the target workspace slot so later LDL reads the
