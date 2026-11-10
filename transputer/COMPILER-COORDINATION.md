@@ -128,6 +128,22 @@ Open from that work: memory-to-memory double copies still move two words,
 and `-mt425`/`-mt414` read a packed double arithmetic operand with word
 loads (a baseline miscompile, recorded in the report).
 
+**Source layout, 10 November 2026.** The back end was restructured with no
+change in generated code (objects for all six parts, linked images and the
+Doom/fbwm corpus byte-identical at every step). `transputer-gen.c` now
+includes parts of itself, in this order: `transputer-knobs.h` (every
+environment switch, read through `tp_knob()`: add a new one to its table),
+`transputer-hist.h` (the emission window; the `tp_last_*`, `tp_prev_*` and
+`tp_last_stl_*` trackers and `tp_stl_track_clear()` are gone, ask
+`tp_hist_last_instr()` / `tp_hist_last_stl()`), `transputer-fnopt.h`
+(relaxation, the scheduler as `tps_*` functions, slot remap, address cache),
+`transputer-call.h`, `transputer-int.h` (`gen_opi` as `tp_opi_*` stages) and
+`transputer-fp.h` (`gen_opf` as `tp_opf_*` paths, FPU residency, the
+statement-end rules). `transputer-link.c` includes `transputer-linux.h`
+(kernel-image knowledge) and `transputer-linkopt.h` (peephole, ICF, call
+relaxation); `tccgen.c` includes `transputer-inline.h`. A new file must be
+added to `transputer_FILES` in the Makefile as a `.h`.
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
