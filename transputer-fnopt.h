@@ -95,7 +95,7 @@ static int tp_relax_bail(const char *why)
 {
     static int stats = -1;
     if (stats < 0)
-        stats = getenv("TP_RELAX_STATS") ? 1 : 0;
+        stats = tp_knob(TPK_TP_RELAX_STATS) ? 1 : 0;
     if (stats)
         fprintf(stderr, "[RELAXBAIL] %s\n", why);
     tp_relax_why = why;
@@ -279,7 +279,7 @@ static int tps_mask = -1;
 static int tps_on(int which)
 {
     if (tps_mask < 0) {
-        const char *e = getenv("TP_SCHED_MASK");
+        const char *e = tp_knob(TPK_TP_SCHED_MASK);
         tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x3f7f;
     }
     return (tps_mask >> which) & 1;
@@ -288,7 +288,7 @@ static int tps_on(int which)
 static void tps_note(int which)
 {
     if (tps_stats_on < 0)
-        tps_stats_on = getenv("TP_SCHED_STATS") ? 1 : 0;
+        tps_stats_on = tp_knob(TPK_TP_SCHED_STATS) ? 1 : 0;
     if (tps_stats_on)
         tps_stats[which]++;
 }
@@ -296,7 +296,7 @@ static void tps_note(int which)
 static void tps_bail(const char *why)
 {
     if (tps_stats_on < 0)
-        tps_stats_on = getenv("TP_SCHED_STATS") ? 1 : 0;
+        tps_stats_on = tp_knob(TPK_TP_SCHED_STATS) ? 1 : 0;
     if (tps_stats_on)
         fprintf(stderr, "[SCHEDBAIL] %s %s\n", why, funcname ? funcname : "?");
 }
@@ -426,7 +426,7 @@ static int tps_bisect_ok(void)
     const char *p;
 
     if (lo == -2) {
-        const char *e = getenv("TP_SCHED_BISECT");
+        const char *e = tp_knob(TPK_TP_SCHED_BISECT);
         if (!e || sscanf(e, "%d-%d", &lo, &hi) != 2)
             lo = -1;
     }
@@ -1995,7 +1995,7 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
     static int sched_off = -1;
 
     if (sched_off < 0) {
-        sched_off = getenv("TP_NO_SCHED") ? 1 : 0;
+        sched_off = tp_knob(TPK_TP_NO_SCHED) ? 1 : 0;
     }
     if (sched_off || n <= 0 || size <= 0)
         return 0;
@@ -2118,8 +2118,8 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
     int *unit, *ustart, *usize, *uweight, *uorder, *unew;
 
     if (off < 0) {
-        off = getenv("TP_NO_SLOTMAP") ? 1 : 0;
-        stats = getenv("TP_SLOTMAP_STATS") ? 1 : 0;
+        off = tp_knob(TPK_TP_NO_SLOTMAP) ? 1 : 0;
+        stats = tp_knob(TPK_TP_SLOTMAP_STATS) ? 1 : 0;
     }
     if (off || func_uses_inline_asm || tp_loc_marks_bad ||
         F <= P + 1 || F > 4096 || R > F)
@@ -2419,9 +2419,9 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
 
     tpg.n = 0;
     if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_GADDR");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_GADDR);
         off = (e && *e == '0') ? 1 : 0;
-        stats = getenv("TP_GADDR_STATS") ? 1 : 0;
+        stats = tp_knob(TPK_TP_GADDR_STATS) ? 1 : 0;
     }
     if (off || func_uses_inline_asm || !sec->reloc || F <= 0)
         return 0;

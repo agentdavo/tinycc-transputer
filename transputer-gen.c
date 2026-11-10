@@ -93,6 +93,7 @@ ST_FUNC void gen_le32(int c);
 #include "tcc.h"
 #include "transputer-opcodes.h"
 #include "transputer-enc.h"  /* Unified prefix encoding */
+#include "transputer-knobs.h"
 
 /* Forward declarations */
 static void transputer_func_reset(void);
@@ -119,7 +120,7 @@ static int tp_no_callopt(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_NO_CALLOPT") ? 1 : 0;
+        v = tp_knob(TPK_TP_NO_CALLOPT) ? 1 : 0;
     return v;
 }
 static int tp_case_cmp(uint64_t a, uint64_t b, int is_unsigned);
@@ -203,7 +204,7 @@ static int tp_no_ldnlp(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_NO_LDNLP") ? 1 : 0;
+        v = tp_knob(TPK_TP_NO_LDNLP) ? 1 : 0;
     return v;
 }
 
@@ -730,30 +731,30 @@ ST_FUNC void transputer_init(struct TCCState *s) {
     (void)s;
 
     /* Cache all debug env vars once at init time */
-    env = getenv("T4_DEBUG");
+    env = tp_knob(TPK_T4_DEBUG);
     tp_debug_enabled = (env && *env) ? 1 : 0;
-    env = getenv("T4_GENOPI_DEBUG");
+    env = tp_knob(TPK_T4_GENOPI_DEBUG);
     tp_genopi_debug = env && *env;
-    env = getenv("T4_LOAD_DEBUG");
+    env = tp_knob(TPK_T4_LOAD_DEBUG);
     tp_load_debug = env && *env;
-    env = getenv("T4_INSTR_DEBUG");
+    env = tp_knob(TPK_T4_INSTR_DEBUG);
     tp_instr_debug = env && *env;
-    env = getenv("T4_EMIT_LOCAL_DEBUG");
+    env = tp_knob(TPK_T4_EMIT_LOCAL_DEBUG);
     tp_emit_local_debug = env && *env ? atoi(env) : 0;
-    env = getenv("T4_GEN_SYM");
+    env = tp_knob(TPK_T4_GEN_SYM);
     tp_gen_sym_filter = (env && *env) ? env : NULL;
-    env = getenv("T4_STORE_DEBUG");
+    env = tp_knob(TPK_T4_STORE_DEBUG);
     tp_store_debug = env && *env;
-    env = getenv("T4_STRUCTCOPY_DEBUG");
+    env = tp_knob(TPK_T4_STRUCTCOPY_DEBUG);
     tp_structcopy_debug = env && *env;
-    env = getenv("T4_CALLARG_DEBUG");
+    env = tp_knob(TPK_T4_CALLARG_DEBUG);
     tp_callarg_debug = env && *env;
-    env = getenv("T4_OPF_DEBUG");
+    env = tp_knob(TPK_T4_OPF_DEBUG);
     tp_opf_debug = env && *env;
-    env = getenv("T4_VT_LOCAL_DEBUG");
+    env = tp_knob(TPK_T4_VT_LOCAL_DEBUG);
     tp_vt_local_debug = env && *env;
     if (!tp_vt_local_debug) {
-        env = getenv("TCC_TRANSPUTER_DEBUG_VT");
+        env = tp_knob(TPK_TCC_TRANSPUTER_DEBUG_VT);
         tp_vt_local_debug = env && *env;
     }
 
@@ -874,7 +875,7 @@ static char tp_trace_func_name[64];
 static int tp_trace_func_active(void) {
     const char *env;
     if (tp_trace_func_enabled == -1) {
-        env = getenv("TCC_TRACE_FUNC");
+        env = tp_knob(TPK_TCC_TRACE_FUNC);
         if (env && *env) {
             strncpy(tp_trace_func_name, env, sizeof(tp_trace_func_name) - 1);
             tp_trace_func_name[sizeof(tp_trace_func_name) - 1] = '\0';
@@ -1150,7 +1151,7 @@ static int tp_fpu_indexed_ok(void)
     static int ok = -1;
 
     if (ok < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPLDNLI");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_FPLDNLI);
         ok = !(e && *e == '0');
     }
     return ok;
@@ -1178,13 +1179,13 @@ ST_FUNC void g(int c)
     /* Read the trace knobs once: this runs for every byte emitted. */
     if (!env_read) {
         const char *env;
-        env = getenv("T4_NFIX_OPR_WARN");
+        env = tp_knob(TPK_T4_NFIX_OPR_WARN);
         nfix_opr_warn = env && *env ? atoi(env) : 0;
-        env = getenv("T4_CALL_EMIT_TRACE");
+        env = tp_knob(TPK_T4_CALL_EMIT_TRACE);
         call_log_limit = env && *env ? atoi(env) : 0;
-        env = getenv("T4_CALL_EMIT_SHORT");
+        env = tp_knob(TPK_T4_CALL_EMIT_SHORT);
         call_log_short = env && *env ? atoi(env) : 0;
-        call_log_filter = getenv("T4_CALL_EMIT_FILTER");
+        call_log_filter = tp_knob(TPK_T4_CALL_EMIT_FILTER);
         env_read = 1;
     }
     ind1 = ind + 1;
@@ -1536,7 +1537,7 @@ static int tp_have_t9000_feat(int feat) {
     if (!tp_isa_has(TP_EF_T9000))
         return 0;
     if (tp_t9k_mask < 0) {
-        const char *e = getenv("TP_T9K_MASK");
+        const char *e = tp_knob(TPK_TP_T9K_MASK);
         tp_t9k_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x7f;
     }
     return (tp_t9k_mask & feat) != 0;
@@ -1809,7 +1810,7 @@ static int tp_pool_reserve_size(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TP_POOL");
+        const char *e = tp_knob(TPK_TP_POOL);
         v = e ? atoi(e) : TP_POOL_RESERVE_DEFAULT;
         if (v < 0)
             v = 0;
@@ -1824,7 +1825,7 @@ static int tp_pool_debug(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_POOL_DEBUG") ? 1 : 0;
+        v = tp_knob(TPK_TP_POOL_DEBUG) ? 1 : 0;
     return v;
 }
 
@@ -3115,7 +3116,7 @@ ST_FUNC void store(int r, SValue *v) {
          * field offset can ride on the STNL displacement instead of an ADC. */
         static int swap_off = -1;
         if (swap_off < 0)
-            swap_off = getenv("TP_NO_STORE_SWAP") ? 1 : 0;
+            swap_off = tp_knob(TPK_TP_NO_STORE_SWAP) ? 1 : 0;
         if (!swap_off && tp_store_swap_addr_value(r, v, vr, is_lval))
             return;
         Tp_LDL(r);
@@ -6439,7 +6440,7 @@ static int tp_frame_policy_cached = -1;
 static int tp_frame_policy(void)
 {
     if (tp_frame_policy_cached < 0) {
-        const char *e = getenv("TCC_FRAME_POLICY");
+        const char *e = tp_knob(TPK_TCC_FRAME_POLICY);
         tp_frame_policy_cached = (e && *e) ? atoi(e) : 2;
     }
     return tp_frame_policy_cached;
@@ -6713,7 +6714,7 @@ ST_FUNC void gfunc_epilog(void)
     {
         static int relax_off = -1;
         if (relax_off < 0)
-            relax_off = getenv("TP_NO_RELAX") ? 1 : 0;
+            relax_off = tp_knob(TPK_TP_NO_RELAX) ? 1 : 0;
         if (!relax_off)
             tp_relax_function();
         else
@@ -8251,8 +8252,8 @@ static int tp_ptradd_opt_off(int bsub)
 {
     static int off[2] = { -1, -1 };
     if (off[bsub] < 0) {
-        const char *e = getenv(bsub ? "TCC_TRANSPUTER_BSUB_OPT"
-                                    : "TCC_TRANSPUTER_WSUB_OPT");
+        const char *e = tp_knob(bsub ? TPK_TCC_TRANSPUTER_BSUB_OPT
+                                     : TPK_TCC_TRANSPUTER_WSUB_OPT);
         off[bsub] = e && !strcmp(e, "0");
     }
     return off[bsub];
@@ -8379,7 +8380,7 @@ static int tp_no_eqc0(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_NO_EQC0") ? 1 : 0;
+        v = tp_knob(TPK_TP_NO_EQC0) ? 1 : 0;
     return v;
 }
 
@@ -8387,7 +8388,7 @@ static int tp_no_cmpflip(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_NO_CMPFLIP") ? 1 : 0;
+        v = tp_knob(TPK_TP_NO_CMPFLIP) ? 1 : 0;
     return v;
 }
 
@@ -8507,7 +8508,7 @@ static void tp_emit_gtu(int swapped)
         return;
     }
     if (ldiff_cmp < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_LDIFF_CMP");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_LDIFF_CMP);
         ldiff_cmp = !(e && *e == '0');
     }
     /* R's run is hist[0..r_end], L's the one under it, ending at l_end. */
@@ -8571,7 +8572,7 @@ static int tp_shift_mask_fold(void)
     int i, sar, nwin, roll;
 
     if (enabled < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_SHIFT_MASK");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_SHIFT_MASK);
         enabled = !(e && *e == '0');
     }
     if (!enabled || nocode_wanted || tp_hist_n < 3)
@@ -10206,7 +10207,7 @@ ST_FUNC void tp_stmt_end(void)
     static int off = -1;
 
     if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_VPOP_DEAD");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_VPOP_DEAD);
         off = e && *e == '0';           /* =0 for an A/B run */
     }
     if (off || nocode_wanted || func_uses_inline_asm || tp_hist_n == 0 ||
@@ -10215,7 +10216,7 @@ ST_FUNC void tp_stmt_end(void)
     {
         /* TCC_TRANSPUTER_VPOP_ONLY=name: only in functions whose name
          * contains it - for bisecting a miscompile */
-        const char *only = getenv("TCC_TRANSPUTER_VPOP_ONLY");
+        const char *only = tp_knob(TPK_TCC_TRANSPUTER_VPOP_ONLY);
 
         if (only && *only && (!funcname || !strstr(funcname, only)))
             return;
@@ -10332,8 +10333,8 @@ ST_FUNC void tp_stmt_end(void)
 
     for (first = 0; first < n && keep[first] && !mod[first]; first++)
         ;
-    if (getenv("TCC_TRANSPUTER_VPOP_DEAD") &&
-        *getenv("TCC_TRANSPUTER_VPOP_DEAD") == '2') {
+    if (tp_knob(TPK_TCC_TRANSPUTER_VPOP_DEAD) &&
+        *tp_knob(TPK_TCC_TRANSPUTER_VPOP_DEAD) == '2') {
         SValue *p;
 
         fprintf(stderr, "[VPOP_DEAD] %s @%x vstack:", funcname, w[first].off);
@@ -10467,7 +10468,7 @@ static int tp_fpu_take_under(SValue *sv, int is_db)
     static int off = -1;
 
     if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPSTACK");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_FPSTACK);
         off = e && *e == '0';
     }
     if (off || nocode_wanted || (sv->r & (VT_LVAL | VT_SYM)) ||
@@ -10477,7 +10478,7 @@ static int tp_fpu_take_under(SValue *sv, int is_db)
     {
         /* TCC_TRANSPUTER_FPSTACK_ONLY=name: only in functions whose name
          * contains it - for bisecting a miscompile */
-        const char *only = getenv("TCC_TRANSPUTER_FPSTACK_ONLY");
+        const char *only = tp_knob(TPK_TCC_TRANSPUTER_FPSTACK_ONLY);
 
         if (only && *only && (!funcname || !strstr(funcname, only)))
             return 0;
@@ -10518,8 +10519,8 @@ static int tp_fpu_take_under(SValue *sv, int is_db)
     }
     if (d != 1)
         return 0;
-    if (getenv("TCC_TRANSPUTER_FPSTACK") &&
-        *getenv("TCC_TRANSPUTER_FPSTACK") == '2') {
+    if (tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
+        *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '2') {
         fprintf(stderr, "[FPSTACK] %s r=%d window:", funcname, r);
         for (i = 0; i < n; i++)
             fprintf(stderr, " %s%x:%d", w[i].kind == TP_HIST_LOCAL ? "L" : "",
@@ -10629,7 +10630,7 @@ static int tp_fpu_take_moved(SValue *sv, int is_db)
     static int off = -1;
 
     if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPSTACK");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_FPSTACK);
         off = e && *e == '0';
     }
     if (off || nocode_wanted || (sv->r & (VT_LVAL | VT_SYM)) ||
@@ -10639,7 +10640,7 @@ static int tp_fpu_take_moved(SValue *sv, int is_db)
         (is_db && tp_reg_live_on_vstack(r + 1, sv)))
         return 0;
     {
-        const char *only = getenv("TCC_TRANSPUTER_FPSTACK_ONLY");
+        const char *only = tp_knob(TPK_TCC_TRANSPUTER_FPSTACK_ONLY);
 
         if (only && *only && (!funcname || !strstr(funcname, only)))
             return 0;
@@ -10764,8 +10765,8 @@ static int tp_fpu_take_moved(SValue *sv, int is_db)
     }
     if (d != 1)
         return 0;
-    if (getenv("TCC_TRANSPUTER_FPSTACK") &&
-        *getenv("TCC_TRANSPUTER_FPSTACK") == '2')
+    if (tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
+        *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '2')
         fprintf(stderr, "[FPSTACK] %s moved %d entries above %d\n",
                 funcname, nl, nr);
 
@@ -10805,7 +10806,7 @@ static int tp_fpu_load_early(SValue *sv, int is_db)
     static int off = -1;
 
     if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPSTACK");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_FPSTACK);
         off = e && *e == '0';
     }
     /* A register lvalue is loaded from its register whatever its c.i
@@ -11071,8 +11072,8 @@ ST_FUNC void gen_opf(int op) {
              * a second load fused into the multiply costs 13 and its
              * address.  TCC_TRANSPUTER_FPSTACK=0 keeps two loads. */
             if (op == '*' && tp_fpu_same_operand(&vtop[-1], &vtop[0]) &&
-                !(getenv("TCC_TRANSPUTER_FPSTACK") &&
-                  *getenv("TCC_TRANSPUTER_FPSTACK") == '0')) {
+                !(tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
+                  *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '0')) {
                 abcreg_stack_depth = 0;
                 fpureg_stack_depth = 0;
                 tp_push_float_sv(&vtop[0]);
@@ -11092,8 +11093,8 @@ ST_FUNC void gen_opf(int op) {
             abcreg_stack_depth = 0;
             fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
             if (op == '*' && in_fa == 1 &&
-                !(getenv("TCC_TRANSPUTER_FPSTACK") &&
-                  *getenv("TCC_TRANSPUTER_FPSTACK") == '0') &&
+                !(tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
+                  *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '0') &&
                 tp_fpu_square_twin(&vtop[0], is_db)) {
                 emit_instr(TP_OP_OPR, TP_FPU_DUP);
                 emit_instr(TP_OP_OPR, TP_FPU_MUL);

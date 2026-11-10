@@ -200,7 +200,7 @@ static int tp_icf_hash_cmp(const void *a, const void *b)
 
 static int tp_icf_enabled(void)
 {
-    const char *e = getenv("T4_ICF");
+    const char *e = tp_knob(TPK_T4_ICF);
 
     if (e && *e)
         return !(e[0] == '0' && e[1] == '\0');
@@ -507,7 +507,7 @@ static uint32_t tp_icf_fold_section(TCCState *s1, int seci,
     s->data_offset = size - removed;
     s->sh_size = s->data_offset;
     *out_folded += nrem;
-    if (link_debug || tp_env_enabled("T4_ICF_STATS"))
+    if (link_debug || tp_knob_on(TPK_T4_ICF_STATS))
         fprintf(stderr, "  ICF %-16s %u -> %u bytes (%d bodies folded)\n",
                 s->name, size, size - removed, nrem);
 
@@ -612,7 +612,7 @@ static void tp_icf_fold(TCCState *s1, const uint8_t *fixed, int link_debug)
             continue;   /* boot trampoline: layout is contractual */
         total += tp_icf_fold_section(s1, i, addr_taken, link_debug, &folded);
     }
-    if (total && (link_debug || tp_env_enabled("T4_ICF_STATS")))
+    if (total && (link_debug || tp_knob_on(TPK_T4_ICF_STATS)))
         fprintf(stderr, "transputer_simple_link: ICF folded %d duplicate "
                 "function bodies, %u bytes\n", folded, total);
     tcc_free(addr_taken);
@@ -1119,7 +1119,7 @@ static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
 {
     ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
     int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
-    const char *e = tp_env("T4_LINK_RELAX");
+    const char *e = tp_knob(TPK_T4_LINK_RELAX);
     uint8_t *marked, *marked_sections;
     Section *list = NULL;
     uint32_t saved = 0;
@@ -1157,11 +1157,11 @@ static void tp_link_relax(TCCState *s1, const uint8_t *fixed, int link_debug)
          * their byte-sized maps and scans of all incoming relocations. */
         n = tp_lr_section(s1, i, marked, &fns, &kept);
         saved += n;
-        if (n && (link_debug || tp_env_enabled("T4_RELAX_STATS")))
+        if (n && (link_debug || tp_knob_on(TPK_T4_RELAX_STATS)))
             fprintf(stderr, "  relax %-16s %u -> %u bytes\n", s->name,
                     before, before - n);
     }
-    if (link_debug || tp_env_enabled("T4_RELAX_STATS"))
+    if (link_debug || tp_knob_on(TPK_T4_RELAX_STATS))
         fprintf(stderr, "transputer_simple_link: relaxed %d functions "
                 "(%d kept whole), %u bytes\n", fns, kept, saved);
     tcc_free(marked);

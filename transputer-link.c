@@ -25,7 +25,7 @@ ST_FUNC int tp_data_layout_reloc(int type);
 #include "transputer-opcodes.h"
 
 /* Forward declaration */
-static int tp_env_enabled(const char *name);
+#include "transputer-knobs.h"
 static const char *tp_reloc_symbol_name(Section *symtab_sec, ElfW(Sym) *sym);
 static int tp_patch_ldc_abs(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val);
 static int tp_patch_iprel(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val);
@@ -147,23 +147,23 @@ static void tp_load_trace_init(void)
     if (tp_lt.init)
         return;
     tp_lt.init = 1;
-    env = getenv("T4_RELOC_LOG");
+    env = tp_knob(TPK_T4_RELOC_LOG);
     tp_lt.log = env && *env;
-    tp_lt.sym_filter = getenv("T4_RELOC_SYM");
+    tp_lt.sym_filter = tp_knob(TPK_T4_RELOC_SYM);
     tp_lt.type_filter = -1;
-    env = getenv("T4_RELOC_TYPE");
+    env = tp_knob(TPK_T4_RELOC_TYPE);
     if (env && *env)
         tp_lt.type_filter = (int)strtol(env, NULL, 0);
-    env = getenv("T4_RELOC_LOAD_DUMP");
+    env = tp_knob(TPK_T4_RELOC_LOAD_DUMP);
     tp_lt.load_dump = env && *env;
-    env = getenv("T4_RELOC_SUMMARY");
+    env = tp_knob(TPK_T4_RELOC_SUMMARY);
     tp_lt.summary = env && *env;
-    env = getenv("T4_RELOC_SYMINFO");
+    env = tp_knob(TPK_T4_RELOC_SYMINFO);
     tp_lt.syminfo = env && *env;
     tp_lt.syminfo_filter = env && strcmp(env, "1") ? env : NULL;
-    env = getenv("T4_RELOC_LDC_MISMATCH");
+    env = tp_knob(TPK_T4_RELOC_LDC_MISMATCH);
     tp_lt.ldc_mismatch = env && *env;
-    tp_lt.symmerge = getenv("T4_SYMMERGE_DEBUG");
+    tp_lt.symmerge = tp_knob(TPK_T4_SYMMERGE_DEBUG);
 }
 
 static const char *tp_objload_file(struct tp_objload *o)
@@ -361,31 +361,6 @@ ST_FUNC void tp_objload_end(struct tp_objload *o)
     tcc_free(o->iprel_counts);
     o->iprel_syms = NULL;
     o->iprel_counts = NULL;
-}
-
-/* Debug knobs from the environment, each read once: several are asked
- * per relocation.  Keyed by the name's address - they are all literals,
- * and a literal spelled twice just takes a second slot. */
-static const char *tp_env(const char *name)
-{
-    static struct { const char *name, *value; } cache[48];
-    static int n;
-    int i;
-
-    for (i = 0; i < n; i++)
-        if (cache[i].name == name)
-            return cache[i].value;
-    if (n == (int)(sizeof cache / sizeof cache[0]))
-        return getenv(name);
-    cache[n].name = name;
-    cache[n].value = getenv(name);
-    return cache[n++].value;
-}
-
-static int tp_env_enabled(const char *name)
-{
-    const char *env = tp_env(name);
-    return env && *env;
 }
 
 static ElfW(Sym) *find_sym_by_name(Section *symtab, const char *name)
@@ -1114,7 +1089,7 @@ static void tp_audit_call_targets(TCCState *s1, Section *symtab_sec,
 
 static int tp_reloc_symbol_repair_enabled(int type)
 {
-    const char *strict_env = tp_env("T4_STRICT_RELOCS");
+    const char *strict_env = tp_knob(TPK_T4_STRICT_RELOCS);
 
     if (strict_env && *strict_env)
         return 0;
@@ -1130,13 +1105,13 @@ static int tp_reloc_symbol_repair_enabled(int type)
 
 static int tp_ldc_abs_fallback_enabled(void)
 {
-    const char *strict_env = tp_env("T4_STRICT_LDC_ABS");
+    const char *strict_env = tp_knob(TPK_T4_STRICT_LDC_ABS);
     return !(strict_env && *strict_env);
 }
 
 static int tp_iprel_fallback_enabled(void)
 {
-    const char *strict_env = tp_env("T4_STRICT_IPREL");
+    const char *strict_env = tp_knob(TPK_T4_STRICT_IPREL);
     return !(strict_env && *strict_env);
 }
 
@@ -1304,8 +1279,8 @@ static void tp_trace_reloc_window(Section *symtab_sec, ElfW(Sym) *sym,
     *reloc_dump_end_io = 0;
 
     if (!reloc_range_init) {
-        const char *start_env = link_trace ? getenv("T4_RELOC_RANGE_START") : NULL;
-        const char *end_env = link_trace ? getenv("T4_RELOC_RANGE_END") : NULL;
+        const char *start_env = link_trace ? tp_knob(TPK_T4_RELOC_RANGE_START) : NULL;
+        const char *end_env = link_trace ? tp_knob(TPK_T4_RELOC_RANGE_END) : NULL;
         reloc_range_init = 1;
         if (start_env && *start_env) {
             reloc_range_start = (uint32_t)strtoul(start_env, NULL, 0);
@@ -1420,7 +1395,7 @@ static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
     case R_TRANSPUTER_32: case R_TRANSPUTER_PC_RELATIVE: {
         uint32_t old_val = read32le(ptr);
         uint32_t new_val = old_val + val - (type == R_TRANSPUTER_PC_RELATIVE ? addr : 0);
-        if (!(s->sh_flags & SHF_EXECINSTR) && tp_env_enabled("T4_DATA_RELOC_DEBUG")) {
+        if (!(s->sh_flags & SHF_EXECINSTR) && tp_knob_on(TPK_T4_DATA_RELOC_DEBUG)) {
             fprintf(stderr, "R32_DATA: addr=0x%08x sym=%s old=0x%08x val=0x%08x new=0x%08x section=%s"
                     " shndx=%d st_value=0x%lx bind=%d type=%d\n",
                     (unsigned int)addr, tp_reloc_symbol_name(symtab_sec, sym),
@@ -1992,18 +1967,18 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                         fprintf(stderr,
                                 "%s: undefined symbol '%s' referenced at "
                                 "0x%08x (reloc type %d)\n",
-                                tp_env_enabled("T4_STRICT_UNRESOLVED_CALLS")
+                                tp_knob_on(TPK_T4_STRICT_UNRESOLVED_CALLS)
                                     ? "error" : "warning",
                                 un ? un : "<unnamed>", (unsigned int)addr,
                                 type);
                     }
-                    if (tp_env_enabled("T4_STRICT_UNRESOLVED_CALLS")) {
+                    if (tp_knob_on(TPK_T4_STRICT_UNRESOLVED_CALLS)) {
                         unresolved_calls++;
                         continue;
                     }
                 }
                 /* Debug: log IPREL32 relocations that resolve to address 0 */
-                if (type == R_TRANSPUTER_IPREL32 && val == 0 && tp_env_enabled("T4_ZERO_RELOC_DEBUG")) {
+                if (type == R_TRANSPUTER_IPREL32 && val == 0 && tp_knob_on(TPK_T4_ZERO_RELOC_DEBUG)) {
                     const char *sn = tp_reloc_symbol_name(symtab_sec, sym);
                     fprintf(stderr, "ZERO_RELOC: IPREL32 addr=0x%08x sym='%s' sym_index=%d "
                             "st_value=0x%lx st_shndx=%d bind=%d type=%d\n",
@@ -2206,10 +2181,10 @@ static int tp_link_relocate(struct tp_link *l)
     uint8_t *image = l->image;
     const uint32_t start_kernel_addr = l->start_kernel_addr;
     const int link_debug = l->link_debug;
-    int link_trace = tp_env_enabled("T4_LINK_TRACE");
-    int reloc_fix_debug = tp_env_enabled("T4_RELOC_FIX_DEBUG");
-    int iprel_patch_trace = tp_env_enabled("T4_IPREL_PATCH_TRACE");
-    int iprel_patch_debug = tp_env_enabled("T4_IPREL_PATCH_DEBUG");
+    int link_trace = tp_knob_on(TPK_T4_LINK_TRACE);
+    int reloc_fix_debug = tp_knob_on(TPK_T4_RELOC_FIX_DEBUG);
+    int iprel_patch_trace = tp_knob_on(TPK_T4_IPREL_PATCH_TRACE);
+    int iprel_patch_debug = tp_knob_on(TPK_T4_IPREL_PATCH_DEBUG);
 
     tp_copy_alloc_sections(s1, image, base_addr);
 
@@ -2242,7 +2217,7 @@ static void tp_link_debug_dumps(struct tp_link *l)
     /* Post-link CALL target audit: verify all IPREL32 relocations encoded correctly.
      * Decodes each patched CALL/J/CJ instruction and checks the target matches
      * the intended symbol address. Enabled by T4_CALL_AUDIT=1. */
-    if (tp_env_enabled("T4_CALL_AUDIT"))
+    if (tp_knob_on(TPK_T4_CALL_AUDIT))
         tp_audit_call_targets(s1, symtab_section, image, base_addr, total_size);
 
     /* NFIX→OPR scan REMOVED.
@@ -2263,8 +2238,8 @@ static void tp_link_debug_dumps(struct tp_link *l)
      * 18 false-positive matches in .data (all corruptions).
      */
     {
-        const char *dump_addr_env = getenv("T4_POST_RELOC_DUMP_ADDR");
-        const char *dump_len_env = getenv("T4_POST_RELOC_DUMP_LEN");
+        const char *dump_addr_env = tp_knob(TPK_T4_POST_RELOC_DUMP_ADDR);
+        const char *dump_len_env = tp_knob(TPK_T4_POST_RELOC_DUMP_LEN);
         if (dump_addr_env && *dump_addr_env) {
             uint32_t dump_addr = (uint32_t)strtoul(dump_addr_env, NULL, 0);
             size_t dump_len = dump_len_env && *dump_len_env ? (size_t)strtoul(dump_len_env, NULL, 0) : 64;
@@ -2289,7 +2264,7 @@ static void tp_link_debug_dumps(struct tp_link *l)
         }
     }
     {
-        const char *dump_sym_env = getenv("T4_DUMP_SYM");
+        const char *dump_sym_env = tp_knob(TPK_T4_DUMP_SYM);
         if (dump_sym_env && *dump_sym_env && symtab_section) {
             ElfW(Sym) *dump_sym = find_sym_by_name(symtab_section, dump_sym_env);
             if (!dump_sym) {
@@ -2486,7 +2461,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
 
     l.s1 = s1;
     l.output_filename = output_filename;
-    l.xip_mode = tp_env_enabled("T4_XIP_LINK");
+    l.xip_mode = tp_knob_on(TPK_T4_XIP_LINK);
     /* MemStart: #80000070 on the T800/T805/T425/T9000, #80000048 on the
        T414 (-mt414 on the link command), which has less on-chip RAM. */
     l.base_addr = l.xip_mode ? 0x7F001000u
@@ -2498,7 +2473,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     l.xip_text_end = 0;
     l.xip_data_start = 0;
     l.image = NULL;
-    l.link_debug = tp_env_enabled("T4_LINK_DEBUG");
+    l.link_debug = tp_knob_on(TPK_T4_LINK_DEBUG);
 
     if (tp_link_layout(&l) < 0 || tp_link_check_size(&l) < 0)
         return -1;

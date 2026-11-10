@@ -12,6 +12,8 @@
  *    resolve_inline_sections()   before gen_inline_functions() emits anything
  */
 
+#include "transputer-knobs.h"
+
 static void new_scope(struct scope *o);
 static void prev_scope(struct scope *o, int is_expr);
 
@@ -255,7 +257,7 @@ static int tp_inline_on(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_INLINE");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_INLINE);
         v = !(e && *e == '0');
     }
     return v;
