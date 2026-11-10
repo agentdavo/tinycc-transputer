@@ -11052,423 +11052,337 @@ static int tp_fpu_addr_just_parked(SValue *sv)
            sv->c.i >= 0 && tp_last_stl_reg == v && tp_last_stl_end == ind;
 }
 
-ST_FUNC void gen_opf(int op) {
-    SValue orig_first, orig_second;
-    SValue sv_first, sv_second;
-    int bt;
-    int is_db;
-    int opf_debug = tp_opf_debug;
+/* Unary minus: flip the sign bit.  0.0 - x is not negation: it gives
+ * +0.0 for x = +0.0.  Float values live in workspace slots, low word
+ * first, so the sign is the top bit of the word in the last slot. */
+static void tp_opf_neg(void)
+{
+    int neg_bt = vtop->type.t & VT_BTYPE;
+    int neg_db = (neg_bt == VT_DOUBLE || neg_bt == VT_LDOUBLE);
+    int hi;
 
-    /* Unary minus: flip the sign bit.  0.0 - x is not negation: it gives
-     * +0.0 for x = +0.0.  Float values live in workspace slots, low word
-     * first, so the sign is the top bit of the word in the last slot. */
-    if (op == TOK_NEG) {
-        int neg_bt = vtop->type.t & VT_BTYPE;
-        int neg_db = (neg_bt == VT_DOUBLE || neg_bt == VT_LDOUBLE);
-        int hi;
+    gv(RC_FLOAT);
+    hi = (vtop->r & VT_VALMASK) + (neg_db ? 1 : 0);
+    abcreg_stack_depth = 0;
+    fpureg_stack_depth = 0;
+    Tp_LDL(hi);
+    Tp_LDC(-0x7fffffff - 1);             /* mint */
+    Tp_XOR();
+    Tp_STL(hi);
+    abcreg_stack_depth = 0;
+}
 
-        gv(RC_FLOAT);
-        hi = (vtop->r & VT_VALMASK) + (neg_db ? 1 : 0);
+/* Can the FPU load this operand straight from where it is? */
+static int tp_opf_direct_ok(const SValue *sv)
+{
+    int v = sv->r & VT_VALMASK;
+
+    return (v < VT_CONST || v == VT_CONST || v == VT_LOCAL || v == VT_LLOCAL)
+           && !(sv->r & VT_MUSTBOUND);
+}
+
+/* Direct-addressable operands: skip gv2() materialization entirely and
+ * let the FPU load each operand straight from its home (local slot,
+ * pointer register, global, or constant pool/scratch).  gv2 would copy
+ * each value through a workspace slot with integer ldnl/stl first —
+ * three memory operations per operand where one fpldnl does the job.
+ * Covers float32 and float64 uniformly. */
+/* + - * / on two such operands, which are vtop[-1] and vtop[0]. */
+static void tp_opf_direct_arith(int op, int bt, int is_db)
+{
+    /* Allocate the result register first: get_reg may spill, and a
+     * spill rewrites vstack entries, so re-read the operands from
+     * the vstack afterwards (a spilled operand becomes a LOCAL /
+     * LLOCAL lvalue, which stays directly addressable).  Doubles
+     * are two-word values living in rdst/rdst+1 (gv()'s transputer
+     * convention): evict whatever holds the pair's high slot —
+     * an evicted operand spills to a local and stays pushable. */
+    int comm = (op == '+' || op == '*');
+    int rdst;
+    int in_fa = 0;      /* 1: vtop[-1] is already in FA, 2: vtop[0],
+                           3: vtop[-1] in FB and vtop[0] in FA */
+
+    if (tp_fpu_dst_reusable(&vtop[0], is_db))
+        rdst = vtop[0].r & VT_VALMASK;
+    else if (tp_fpu_dst_reusable(&vtop[-1], is_db))
+        rdst = vtop[-1].r & VT_VALMASK;
+    else {
+        rdst = get_reg(RC_FLOAT);
+        if (is_db)
+            save_reg_upstack(rdst + 1, 0);
+    }
+    /* x * x: one load, then fpdup; fpmul (12 cycles) as occam, where
+     * a second load fused into the multiply costs 13 and its
+     * address.  TCC_TRANSPUTER_FPSTACK=0 keeps two loads. */
+    if (op == '*' && tp_fpu_same_operand(&vtop[-1], &vtop[0]) &&
+        !(tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
+          *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '0')) {
         abcreg_stack_depth = 0;
         fpureg_stack_depth = 0;
-        Tp_LDL(hi);
-        Tp_LDC(-0x7fffffff - 1);             /* mint */
-        Tp_XOR();
-        Tp_STL(hi);
-        abcreg_stack_depth = 0;
-        return;
+        tp_push_float_sv(&vtop[0]);
+        emit_instr(TP_OP_OPR, TP_FPU_DUP);
+        emit_instr(TP_OP_OPR, TP_FPU_MUL);
+        goto fp_arith_done;
+    }
+    /* After get_reg, whose spills rewrite the vstack. */
+    if (tp_fpu_take_resident(&vtop[0], is_db)) {
+        in_fa = 2;
+        if (tp_fpu_take_under(&vtop[-1], is_db) ||
+            (comm && tp_fpu_take_moved(&vtop[-1], is_db)))
+            in_fa = 3;
+    } else if (tp_fpu_take_resident(&vtop[-1], is_db) ||
+               tp_fpu_load_early(&vtop[-1], is_db))
+        in_fa = 1;
+    abcreg_stack_depth = 0;
+    fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
+    if (op == '*' && in_fa == 1 &&
+        !(tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
+          *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '0') &&
+        tp_fpu_square_twin(&vtop[0], is_db)) {
+        emit_instr(TP_OP_OPR, TP_FPU_DUP);
+        emit_instr(TP_OP_OPR, TP_FPU_MUL);
+        goto fp_arith_done;
     }
 
-    if (tp_soft_float()) {
-        tp_softfp_opf(op);
-        return;
-    }
-
-    orig_first = vtop[-1];
-    orig_second = vtop[0];
-    bt = orig_first.type.t & VT_BTYPE;
-    is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
-
-    /* Direct-addressable operands: skip gv2() materialization entirely and
-     * let the FPU load each operand straight from its home (local slot,
-     * pointer register, global, or constant pool/scratch).  gv2 would copy
-     * each value through a workspace slot with integer ldnl/stl first —
-     * three memory operations per operand where one fpldnl does the job.
-     * Covers float32 and float64 uniformly. */
+    /* T9000 monadic idioms (ISM 11.7.2): x*2.0, 2.0*x, x/2.0,
+     * x*0.5, x/0.5 and x+x all scale by an exact power of two, so
+     * fpmulby2/fpdivby2 replace a constant materialization plus a
+     * dyadic op with a single exponent-update instruction.
+     * (Multiplying by 0.5 and dividing by 2 are the same IEEE
+     * operation: scaling by a power of two is always exact apart
+     * from the one rounding at the extreme of the range.)
+     * The T800 has them too, as fpumulby2/fpudivby2 through
+     * fpentry - what occam emits for x * 2.0: `ldc #12; fpentry`
+     * is 10 cycles where `ldc #40000000; stl; ldlp; fpldnlmulsn`
+     * is 23.  Not x + x there: `fpldnladdsn` (8) beats fpentry. */
     {
-        int v1 = orig_first.r & VT_VALMASK;
-        int v2 = orig_second.r & VT_VALMASK;
-        int p1 = (v1 < VT_CONST || v1 == VT_CONST || v1 == VT_LOCAL ||
-                  v1 == VT_LLOCAL) && !(orig_first.r & VT_MUSTBOUND);
-        int p2 = (v2 < VT_CONST || v2 == VT_CONST || v2 == VT_LOCAL ||
-                  v2 == VT_LLOCAL) && !(orig_second.r & VT_MUSTBOUND);
+        int t9k = tp_have_t9000_feat(TP_T9K_FPU);
+        SValue *other = NULL;
+        int by2op = 0;
+        int c1 = ((vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST);
+        int c2 = ((vtop[0].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST);
+        double k1 = c1 ? (is_db ? vtop[-1].c.d : (double)vtop[-1].c.f) : 0.0;
+        double k2 = c2 ? (is_db ? vtop[0].c.d : (double)vtop[0].c.f) : 0.0;
 
-        if (p1 && p2 &&
-            (op == '+' || op == '-' || op == '*' || op == '/')) {
-            /* Allocate the result register first: get_reg may spill, and a
-             * spill rewrites vstack entries, so re-read the operands from
-             * the vstack afterwards (a spilled operand becomes a LOCAL /
-             * LLOCAL lvalue, which stays directly addressable).  Doubles
-             * are two-word values living in rdst/rdst+1 (gv()'s transputer
-             * convention): evict whatever holds the pair's high slot —
-             * an evicted operand spills to a local and stays pushable. */
-            int comm = (op == '+' || op == '*');
-            int rdst;
-            int in_fa = 0;      /* 1: vtop[-1] is already in FA, 2: vtop[0],
-                                   3: vtop[-1] in FB and vtop[0] in FA */
-
-            if (tp_fpu_dst_reusable(&vtop[0], is_db))
-                rdst = vtop[0].r & VT_VALMASK;
-            else if (tp_fpu_dst_reusable(&vtop[-1], is_db))
-                rdst = vtop[-1].r & VT_VALMASK;
-            else {
-                rdst = get_reg(RC_FLOAT);
-                if (is_db)
-                    save_reg_upstack(rdst + 1, 0);
-            }
-            /* x * x: one load, then fpdup; fpmul (12 cycles) as occam, where
-             * a second load fused into the multiply costs 13 and its
-             * address.  TCC_TRANSPUTER_FPSTACK=0 keeps two loads. */
-            if (op == '*' && tp_fpu_same_operand(&vtop[-1], &vtop[0]) &&
-                !(tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
-                  *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '0')) {
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-                tp_push_float_sv(&vtop[0]);
-                emit_instr(TP_OP_OPR, TP_FPU_DUP);
-                emit_instr(TP_OP_OPR, TP_FPU_MUL);
-                goto fp_arith_done;
-            }
-            /* After get_reg, whose spills rewrite the vstack. */
-            if (tp_fpu_take_resident(&vtop[0], is_db)) {
-                in_fa = 2;
-                if (tp_fpu_take_under(&vtop[-1], is_db) ||
-                    (comm && tp_fpu_take_moved(&vtop[-1], is_db)))
-                    in_fa = 3;
-            } else if (tp_fpu_take_resident(&vtop[-1], is_db) ||
-                       tp_fpu_load_early(&vtop[-1], is_db))
-                in_fa = 1;
-            abcreg_stack_depth = 0;
-            fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
-            if (op == '*' && in_fa == 1 &&
-                !(tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) &&
-                  *tp_knob(TPK_TCC_TRANSPUTER_FPSTACK) == '0') &&
-                tp_fpu_square_twin(&vtop[0], is_db)) {
-                emit_instr(TP_OP_OPR, TP_FPU_DUP);
-                emit_instr(TP_OP_OPR, TP_FPU_MUL);
-                goto fp_arith_done;
-            }
-
-            /* T9000 monadic idioms (ISM 11.7.2): x*2.0, 2.0*x, x/2.0,
-             * x*0.5, x/0.5 and x+x all scale by an exact power of two, so
-             * fpmulby2/fpdivby2 replace a constant materialization plus a
-             * dyadic op with a single exponent-update instruction.
-             * (Multiplying by 0.5 and dividing by 2 are the same IEEE
-             * operation: scaling by a power of two is always exact apart
-             * from the one rounding at the extreme of the range.)
-             * The T800 has them too, as fpumulby2/fpudivby2 through
-             * fpentry - what occam emits for x * 2.0: `ldc #12; fpentry`
-             * is 10 cycles where `ldc #40000000; stl; ldlp; fpldnlmulsn`
-             * is 23.  Not x + x there: `fpldnladdsn` (8) beats fpentry. */
-            {
-                int t9k = tp_have_t9000_feat(TP_T9K_FPU);
-                SValue *other = NULL;
-                int by2op = 0;
-                int c1 = ((vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST);
-                int c2 = ((vtop[0].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST);
-                double k1 = c1 ? (is_db ? vtop[-1].c.d : (double)vtop[-1].c.f) : 0.0;
-                double k2 = c2 ? (is_db ? vtop[0].c.d : (double)vtop[0].c.f) : 0.0;
-
-                if (op == '*' && c2 && (k2 == 2.0 || k2 == 0.5)) {
-                    other = &vtop[-1];
-                    by2op = (k2 == 2.0) ? TP_OPR_FPMULBY2 : TP_OPR_FPDIVBY2;
-                } else if (op == '*' && c1 && (k1 == 2.0 || k1 == 0.5)) {
-                    other = &vtop[0];
-                    by2op = (k1 == 2.0) ? TP_OPR_FPMULBY2 : TP_OPR_FPDIVBY2;
-                } else if (op == '/' && c2 && (k2 == 2.0 || k2 == 0.5)) {
-                    other = &vtop[-1];
-                    by2op = (k2 == 2.0) ? TP_OPR_FPDIVBY2 : TP_OPR_FPMULBY2;
-                } else if (t9k && op == '+' &&
-                           tp_fpu_same_operand(&vtop[-1], &vtop[0])) {
-                    /* x + x == 2*x exactly; one load instead of two */
-                    other = &vtop[0];
-                    by2op = TP_OPR_FPMULBY2;
-                }
-                if (by2op && in_fa != 3) {
-                    /* `other` is the only non-constant operand, so if
-                     * either is in FA it is this one */
-                    if (!in_fa)
-                        tp_push_float_sv(other);
-                    if (t9k)
-                        emit_instr(TP_OP_OPR, by2op);
-                    else
-                        tp_fpentry(by2op == TP_OPR_FPMULBY2
-                                   ? TP_FPU_OP_MULBY2 & 0xFF
-                                   : TP_FPU_OP_DIVBY2 & 0xFF);
-                    goto fp_arith_done;
-                }
-            }
-
-            {
-                /* `first` goes on the FPU stack, `second` is fused into the
-                 * operation or pushed above it; the IEEE + and * commute, so
-                 * for those either operand may be `first`. */
-                SValue *first = &vtop[-1], *second = &vtop[0];
-                int reversed = 0;
-
-                if (in_fa == 3) {
-                    /* both on the stack, left in FB: FB op FA */
-                    emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_ADD :
-                                          op == '-' ? TP_FPU_SUB :
-                                          op == '*' ? TP_FPU_MUL : TP_FPU_DIV);
-                    fpureg_pop(1);
-                    goto fp_arith_done;
-                }
-                if (in_fa == 2 || (!in_fa && comm &&
-                                   tp_fpu_addr_just_parked(&vtop[0]) &&
-                                   !tp_fpu_addr_just_parked(&vtop[-1]))) {
-                    /* vtop[0] is in FA, or its address was parked by the
-                     * last instruction and loading it first cancels that */
-                    first = &vtop[0];
-                    second = &vtop[-1];
-                    reversed = 1;
-                }
-                if (!in_fa)
-                    tp_push_float_sv(first);
-                if (comm && tp_emit_float_addr(second)) {
-                    /* Fused: load second operand AND operate in one instr */
-                    if (op == '+')
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
-                    else
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
-                    abcreg_pop(1);
-                } else if (comm) {
-                    /* Second operand is const 0.0 (no address): fpldzero + op */
-                    emit_instr(TP_OP_OPR, is_db ? TP_OPR_FPLDZERODB : TP_OPR_FPLDZEROSN);
-                    fpureg_push(1);
-                    emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_ADD : TP_FPU_MUL);
-                    fpureg_pop(1);
-                } else {
-                    /* fpsub/fpdiv compute FBreg op FAreg: the left operand
-                     * must be in FB */
-                    tp_push_float_sv(second);
-                    if (reversed)
-                        emit_instr(TP_OP_OPR, TP_FPU_REV);
-                    emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
-                    fpureg_pop(1);
-                }
-            }
-
-        fp_arith_done:
-            vtop--;
-            vtop->r = rdst;
-            vtop->r2 = is_db ? rdst + 1 : VT_CONST;
-            vtop->sym = NULL;
-            {
-                int store_off = ind;
-
-                tp_store_fpu_result_to_slot(rdst, bt);
-                tp_fpr_reg = rdst;
-                tp_fpr_off = store_off;
-                tp_fpr_end = ind;
-                tp_fpr_db = is_db;
-            }
-            abcreg_stack_depth = 0;
-            fpureg_stack_depth = 0;
-            return;
+        if (op == '*' && c2 && (k2 == 2.0 || k2 == 0.5)) {
+            other = &vtop[-1];
+            by2op = (k2 == 2.0) ? TP_OPR_FPMULBY2 : TP_OPR_FPDIVBY2;
+        } else if (op == '*' && c1 && (k1 == 2.0 || k1 == 0.5)) {
+            other = &vtop[0];
+            by2op = (k1 == 2.0) ? TP_OPR_FPMULBY2 : TP_OPR_FPDIVBY2;
+        } else if (op == '/' && c2 && (k2 == 2.0 || k2 == 0.5)) {
+            other = &vtop[-1];
+            by2op = (k2 == 2.0) ? TP_OPR_FPDIVBY2 : TP_OPR_FPMULBY2;
+        } else if (t9k && op == '+' &&
+                   tp_fpu_same_operand(&vtop[-1], &vtop[0])) {
+            /* x + x == 2*x exactly; one load instead of two */
+            other = &vtop[0];
+            by2op = TP_OPR_FPMULBY2;
         }
+        if (by2op && in_fa != 3) {
+            /* `other` is the only non-constant operand, so if
+             * either is in FA it is this one */
+            if (!in_fa)
+                tp_push_float_sv(other);
+            if (t9k)
+                emit_instr(TP_OP_OPR, by2op);
+            else
+                tp_fpentry(by2op == TP_OPR_FPMULBY2
+                           ? TP_FPU_OP_MULBY2 & 0xFF
+                           : TP_FPU_OP_DIVBY2 & 0xFF);
+            goto fp_arith_done;
+        }
+    }
 
-        if (p1 && p2 &&
-            (op == TOK_EQ || op == TOK_NE || op == TOK_GT ||
-             op == TOK_LT || op == TOK_GE || op == TOK_LE)) {
-            int in_fa = 0;
+    {
+        /* `first` goes on the FPU stack, `second` is fused into the
+         * operation or pushed above it; the IEEE + and * commute, so
+         * for those either operand may be `first`. */
+        SValue *first = &vtop[-1], *second = &vtop[0];
+        int reversed = 0;
 
-            if (tp_fpu_take_resident(&vtop[0], is_db)) {
-                in_fa = 2;
-                if (tp_fpu_take_under(&vtop[-1], is_db))
-                    in_fa = 3;
-            } else if (tp_fpu_take_resident(&vtop[-1], is_db) ||
-                       tp_fpu_load_early(&vtop[-1], is_db))
-                in_fa = 1;
-            abcreg_stack_depth = 0;
-            fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
-            /* Comparisons need no result register: the FPU compare leaves
-             * an int truth value in AReg (VT_CMP).  Push order: first
-             * operand ends in FBreg, second in FAreg, so fpgt/fpeq test
-             * "first OP second" directly. */
-            if (in_fa == 3) {
-                /* both already there */
-            } else if (in_fa == 2) {
-                tp_push_float_sv(&vtop[-1]);
+        if (in_fa == 3) {
+            /* both on the stack, left in FB: FB op FA */
+            emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_ADD :
+                                  op == '-' ? TP_FPU_SUB :
+                                  op == '*' ? TP_FPU_MUL : TP_FPU_DIV);
+            fpureg_pop(1);
+            goto fp_arith_done;
+        }
+        if (in_fa == 2 || (!in_fa && comm &&
+                           tp_fpu_addr_just_parked(&vtop[0]) &&
+                           !tp_fpu_addr_just_parked(&vtop[-1]))) {
+            /* vtop[0] is in FA, or its address was parked by the
+             * last instruction and loading it first cancels that */
+            first = &vtop[0];
+            second = &vtop[-1];
+            reversed = 1;
+        }
+        if (!in_fa)
+            tp_push_float_sv(first);
+        if (comm && tp_emit_float_addr(second)) {
+            /* Fused: load second operand AND operate in one instr */
+            if (op == '+')
+                emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
+            else
+                emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
+            abcreg_pop(1);
+        } else if (comm) {
+            /* Second operand is const 0.0 (no address): fpldzero + op */
+            emit_instr(TP_OP_OPR, is_db ? TP_OPR_FPLDZERODB : TP_OPR_FPLDZEROSN);
+            fpureg_push(1);
+            emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_ADD : TP_FPU_MUL);
+            fpureg_pop(1);
+        } else {
+            /* fpsub/fpdiv compute FBreg op FAreg: the left operand
+             * must be in FB */
+            tp_push_float_sv(second);
+            if (reversed)
                 emit_instr(TP_OP_OPR, TP_FPU_REV);
-            } else {
-                if (!in_fa)
-                    tp_push_float_sv(&vtop[-1]);
-                tp_push_float_sv(&vtop[0]);
-            }
-            tp_emit_fp_compare(op);
-            fpureg_stack_depth = 0;
-            abcreg_stack_depth = 1;
-            vtop--;
-            vset_VT_CMP(TOK_NE);
-            return;
+            emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
+            fpureg_pop(1);
         }
     }
 
-    if (is_db) {
-        /* Direct FPU path for doubles: same as float32 but with db variants */
-        if (op == '+' || op == '*' || op == '-' || op == '/') {
-            int fv1 = orig_first.r & VT_VALMASK;
-            int fv2 = orig_second.r & VT_VALMASK;
-            int f1_local = (orig_first.r & VT_LVAL) && fv1 == VT_LOCAL &&
-                           !(orig_first.r & VT_SYM);
-            int f2_local = (orig_second.r & VT_LVAL) && fv2 == VT_LOCAL &&
-                           !(orig_second.r & VT_SYM);
+fp_arith_done:
+    vtop--;
+    vtop->r = rdst;
+    vtop->r2 = is_db ? rdst + 1 : VT_CONST;
+    vtop->sym = NULL;
+    {
+        int store_off = ind;
 
-            if (f1_local && f2_local) {
-                gv2(RC_FLOAT, RC_FLOAT);
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
+        tp_store_fpu_result_to_slot(rdst, bt);
+        tp_fpr_reg = rdst;
+        tp_fpr_off = store_off;
+        tp_fpr_end = ind;
+        tp_fpr_db = is_db;
+    }
+    abcreg_stack_depth = 0;
+    fpureg_stack_depth = 0;
+}
 
-                emit_local_addr(orig_first.c.i);
-                emit_instr(TP_OP_OPR, TP_FPU_LDNLDB);
-                abcreg_pop(1);
-                fpureg_push(1);
+/* A comparison of two such operands. */
+static void tp_opf_direct_compare(int op, int is_db)
+{
+    int in_fa = 0;
 
-                if (op == '+' || op == '*') {
-                    emit_local_addr(orig_second.c.i);
-                    emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_LDNLADDDB : TP_FPU_LDNLMULDB);
-                    abcreg_pop(1);
-                } else {
-                    emit_local_addr(orig_second.c.i);
-                    emit_instr(TP_OP_OPR, TP_FPU_LDNLDB);
-                    abcreg_pop(1);
-                    fpureg_push(1);
-                    emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
-                    fpureg_pop(1);
-                }
-
-                vtop--;
-                tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-                return;
-            }
-        }
-
-        /* Doubles occupy two workspace words.
-         * gv2() may emit overlapping RC_FLOAT reloads (e.g. 3/4 and 4/5),
-         * which can clobber a live intermediate before we consume it.
-         * Preserve both operands into non-overlapping safe pairs first. */
-        sv_first = orig_first;
-        sv_second = orig_second;
-        load(FRAME_SLOT_SCRATCH, &sv_first);      /* words 0..1 */
-        load(FRAME_SLOT_DBL_TMP, &sv_second);     /* words 6..7 */
-
-        /* Keep generic allocator/stack state in sync with backend expectations. */
-        gv2(RC_FLOAT, RC_FLOAT);
-
-        if (opf_debug) {
-            fprintf(stderr,
-                    "[OPF_DB] op=0x%x func=%s first{type=0x%x r=0x%x v=0x%x} "
-                    "second_orig{type=0x%x r=0x%x v=0x%x} second_gv2{type=0x%x r=0x%x v=0x%x} "
-                    "materialized={0..1,6..7}\n",
-                    op, funcname ? funcname : "<unknown>",
-                    sv_first.type.t, sv_first.r, sv_first.r & VT_VALMASK,
-                    orig_second.type.t, orig_second.r, orig_second.r & VT_VALMASK,
-                    vtop[0].type.t, vtop[0].r, vtop[0].r & VT_VALMASK);
-        }
-        sv_first.r = FRAME_SLOT_SCRATCH;
-        sv_second.r = FRAME_SLOT_DBL_TMP;
+    if (tp_fpu_take_resident(&vtop[0], is_db)) {
+        in_fa = 2;
+        if (tp_fpu_take_under(&vtop[-1], is_db))
+            in_fa = 3;
+    } else if (tp_fpu_take_resident(&vtop[-1], is_db) ||
+               tp_fpu_load_early(&vtop[-1], is_db))
+        in_fa = 1;
+    abcreg_stack_depth = 0;
+    fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
+    /* Comparisons need no result register: the FPU compare leaves
+     * an int truth value in AReg (VT_CMP).  Push order: first
+     * operand ends in FBreg, second in FAreg, so fpgt/fpeq test
+     * "first OP second" directly. */
+    if (in_fa == 3) {
+        /* both already there */
+    } else if (in_fa == 2) {
+        tp_push_float_sv(&vtop[-1]);
+        emit_instr(TP_OP_OPR, TP_FPU_REV);
     } else {
-        /* Zero-STL for float locals: if both operands are local float/double
-         * variables, emit LDLP+fpldnlsn/db directly with fused ops.
-         * Works for both float32 and float64 (double). */
-        if (op == '+' || op == '*' || op == '-' || op == '/') {
-            int fv1 = orig_first.r & VT_VALMASK;
-            int fv2 = orig_second.r & VT_VALMASK;
-            int f1_local = (orig_first.r & VT_LVAL) && fv1 == VT_LOCAL &&
-                           !(orig_first.r & VT_SYM);
-            int f2_local = (orig_second.r & VT_LVAL) && fv2 == VT_LOCAL &&
-                           !(orig_second.r & VT_SYM);
-
-            if (f1_local && f2_local) {
-                /* Skip gv2 — load directly from local float slots.
-                 * For + and *: use fused form for second operand.
-                 * Pattern: LDLP a; fpldnlsn; LDLP b; fpldnl{add,mul}sn */
-                gv2(RC_FLOAT, RC_FLOAT);  /* still needed for vstack sync */
-                sv_first = vtop[-1];
-                sv_second = vtop[0];
-
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-
-                /* Load first operand from its original local offset */
-                emit_local_addr(orig_first.c.i);
-                emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
-                abcreg_pop(1);
-                fpureg_push(1);
-
-                if (op == '+' || op == '*') {
-                    /* Fused: load second AND operate in one instruction */
-                    emit_local_addr(orig_second.c.i);
-                    if (op == '+')
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
-                    else
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
-                    abcreg_pop(1);
-                } else {
-                    /* Sub/div: no fused form, load second separately */
-                    emit_local_addr(orig_second.c.i);
-                    emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
-                    abcreg_pop(1);
-                    fpureg_push(1);
-                    emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
-                    fpureg_pop(1);
-                }
-
-                vtop--;
-                tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-                return;
-            }
-        }
-
-        /* Standard path */
-        gv2(RC_FLOAT, RC_FLOAT);
-        sv_first = vtop[-1];
-        sv_second = vtop[0];
+        if (!in_fa)
+            tp_push_float_sv(&vtop[-1]);
+        tp_push_float_sv(&vtop[0]);
     }
+    tp_emit_fp_compare(op);
+    fpureg_stack_depth = 0;
+    abcreg_stack_depth = 1;
+    vtop--;
+    vset_VT_CMP(TOK_NE);
+}
+
+/* A float or double local variable, read as such. */
+static int tp_opf_plain_local(const SValue *sv)
+{
+    return (sv->r & VT_LVAL) && (sv->r & VT_VALMASK) == VT_LOCAL &&
+           !(sv->r & VT_SYM);
+}
+
+/* Zero-STL for float locals: if both operands are local float/double
+ * variables, emit LDLP+fpldnlsn/db directly with fused ops.
+ * Works for both float32 and float64 (double).  `first` and `second` are
+ * the operands as they were before gv2(). */
+static void tp_opf_local_pair(int op, int bt, int is_db,
+                              const SValue *first, const SValue *second)
+{
+    /* Skip gv2 — load directly from local float slots.
+     * For + and *: use fused form for second operand.
+     * Pattern: LDLP a; fpldnlsn; LDLP b; fpldnl{add,mul}sn */
+    gv2(RC_FLOAT, RC_FLOAT);  /* still needed for vstack sync */
 
     abcreg_stack_depth = 0;
     fpureg_stack_depth = 0;
 
-    /* Detect fused load-and-operate opportunity for + and * (T800).
-     * fpldnladdsn/fpldnlmulsn load from Mem[AReg] and combine with FAreg
-     * in a single instruction, eliminating FPU stack push overhead.
-     * Now also tries swapping operands (FPREV) to fuse with first operand. */
-    {
-        int fpu_fuse = 0;
-        int fpu_fuse_swap = 0;
-        if (op == '+' || op == '*') {
-            int fv = sv_second.r & VT_VALMASK;
-            int fv1 = sv_first.r & VT_VALMASK;
-            if (!(sv_second.r & VT_LVAL) && fv < VT_CONST)
-                fpu_fuse = 1;
-            else if (!(sv_first.r & VT_LVAL) && fv1 < VT_CONST)
-                fpu_fuse_swap = 1;  /* swap: fuse with first operand */
-        }
+    /* Load first operand from its original local offset */
+    emit_local_addr(first->c.i);
+    emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
+    abcreg_pop(1);
+    fpureg_push(1);
 
-        if (fpu_fuse_swap) {
-            /* Load second first, then fuse-load first */
+    if (op == '+' || op == '*') {
+        /* Fused: load second AND operate in one instruction */
+        emit_local_addr(second->c.i);
+        if (op == '+')
+            emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
+        else
+            emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
+        abcreg_pop(1);
+    } else {
+        /* Sub/div: no fused form, load second separately */
+        emit_local_addr(second->c.i);
+        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
+        abcreg_pop(1);
+        fpureg_push(1);
+        emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
+        fpureg_pop(1);
+    }
+
+    vtop--;
+    tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
+    abcreg_stack_depth = 0;
+    fpureg_stack_depth = 0;
+}
+
+/* Both operands are in workspace slots: push them, or fuse a load into the
+ * operation, and operate. */
+static void tp_opf_general(int op, int bt, int is_db,
+                           const SValue *first, const SValue *second)
+{
+    SValue sv_first = *first, sv_second = *second;
+    int fpu_fuse = 0;
+    int fpu_fuse_swap = 0;
+
+    abcreg_stack_depth = 0;
+    fpureg_stack_depth = 0;
+
+/* Detect fused load-and-operate opportunity for + and * (T800).
+ * fpldnladdsn/fpldnlmulsn load from Mem[AReg] and combine with FAreg
+ * in a single instruction, eliminating FPU stack push overhead.
+ * Now also tries swapping operands (FPREV) to fuse with first operand. */
+    if (op == '+' || op == '*') {
+        int fv = sv_second.r & VT_VALMASK;
+        int fv1 = sv_first.r & VT_VALMASK;
+        if (!(sv_second.r & VT_LVAL) && fv < VT_CONST)
+            fpu_fuse = 1;
+        else if (!(sv_first.r & VT_LVAL) && fv1 < VT_CONST)
+            fpu_fuse_swap = 1;  /* swap: fuse with first operand */
+    }
+
+    if (fpu_fuse_swap) {
+        /* Load second first, then fuse-load first */
+        tp_push_float_sv(&sv_second);
+        /* fused path handled in switch below */
+    } else {
+        tp_push_float_sv(&sv_first);
+        if (!fpu_fuse)
             tp_push_float_sv(&sv_second);
-            /* fused path handled in switch below */
-        } else {
-            tp_push_float_sv(&sv_first);
-            if (!fpu_fuse)
-                tp_push_float_sv(&sv_second);
-        }
+    }
 
     /* Transputer FPU operations (T800) */
     switch (op) {
@@ -11536,7 +11450,79 @@ ST_FUNC void gen_opf(int op) {
     default:
         tcc_error("unsupported float operator 0x%x", op);
     }
-    } /* fpu_fuse block */
+}
+
+ST_FUNC void gen_opf(int op) {
+    SValue orig_first, orig_second;
+    SValue sv_first, sv_second;
+    int bt, is_db, arith;
+
+    if (op == TOK_NEG) {
+        tp_opf_neg();
+        return;
+    }
+
+    if (tp_soft_float()) {
+        tp_softfp_opf(op);
+        return;
+    }
+
+    orig_first = vtop[-1];
+    orig_second = vtop[0];
+    bt = orig_first.type.t & VT_BTYPE;
+    is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
+    arith = op == '+' || op == '-' || op == '*' || op == '/';
+
+    if (tp_opf_direct_ok(&orig_first) && tp_opf_direct_ok(&orig_second)) {
+        if (arith) {
+            tp_opf_direct_arith(op, bt, is_db);
+            return;
+        }
+        if (op == TOK_EQ || op == TOK_NE || op == TOK_GT ||
+            op == TOK_LT || op == TOK_GE || op == TOK_LE) {
+            tp_opf_direct_compare(op, is_db);
+            return;
+        }
+    }
+
+    if (arith && tp_opf_plain_local(&orig_first) &&
+        tp_opf_plain_local(&orig_second)) {
+        tp_opf_local_pair(op, bt, is_db, &orig_first, &orig_second);
+        return;
+    }
+
+    if (is_db) {
+        /* Doubles occupy two workspace words.
+         * gv2() may emit overlapping RC_FLOAT reloads (e.g. 3/4 and 4/5),
+         * which can clobber a live intermediate before we consume it.
+         * Preserve both operands into non-overlapping safe pairs first. */
+        sv_first = orig_first;
+        sv_second = orig_second;
+        load(FRAME_SLOT_SCRATCH, &sv_first);      /* words 0..1 */
+        load(FRAME_SLOT_DBL_TMP, &sv_second);     /* words 6..7 */
+
+        /* Keep generic allocator/stack state in sync with backend expectations. */
+        gv2(RC_FLOAT, RC_FLOAT);
+
+        if (tp_opf_debug) {
+            fprintf(stderr,
+                    "[OPF_DB] op=0x%x func=%s first{type=0x%x r=0x%x v=0x%x} "
+                    "second_orig{type=0x%x r=0x%x v=0x%x} second_gv2{type=0x%x r=0x%x v=0x%x} "
+                    "materialized={0..1,6..7}\n",
+                    op, funcname ? funcname : "<unknown>",
+                    sv_first.type.t, sv_first.r, sv_first.r & VT_VALMASK,
+                    orig_second.type.t, orig_second.r, orig_second.r & VT_VALMASK,
+                    vtop[0].type.t, vtop[0].r, vtop[0].r & VT_VALMASK);
+        }
+        sv_first.r = FRAME_SLOT_SCRATCH;
+        sv_second.r = FRAME_SLOT_DBL_TMP;
+    } else {
+        /* Standard path */
+        gv2(RC_FLOAT, RC_FLOAT);
+        sv_first = vtop[-1];
+        sv_second = vtop[0];
+    }
+    tp_opf_general(op, bt, is_db, &sv_first, &sv_second);
 }
 
 #endif /* !TARGET_DEFS_ONLY */
