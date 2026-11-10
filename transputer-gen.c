@@ -1142,7 +1142,6 @@ static void transputer_func_reset(void) {
 /*************************************************************/
 /* Instruction emission */
 /*************************************************************/
-/* NOTE: g(), gen_le16(), gen_le32() are defined in transputer-asm.c */
 
 /* Emit Transputer instruction with nibble operand (handles Oreg properly) */
 /* TCC_TRANSPUTER_FPLDNLI=0 keeps `wsub; fpldnlsn' apart, for an A/B run. */
