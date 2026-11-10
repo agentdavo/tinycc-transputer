@@ -1778,9 +1778,10 @@ static void vm_exec(float (*reg)[4], const tg_vm_instruction *code, int count, i
  * normalize and texture2D stay whole. Every value is computed with the same
  * float operations in the same order as vm_exec, so results are identical;
  * the per-fragment loop loses the decoding, the width loops and the calls. */
-/* In order of use in dEngine's shaders: TinyCC compiles the switch in
- * fast_exec to a chain of compares (its jump tables are off by default), so
- * the first codes dispatch soonest. */
+/* fast_exec's switch on these is a jump table (build.sh compiles this file
+ * with -mjump-tables).  They are in order of use in dEngine's shaders for a
+ * compiler without that option, whose chain of compares reaches the first
+ * codes soonest. */
 enum { F_MUL, F_ADD, F_DIV, F_SUB, F_MOV, F_FRACT, F_MAX, F_GT, F_POW,
        F_DOT2, F_DOT3, F_DOT4, F_CROSS, F_NORM2, F_NORM3, F_NORM4, F_TEX, F_MAT4 };
 
@@ -2093,6 +2094,8 @@ static void fast_exec(const fast_code *fc, const sampler *const *tex)
             d[0] = r0; d[1] = r1; d[2] = r2; d[3] = r3;
             break;
         }
+        /* fast_emit writes no other code: a jump table needs no range test */
+        default: __builtin_unreachable();
         }
     }
 }

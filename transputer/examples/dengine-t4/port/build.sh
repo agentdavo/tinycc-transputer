@@ -5,11 +5,12 @@
 #                              images are linked by run-scene.sh
 # ROM_QUALITY=high|low|both selects the textures packed (default both).
 # TCC_DIR selects the transputer toolchain (default: this checkout).
+# DENGINE is the dEngine clone (default: transputer/examples/dEngine).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../../.." && pwd)
 R=${TCC_DIR:-$ROOT}
-DENGINE=$ROOT/transputer/examples/dEngine
+DENGINE=${DENGINE:-$ROOT/transputer/examples/dEngine}
 FB=$ROOT/transputer/examples/distributed-fb
 mode=${1:?usage: build.sh host|t4 OUTDIR}
 out=${2:?usage: build.sh host|t4 OUTDIR}
@@ -37,9 +38,14 @@ fi
 [[ $mode == t4 ]] || { echo 'mode must be host or t4' >&2; exit 1; }
 obj=$out/obj; mkdir -p "$obj"
 CFLAGS=(-mt800 -w -I"$HERE/include" -I"$R/include" -I"$DENGINE/src" ${T4_CFLAGS:-})
-compile() { "$R/transputer-tcc" "${CFLAGS[@]}" -c -o "$2" "$1" >"$2.log" 2>&1 || { cat "$2.log" >&2; echo "compile failed: $1" >&2; exit 1; }; }
+compile() { local src=$1 o=$2; shift 2; "$R/transputer-tcc" "${CFLAGS[@]}" "$@" -c -o "$o" "$src" >"$o.log" 2>&1 || { cat "$o.log" >&2; echo "compile failed: $src" >&2; exit 1; }; }
+# The shader interpreter's dispatch is a jump table where the compiler has
+# them (-mjump-tables); an older one compares.
+JT=(); "$R/transputer-tcc" -mt800 -mjump-tables -E - </dev/null >/dev/null 2>&1 && JT=(-mjump-tables)
 for s in $ENGINE; do compile "$DENGINE/src/$s.c" "$obj/$s.o"; done
-for s in $PORT; do compile "$HERE/$s.c" "$obj/$s.o"; done
+for s in $PORT; do
+    if [[ $s == gles2 ]]; then compile "$HERE/$s.c" "$obj/$s.o" "${JT[@]}"; else compile "$HERE/$s.c" "$obj/$s.o"; fi
+done
 compile "$FB/glsl_fragment_compiler.c" "$obj/glsl_fragment_compiler.o"
 compile "$R/lib/transputer/transputer-conc.c" "$obj/conc.o"
 "$R/transputer-tcc" -mt800 -c -o "$obj/boot.o" "$HERE/boot.S"
