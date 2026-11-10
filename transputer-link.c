@@ -2068,37 +2068,35 @@ static void tp_alloc_common_syms(TCCState *s1)
     }
 }
 
-ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
-{
-    /* This implements basic ELF linking for Transputer targets */
-    /* Similar to simple-transputer-linker but integrated into TCC */
-    int xip_mode = tp_env_enabled("T4_XIP_LINK");
-    /* MemStart: #80000070 on the T800/T805/T425/T9000, #80000048 on the
-       T414 (-mt414 on the link command), which has less on-chip RAM. */
-    uint32_t base_addr = xip_mode ? 0x7F001000u
-                         : s1->has_text_addr ? s1->text_addr
-                         : s1->tp_isa == TP_ISA_T414 ? 0x80000048u : 0x80000070u;
-    uint32_t total_size = 0;
-    uint32_t total_memsz = 0;  /* includes BSS (p_memsz) */
-    uint32_t current_addr = base_addr;
-	uint32_t xip_text_end = 0;
-	uint32_t xip_data_start = 0;
-    uint32_t entry_point;
+/* What the phases of a link share. */
+struct tp_link {
+    TCCState *s1;
+    const char *output_filename;
+    int xip_mode;
+    uint32_t base_addr;
+    uint32_t total_size;
+    uint32_t total_memsz;       /* includes BSS (p_memsz) */
+    uint32_t current_addr;
+    uint32_t xip_text_end;
+    uint32_t xip_data_start;
     uint8_t *image;
     uint32_t start_kernel_addr;
     const char *start_kernel_name;
     int strict_boot_asserts;
     int has_start_kernel_load_point;
     int has_return_label_load_point;
-    uint32_t bss_expected_start;
-    uint32_t bss_expected_stop;
-    int bss_expected_valid;
-    int link_debug = tp_env_enabled("T4_LINK_DEBUG");
-    int link_trace = tp_env_enabled("T4_LINK_TRACE");
-    int reloc_fix_debug = tp_env_enabled("T4_RELOC_FIX_DEBUG");
-    int iprel_patch_trace = tp_env_enabled("T4_IPREL_PATCH_TRACE");
-    int iprel_patch_debug = tp_env_enabled("T4_IPREL_PATCH_DEBUG");
+    int link_debug;
     InitcallLayout initcall_layout;
+};
+
+/* Shrink the code, give every section its address and define the
+ * symbols that depend on the layout. */
+static int tp_link_layout(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const int xip_mode = l->xip_mode;
+    const uint32_t base_addr = l->base_addr;
+    const int link_debug = l->link_debug;
     uint8_t *fixed;
 
     tp_alloc_common_syms(s1);
@@ -2107,9 +2105,9 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     tp_icf_fold(s1, fixed, link_debug);
     tp_link_relax(s1, fixed, link_debug);
     tcc_free(fixed);
-    if (tp_layout_sections(s1, base_addr, &total_size, &total_memsz,
-			   &current_addr, xip_mode, &xip_text_end,
-			   &xip_data_start, link_debug) < 0)
+    if (tp_layout_sections(s1, base_addr, &l->total_size, &l->total_memsz,
+			   &l->current_addr, xip_mode, &l->xip_text_end,
+			   &l->xip_data_start, link_debug) < 0)
 		return -1;
     if (tp_define_section_bounds(s1, symtab_section, ".init.ramfs",
                                  "__initramfs_start", "__initramfs_end",
@@ -2124,9 +2122,25 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         return -1;
     if (tp_define_sched_class_boundaries(s1, symtab_section, link_debug) < 0)
         return -1;
-    if (tp_define_initcall_boundaries(s1, symtab_section, &initcall_layout,
+    if (tp_define_initcall_boundaries(s1, symtab_section, &l->initcall_layout,
                                       link_debug) < 0)
         return -1;
+    return 0;
+}
+
+/* Report the image size where asked or large, and refuse an impossible
+ * one. */
+static int tp_link_check_size(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const char *output_filename = l->output_filename;
+    const int xip_mode = l->xip_mode;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    const uint32_t current_addr = l->current_addr;
+    const uint32_t xip_text_end = l->xip_text_end;
+    const uint32_t xip_data_start = l->xip_data_start;
+
     /* Report total image size */
     if (s1->verbose || total_size > 8 * 1024 * 1024) {
         fprintf(stderr, "transputer_simple_link: Linking %s\n", output_filename);
@@ -2146,25 +2160,21 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                 total_size, total_size / (1024.0 * 1024.0));
         return -1;
     }
-    /* Create output image */
-    if (link_debug)
-        fprintf(stderr, " Allocating %u bytes for output image...\n", total_size);
-    image = tcc_mallocz(total_size);
-    if (!image) {
-        fprintf(stderr, "ERROR: Failed to allocate %u bytes for output image\n", total_size);
-        return -1;
-    }
-    if (link_debug)
-        fprintf(stderr, " Memory allocated successfully\n");
-    has_start_kernel_load_point = find_sym_by_name(symtab_section, "__start_kernel_load_point") != NULL;
-    has_return_label_load_point = find_sym_by_name(symtab_section, "__return_label_addr") != NULL;
-    strict_boot_asserts = has_start_kernel_load_point;
-    bss_expected_start = 0;
-    bss_expected_stop = 0;
-    bss_expected_valid = 0;
+    return 0;
+}
+
+/* The kernel entry head.S jumps to, if this is a kernel. */
+static int tp_link_find_start_kernel(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const int link_debug = l->link_debug;
+
+    l->has_start_kernel_load_point = find_sym_by_name(symtab_section, "__start_kernel_load_point") != NULL;
+    l->has_return_label_load_point = find_sym_by_name(symtab_section, "__return_label_addr") != NULL;
+    l->strict_boot_asserts = l->has_start_kernel_load_point;
     /* Find start_kernel address — try wrapper first, then C entry point */
-    start_kernel_addr = 0;
-    start_kernel_name = NULL;
+    l->start_kernel_addr = 0;
+    l->start_kernel_name = NULL;
     {
         static const char *sk_names[] = {
             "start_kernel_wrapper", "_start_kernel_wrapper",
@@ -2172,19 +2182,35 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         };
         int ni;
         for (ni = 0; sk_names[ni]; ni++) {
-            if (tp_find_symbol_addr(s1, symtab_section, sk_names[ni], &start_kernel_addr) > 0) {
-                start_kernel_name = sk_names[ni];
+            if (tp_find_symbol_addr(s1, symtab_section, sk_names[ni], &l->start_kernel_addr) > 0) {
+                l->start_kernel_name = sk_names[ni];
                 if (link_debug)
-                    fprintf(stderr, "Found %s at 0x%08x\n", sk_names[ni], start_kernel_addr);
+                    fprintf(stderr, "Found %s at 0x%08x\n", sk_names[ni], l->start_kernel_addr);
                 break;
             }
         }
     }
-    if (has_start_kernel_load_point && start_kernel_addr == 0) {
+    if (l->has_start_kernel_load_point && l->start_kernel_addr == 0) {
         fprintf(stderr, "ERROR: __start_kernel_load_point present but start_kernel symbol was not resolved\n");
-        tcc_free(image);
         return -1;
     }
+    return 0;
+}
+
+/* Copy the sections into the image and apply every relocation. */
+static int tp_link_relocate(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    uint8_t *image = l->image;
+    const uint32_t start_kernel_addr = l->start_kernel_addr;
+    const int link_debug = l->link_debug;
+    int link_trace = tp_env_enabled("T4_LINK_TRACE");
+    int reloc_fix_debug = tp_env_enabled("T4_RELOC_FIX_DEBUG");
+    int iprel_patch_trace = tp_env_enabled("T4_IPREL_PATCH_TRACE");
+    int iprel_patch_debug = tp_env_enabled("T4_IPREL_PATCH_DEBUG");
+
     tp_copy_alloc_sections(s1, image, base_addr);
 
     {
@@ -2199,10 +2225,19 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         tcc_free(index.next);
         tcc_free(index.bucket);
         if (result < 0) {
-            tcc_free(image);
             return -1;
         }
     }
+    return 0;
+}
+
+/* What the environment asks to see of the relocated image. */
+static void tp_link_debug_dumps(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    uint8_t *image = l->image;
 
     /* Post-link CALL target audit: verify all IPREL32 relocations encoded correctly.
      * Decodes each patched CALL/J/CJ instruction and checks the target matches
@@ -2271,6 +2306,24 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
             }
         }
     }
+}
+
+/* Fill in the words a boot file loads before it can use a relocation. */
+static int tp_link_patch_boot(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    uint8_t *image = l->image;
+    const char *start_kernel_name = l->start_kernel_name;
+    const int strict_boot_asserts = l->strict_boot_asserts;
+    const int has_start_kernel_load_point = l->has_start_kernel_load_point;
+    const int has_return_label_load_point = l->has_return_label_load_point;
+    const int link_debug = l->link_debug;
+    uint32_t bss_expected_start = 0;
+    uint32_t bss_expected_stop = 0;
+    int bss_expected_valid = 0;
+
     /* =====================================================================
      * NEW MINIX-STYLE LDC PATCHING (2026-01-15)
      * =====================================================================
@@ -2296,7 +2349,6 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                                       strict_boot_asserts, link_debug,
                                       &bss_expected_start, &bss_expected_stop,
                                       &bss_expected_valid) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -2304,14 +2356,12 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     if (tp_patch_verified_symbol_target(image, total_size, base_addr, s1, symtab_section,
                                         "__start_kernel_load_point", start_kernel_name,
                                         has_start_kernel_load_point, link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
     /* Patch init_stack workspace pointer (needs calculation: init_stack + THREAD_SIZE - 64) */
     if (tp_patch_boot_init_stack(image, total_size, base_addr, s1, symtab_section,
                                  link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -2319,7 +2369,6 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     if (tp_patch_verified_symbol_target(image, total_size, base_addr, s1, symtab_section,
                                         "__return_label_addr", "halt",
                                         has_return_label_load_point, link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -2331,12 +2380,10 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         bss_stop_rc = tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab_section,
                                               "__bss_stop_load_point", bss_expected_stop, ".bss stop");
         if (bss_start_rc < 0 || bss_stop_rc < 0) {
-            tcc_free(image);
             return -1;
         }
         if (strict_boot_asserts && (bss_start_rc != 1 || bss_stop_rc != 1)) {
             fprintf(stderr, "ERROR: required BSS load-point symbols are missing\n");
-            tcc_free(image);
             return -1;
         }
         tp_dump_abs_ldc_bytes(image, total_size, base_addr, s1, symtab_section,
@@ -2360,7 +2407,6 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
             if (tp_patch_verified_symbol_target(image, total_size, base_addr,
                                                 s1, symtab_section, boot_targets[i][0],
                                                 boot_targets[i][1], 0, link_debug) < 0) {
-                tcc_free(image);
                 return -1;
             }
         }
@@ -2368,11 +2414,10 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
 
     /* Populate the initcall table (__initcall_start[]) with sorted
      * function pointers from scattered __initcall_* symbols. */
-    if (initcall_layout.table_addr &&
+    if (l->initcall_layout.table_addr &&
         tp_populate_initcall_table(image, total_size, base_addr, s1,
-                                   symtab_section, &initcall_layout,
+                                   symtab_section, &l->initcall_layout,
                                    link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -2389,23 +2434,40 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
      */
     if (tp_patch_linker_surrogates(image, total_size, base_addr, s1, symtab_section,
                                    link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
     if (link_debug)
         fprintf(stderr, "=== LDC Sequence Patching Complete ===\n\n");
+    return 0;
+}
+
+/* Find the entry point and write the output file and its symbol map. */
+static int tp_link_write(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const char *output_filename = l->output_filename;
+    const int xip_mode = l->xip_mode;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    const uint32_t total_memsz = l->total_memsz;
+    const uint32_t xip_text_end = l->xip_text_end;
+    const uint32_t xip_data_start = l->xip_data_start;
+    uint8_t *image = l->image;
+    const uint32_t start_kernel_addr = l->start_kernel_addr;
+    const int strict_boot_asserts = l->strict_boot_asserts;
+    const int has_start_kernel_load_point = l->has_start_kernel_load_point;
+    const int link_debug = l->link_debug;
+    uint32_t entry_point;
 
     if (tp_find_boot_entry_point(s1, symtab_section, &entry_point,
                                  NULL, NULL, link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
     if (tp_verify_boot_entry(entry_point, base_addr, strict_boot_asserts,
                              has_start_kernel_load_point, start_kernel_addr,
                              total_size) < 0) {
-        tcc_free(image);
         return -1;
     }
     write_tccsym_map(s1, symtab_section, output_filename);
@@ -2413,11 +2475,52 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                             total_size, total_memsz, xip_mode,
 						xip_text_end, xip_data_start, image,
                             s1->tp_isa_used) < 0) {
-        tcc_free(image);
         return -1;
     }
-    tcc_free(image);
     return 0;
+}
+ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
+{
+    struct tp_link l;
+    int rc = -1;
+
+    l.s1 = s1;
+    l.output_filename = output_filename;
+    l.xip_mode = tp_env_enabled("T4_XIP_LINK");
+    /* MemStart: #80000070 on the T800/T805/T425/T9000, #80000048 on the
+       T414 (-mt414 on the link command), which has less on-chip RAM. */
+    l.base_addr = l.xip_mode ? 0x7F001000u
+                  : s1->has_text_addr ? s1->text_addr
+                  : s1->tp_isa == TP_ISA_T414 ? 0x80000048u : 0x80000070u;
+    l.total_size = 0;
+    l.total_memsz = 0;
+    l.current_addr = l.base_addr;
+    l.xip_text_end = 0;
+    l.xip_data_start = 0;
+    l.image = NULL;
+    l.link_debug = tp_env_enabled("T4_LINK_DEBUG");
+
+    if (tp_link_layout(&l) < 0 || tp_link_check_size(&l) < 0)
+        return -1;
+    /* Create output image */
+    if (l.link_debug)
+        fprintf(stderr, " Allocating %u bytes for output image...\n", l.total_size);
+    l.image = tcc_mallocz(l.total_size);
+    if (!l.image) {
+        fprintf(stderr, "ERROR: Failed to allocate %u bytes for output image\n", l.total_size);
+        return -1;
+    }
+    if (l.link_debug)
+        fprintf(stderr, " Memory allocated successfully\n");
+    if (tp_link_find_start_kernel(&l) < 0 || tp_link_relocate(&l) < 0)
+        goto done;
+    tp_link_debug_dumps(&l);
+    if (tp_link_patch_boot(&l) < 0 || tp_link_write(&l) < 0)
+        goto done;
+    rc = 0;
+done:
+    tcc_free(l.image);
+    return rc;
 }
 
 /* Instruction encoding now uses tp_encode_instr() from transputer-enc.h */
