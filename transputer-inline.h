@@ -5,9 +5,10 @@
  *  Code, not declarations: tccgen.c includes this once, under
  *  TCC_TARGET_TRANSPUTER, ahead of unary(), because it parses with tccgen.c's
  *  static state (the value stack, scopes, `loc`, the token stream).  tccgen.c
- *  uses three functions of it:
+ *  uses four functions of it:
  *
  *    tp_inline_call()            at each call, before gfunc_call()
+ *    tp_unary_builtin()          at a name unary() has no case for
  *    tp_inline_function_start()  as each function body begins
  *    resolve_inline_sections()   before gen_inline_functions() emits anything
  */
@@ -583,6 +584,197 @@ static int tp_inline_expand(Sym *ftype, int nb_args)
         if (tmp[i] >= 0)
             tp_inline_tmp[tmp[i]].busy = 0;
     tp_inline_depth--;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Builtins */
+
+/* unary() has met a name that is no case of its own.  If it is a builtin of this
+   target, compile the whole call - `tok` is the builtin's name - leave its
+   value on the vstack and return 1.  The GCC-style ones are here; the
+   instruction builtins (__in, __fpsqrt, the TVX set, ...) are the back
+   end's, by its table (gen_transputer_builtin_call). */
+static int tp_unary_builtin(void)
+{
+    int n;
+    CType type;
+
+    switch (tok) {
+    case TOK_builtin_clz:
+    case TOK_builtin_clzl:
+    case TOK_builtin_clzll:
+        {
+            int bits = tok == TOK_builtin_clzll ? 64 :
+                       tok == TOK_builtin_clzl ? LONG_SIZE * 8 : 32;
+            unsigned long long value;
+
+            next();
+            skip('(');
+            expr_eq();
+            skip(')');
+            /* Convert to the parameter type before widening: __builtin_clz
+               takes an unsigned int, so the high half of a wider argument
+               must not reach the 64-bit helper. */
+            if (bits < 64)
+                gen_cast_s(VT_INT | VT_UNSIGNED);
+            gen_cast_s(VT_LLONG | VT_UNSIGNED);
+
+            if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
+                value = vtop->c.i;
+                if (bits < 64)
+                    value &= (1ULL << bits) - 1;
+                n = 0;
+                if (!value) {
+                    n = bits;
+                } else {
+                    unsigned long long mask = 1ULL << (bits - 1);
+                    while (!(value & mask))
+                        ++n, mask >>= 1;
+                }
+                vpop();
+                vpushi(n);
+            } else {
+                /* libtcc1 and the Transputer kernel both provide the 64-bit
+                   helper.  Narrow variants are zero-extended and adjusted. */
+                vpush_helper_func(tok_alloc_const("__builtin_clzll"));
+                vrott(2);
+                gfunc_call(1);
+                vpushi(0);
+                PUT_R_RET(vtop, VT_INT);
+                if (bits < 64) {
+                    vpushi(bits - 64);
+                    gen_op('+');
+                }
+            }
+        }
+        break;
+    case TOK_builtin_strlen:
+        next();
+        skip('(');
+        if (tok == TOK_STR) {
+            CString *literal = parse_mult_str("string constant");
+            n = strlen(literal->data);
+            skip(')');
+            vpushs(n);
+        } else {
+            expr_eq();
+            skip(')');
+            vpush_helper_func(tok_alloc_const("strlen"));
+            vrott(2);
+            gfunc_call(1);
+            type.t = VT_SIZE_T;
+            type.ref = NULL;
+            vpush(&type);
+            PUT_R_RET(vtop, type.t);
+        }
+        break;
+    case TOK_builtin_strcmp:
+    case TOK_builtin_strncmp:
+        {
+            /* GCC folds strcmp/strncmp of constant C strings.  Linux
+             * vruntime_cmp/vruntime_op are written as
+             *   if (!__builtin_strcmp(OP, "-")) ...
+             *   else __BUILD_BUG_vruntime_op();
+             * so the undefined BUILD_BUG symbol is only a link-time
+             * assertion.  Without the fold TCC emits a runtime strcmp
+             * plus a CALL whose reloc target is 0 (Iptr := 0). */
+            int is_ncmp = tok == TOK_builtin_strncmp;
+            const char *sa, *sb;
+            int narg = is_ncmp ? 3 : 2;
+
+            next();
+            skip('(');
+            expr_eq();
+            skip(',');
+            expr_eq();
+            if (is_ncmp) {
+                skip(',');
+                expr_eq();
+            }
+            skip(')');
+
+            sa = cstr_from_sv(&vtop[is_ncmp ? -2 : -1]);
+            sb = cstr_from_sv(&vtop[is_ncmp ? -1 : 0]);
+            if (sa && sb && (!is_ncmp
+                             || ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM))
+                                 == VT_CONST))) {
+                int r = is_ncmp
+                    ? strncmp(sa, sb, (size_t)vtop->c.i)
+                    : strcmp(sa, sb);
+                while (narg--)
+                    vpop();
+                vpushi(r);
+            } else {
+                vpush_helper_func(tok_alloc_const(is_ncmp ? "strncmp"
+                                                          : "strcmp"));
+                vrott(narg + 1);
+                gfunc_call(narg);
+                vpushi(0);
+                PUT_R_RET(vtop, VT_INT);
+            }
+        }
+        break;
+    case TOK_builtin_add_overflow:
+    case TOK_builtin_sub_overflow:
+    case TOK_builtin_mul_overflow:
+        {
+            int overflow_tok = tok;
+            int bt, bits, is_unsigned;
+            CType result_type;
+            char helper[48];
+
+            /* GCC's overflow builtins are type-generic, with the result
+               pointer selecting the arithmetic width and signedness.  Lower
+               the operation to a small typed runtime helper.  This also
+               avoids depending on target condition-code conventions. */
+            next();
+            skip('(');
+            expr_eq();
+            skip(',');
+            expr_eq();
+            skip(',');
+            expr_eq();
+            skip(')');
+
+            if ((vtop->type.t & VT_BTYPE) != VT_PTR)
+                tcc_error("third argument to %s must be a pointer",
+                          get_tok_str(overflow_tok, 0));
+            result_type = *pointed_type(&vtop->type);
+            bt = result_type.t & VT_BTYPE;
+            if (bt != VT_BYTE && bt != VT_SHORT && bt != VT_INT
+                && bt != VT_LLONG)
+                tcc_error("result of %s must point to an integer type",
+                          get_tok_str(overflow_tok, 0));
+
+            bits = bt == VT_BYTE ? 8 : bt == VT_SHORT ? 16
+                   : bt == VT_INT ? 32 : 64;
+            is_unsigned = !!(result_type.t & VT_UNSIGNED);
+
+            /* Cast both operands to the result type.  Linux's checked
+               arithmetic interfaces use matching operand/result types; the
+               casts also give old-style helper calls the correct 64-bit ABI. */
+            vrotb(3);              /* b, result pointer, a */
+            gen_cast(&result_type);
+            vrott(3);              /* a, b, result pointer */
+            vswap();               /* a, result pointer, b */
+            gen_cast(&result_type);
+            vswap();               /* a, b, result pointer */
+
+            snprintf(helper, sizeof(helper), "__tcc_%s_overflow_%c%d",
+                     overflow_tok == TOK_builtin_add_overflow ? "add" :
+                     overflow_tok == TOK_builtin_sub_overflow ? "sub" : "mul",
+                     is_unsigned ? 'u' : 's', bits);
+            vpush_helper_func(tok_alloc_const(helper));
+            vrott(4);
+            gfunc_call(3);
+            vpushi(0);
+            PUT_R_RET(vtop, VT_INT);
+        }
+        break;
+    default:
+        return gen_transputer_builtin_call(tok);
+    }
     return 1;
 }
 

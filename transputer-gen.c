@@ -6088,7 +6088,22 @@ static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
         { 0,                 NULL,  NULL,                    0 }
     };
     const struct tp_builtin_desc *desc;
+    static int lo, hi;
 
+    /* unary() asks this of every name it does not know, so turn away what
+       cannot be here without a search: the builtins are predefined tokens,
+       below every identifier a program brings. */
+    if (!hi) {
+        lo = hi = descs[0].tok;
+        for (desc = descs; desc->tok != 0; ++desc) {
+            if (desc->tok < lo)
+                lo = desc->tok;
+            if (desc->tok > hi)
+                hi = desc->tok;
+        }
+    }
+    if (tok < lo || tok > hi)
+        return NULL;
     for (desc = descs; desc->tok != 0; ++desc) {
         if (desc->tok == tok)
             return desc;
