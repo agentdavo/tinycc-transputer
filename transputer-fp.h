@@ -136,16 +136,16 @@ static int tp_fpu_take_resident(SValue *sv, int is_db)
     int r = sv->r & VT_VALMASK;
     int k, i, n;
 
-    if (nocode_wanted || tp_fpr_reg < 0 || r != tp_fpr_reg ||
-        (sv->r & (VT_LVAL | VT_SYM)) || tp_fpr_db != is_db ||
-        tp_fpr_off < func_start_ind || tp_hist_n == 0 ||
+    if (nocode_wanted || tp_fpr.reg < 0 || r != tp_fpr.reg ||
+        (sv->r & (VT_LVAL | VT_SYM)) || tp_fpr.db != is_db ||
+        tp_fpr.off < func_start_ind || tp_hist_n == 0 ||
         tp_hist[0].end != ind)
         return 0;
     if (tp_reg_live_on_vstack(r, sv) ||
         (is_db && tp_reg_live_on_vstack(r + 1, sv)))
         return 0;
     for (k = 1; k < tp_hist_n; k++)
-        if (tp_hist[k].off == tp_fpr_off)
+        if (tp_hist[k].off == tp_fpr.off)
             break;
     if (k >= tp_hist_n ||
         tp_hist[k].kind != TP_HIST_INSTR || tp_hist[k].opc != TP_OP_LDLP ||
@@ -153,7 +153,7 @@ static int tp_fpu_take_resident(SValue *sv, int is_db)
         tp_hist[k - 1].kind != TP_HIST_INSTR ||
         tp_hist[k - 1].opc != TP_OP_OPR ||
         tp_hist[k - 1].val != (is_db ? TP_FPU_STNLDB : TP_FPU_STNLSN) ||
-        tp_hist[k - 1].end != tp_fpr_end)
+        tp_hist[k - 1].end != tp_fpr.end)
         return 0;
     for (i = k; i > 0; i--)
         if (tp_hist[i].end != tp_hist[i - 1].off)
@@ -165,12 +165,12 @@ static int tp_fpu_take_resident(SValue *sv, int is_db)
     n = k - 1;
     for (i = 0; i < n; i++)
         after[i] = tp_hist[k - 2 - i];          /* oldest first */
-    ind = tp_fpr_off;
+    ind = tp_fpr.off;
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     for (i = 0; i < n; i++) {
         if (after[i].kind == TP_HIST_LOCAL)
             emit_local_op(after[i].opc, after[i].val);
@@ -490,7 +490,7 @@ ST_FUNC void tp_label_here(void)
 {
     tp_hist_clear();
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
 }
 
 /* An expression statement, or a for loop's init or step, is complete:
@@ -649,7 +649,7 @@ ST_FUNC void tp_stmt_end(void)
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     for (j = first; j < n; j++) {
         if (!keep[j])
             continue;
@@ -829,7 +829,7 @@ static int tp_fpu_take_under(SValue *sv, int is_db)
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     for (i = 0; i < n; i++) {
         if (w[i].kind == TP_HIST_LOCAL)
             emit_local_op(w[i].opc, w[i].val);
@@ -1070,7 +1070,7 @@ static int tp_fpu_take_moved(SValue *sv, int is_db)
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     for (j = 0; j < 2; j++) {
         struct tp_hist_ent *w = j ? lseg : rseg;
         int n = j ? nl : nr;
@@ -1133,7 +1133,7 @@ static int tp_fpu_load_early(SValue *sv, int is_db)
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
     for (i = 0; i < n; i++) {
         if (w[i].kind == TP_HIST_LOCAL)
@@ -1264,7 +1264,7 @@ static int tp_fpu_square_twin(SValue *sv, int is_db)
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
     tp_areg_invalidate();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     return 1;
 }
 
@@ -1502,10 +1502,7 @@ fp_arith_done:
         int store_off = ind;
 
         tp_store_fpu_result_to_slot(rdst, bt);
-        tp_fpr_reg = rdst;
-        tp_fpr_off = store_off;
-        tp_fpr_end = ind;
-        tp_fpr_db = is_db;
+        tp_fpr_note(rdst, store_off, ind, is_db);
     }
     abcreg_stack_depth = 0;
     fpureg_stack_depth = 0;

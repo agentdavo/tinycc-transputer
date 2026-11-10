@@ -24,6 +24,9 @@
  *    tp_hist_last_instr()         the instruction emit_instr() just emitted
  *    tp_hist_last_stl()           is that `stl reg`?
  *    tp_hist[], tp_hist_n         the window itself, for the rules that scan
+ *    tp_fpr, tp_fpr_note(), tp_fpr_forget()
+ *                                 which store in the window is gen_opf()'s
+ *                                 result, still wanted on the FPU stack
  */
 
 #define TP_HIST_N 24
@@ -124,4 +127,27 @@ static int tp_hist_last_stl(int reg)
         tp_hist[0].off >= tp_hist_stl_floor)
         return tp_hist[0].off;
     return -1;
+}
+
+/* The slot gen_opf() last stored an FPU result to, and where that `ldlp
+ * slot; fpstnl` is: reg is the slot, or -1 for none; the store runs from
+ * off to end and is a double's if db.  Not something the window can say by
+ * itself - the same two instructions also store an ordinary value - so
+ * gen_opf() notes it, and anything that takes code back or reaches a label
+ * forgets it.  tp_fpu_take_resident() is the reader. */
+static struct {
+    int reg, off, end, db;
+} tp_fpr = { -1, -1, -1, 0 };
+
+static void tp_fpr_note(int reg, int off, int end, int db)
+{
+    tp_fpr.reg = reg;
+    tp_fpr.off = off;
+    tp_fpr.end = end;
+    tp_fpr.db = db;
+}
+
+static void tp_fpr_forget(void)
+{
+    tp_fpr.reg = -1;
 }

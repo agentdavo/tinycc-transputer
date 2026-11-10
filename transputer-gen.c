@@ -253,12 +253,6 @@ static void tp_areg_invalidate(void) { tp_areg_tag = TP_AREG_TAG_NONE; }
 
 #include "transputer-hist.h"
 
-/* The slot gen_opf last stored an FPU result to, and where that `ldlp slot;
- * fpstnl` is; see tp_fpu_take_resident(). */
-static int tp_fpr_reg = -1;
-static int tp_fpr_off = -1;
-static int tp_fpr_end = -1;
-static int tp_fpr_db;
 static int tp_fpu_take_resident(SValue *sv, int is_db);
 
 /* Fold `ADC k` into the word offset of the LDNL/STNL that follows it.
@@ -1005,7 +999,7 @@ static void transputer_func_reset(void) {
     jump_patch_count = 0;
     swtab_count = 0;
     tp_hist_clear();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     func_prologue_ajw_offset = -1;  /* Reset prologue offset */
     leave_ajw_count = 0;
     abcreg_stack_depth = 0;
