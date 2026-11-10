@@ -112,19 +112,6 @@ static int tcc_trace_func_active(void) {
     return strcmp(funcname, tcc_trace_func_name) == 0;
 }
 
-/* TCC_TRANSPUTER_WSUB_OPT=0 (bsub=0) or TCC_TRANSPUTER_BSUB_OPT=0 (bsub=1)
-   turns an indexed pointer-add lowering off, for A/B measurement.  Read
-   once: this is asked on every pointer addition. */
-static int tp_ptradd_opt_off(int bsub)
-{
-    static int off[2] = { -1, -1 };
-    if (off[bsub] < 0) {
-        const char *e = getenv(bsub ? "TCC_TRANSPUTER_BSUB_OPT"
-                                    : "TCC_TRANSPUTER_WSUB_OPT");
-        off[bsub] = e && !strcmp(e, "0");
-    }
-    return off[bsub];
-}
 #endif
 ST_DATA CType int_type, func_old_type, char_type, char_pointer_type;
 static CString initstr;
@@ -3937,92 +3924,33 @@ op_err:
 #endif
             type1 = vtop[-1].type;
 #ifdef TCC_TARGET_TRANSPUTER
-            {
-                int tp_ptradd_fast = 0;
-                /* A VLA element (a row of int m[r][c]) has a size known
-                   only at run time; its static size is that of a pointer,
-                   which would pass for a word and take wsub below. */
-                int tp_elem_size = pointed_type(&vtop[-1].type)->t & VT_VLA
-                                   ? 0 : pointed_size(&vtop[-1].type);
-#ifdef CONFIG_TCC_BCHECK
-                int tp_bounds_active = tcc_state->do_bounds_check && !CONST_WANTED;
-#else
-                int tp_bounds_active = 0;
-#endif
-                /* WSUB/WSUBDB compute base + index*4 (or *8) in one
-                 * instruction — the whole point of the transputer's indexed
-                 * addressing. Enabled by default; set
-                 * TCC_TRANSPUTER_WSUB_OPT=0 to fall back to the generic
-                 * multiply-then-add lowering. */
-                {
-                    int tp_wsub_enabled = !tp_ptradd_opt_off(0);
-
-                    /* None of these may fire while a constant expression is
-                     * being built. `&arr[1]` in a static initialiser is an
-                     * address constant that the generic lowering folds; the
-                     * indexed paths emit instructions instead, and the result
-                     * is rejected with "initializer element is not constant".
-                     *
-                     * nocode_wanted alone does NOT cover this: CONST_WANTED is
-                     * a distinct field of it (CONST_WANTED_MASK), and it is
-                     * what initialiser parsing sets. Guarding only on
-                     * nocode_wanted closed the offsetof case — a literal base —
-                     * but left this one open, and it reappeared the moment
-                     * symbol bases were allowed through. */
-                    if (CONST_WANTED)
-                        tp_wsub_enabled = 0;
-                    if (tp_wsub_enabled && op == '+' && tp_elem_size == 4 && !tp_bounds_active)
-                        tp_ptradd_fast = gen_ptradd_wsub();
-                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 8 && !tp_bounds_active)
-                        tp_ptradd_fast = gen_ptradd_wsubdb();
-                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 1
-                             && !tp_bounds_active) {
-                        /* separately gateable so the A/B can be measured */
-                        if (!tp_ptradd_opt_off(1))
-                            tp_ptradd_fast = gen_ptradd_bsub();
-                    }
-                    /* T9000 ssub (base + index*2); returns 0 unless -mt9000.
-                     * Distinct element size from the bsub path above, so the
-                     * two coexist. */
-                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 2 && !tp_bounds_active)
-                        tp_ptradd_fast = gen_ptradd_ssub();
-                }
-                if (!tp_ptradd_fast) {
-                    vpush_type_size(pointed_type(&vtop[-1].type), &align);
-                    vtop->type.t &= ~VT_UNSIGNED;
-                    gen_op('*');
+            /* One indexed instruction where the element size has one.
+               Not while a constant expression is being built: `&arr[1]` in
+               a static initialiser is an address constant that the generic
+               lowering folds, and instructions would make it "not
+               constant".  nocode_wanted alone does not cover that;
+               CONST_WANTED is the field of it that initialiser parsing
+               sets.  Not for `-` either.  A VLA element (a row of
+               int m[r][c]) has a size known only at run time; its static
+               size is a pointer's, which would pass for a word. */
+            if (op == '+' && !CONST_WANTED
+                && gen_ptradd_indexed(
+                       pointed_type(&vtop[-1].type)->t & VT_VLA
+                       ? 0 : pointed_size(&vtop[-1].type))) {
+                /* the address is on vtop */
+            } else {
+                vpush_type_size(pointed_type(&vtop[-1].type), &align);
+                vtop->type.t &= ~VT_UNSIGNED;
+                gen_op('*');
+                /* `bsub` computes A+B, so `-` stays a `diff` */
+                tp_ptradd_addr(op == '+');
+                gen_opic(op);
+                tp_ptradd_addr(0);
+            }
 #else
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             vtop->type.t &= ~VT_UNSIGNED;
             gen_op('*');
-#endif
-#ifdef TCC_TARGET_TRANSPUTER
-#ifdef CONFIG_TCC_BCHECK
-            if (tcc_state->do_bounds_check && !CONST_WANTED) {
-                /* if bounded pointers, we generate a special code to
-                   test bounds */
-                        if (op == '-') {
-                            vpushi(0);
-                            vswap();
-                            gen_op('-');
-                        }
-                        gen_bounded_ptr_add();
-                    } else
-#endif
-                    {
-                        /* The result of this add is an address, so it can go
-                         * on the T9000's spare stage-2 address slot instead
-                         * of the contended stage-4 ALU.  Only for `+`:
-                         * `bsub` computes A+B, so `-` must stay a `diff`. */
-                        int tp_saved = tp_ptr_add_is_addr;
-                        if (op == '+' && !tp_bounds_active
-                            && !tp_ptradd_opt_off(1))
-                            tp_ptr_add_is_addr = 1;
-                        gen_opic(op);
-                        tp_ptr_add_is_addr = tp_saved;
-                    }
-                }
-#else
 #ifdef CONFIG_TCC_BCHECK
             if (tcc_state->do_bounds_check && !CONST_WANTED) {
                 /* if bounded pointers, we generate a special code to
@@ -4037,8 +3965,8 @@ op_err:
 #endif
             {
                 gen_opic(op);
-#endif
             }
+#endif
             type1.t &= ~(VT_ARRAY|VT_VLA);
             /* put again type if gen_opic() swaped operands */
             vtop->type = type1;

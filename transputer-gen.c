@@ -225,6 +225,8 @@ static int tp_no_ldnlp(void)
  * Only for pointers.  On a signed integer `adc` is the error-*checking* add and
  * dropping the check would change behaviour under `t4 -se`; addresses cannot
  * meaningfully overflow, which is why tp_adc_would_trap already exempts them. */
+static int tp_ptr_add_is_addr;
+
 static int tp_addr_disp_words(int bytes)
 {
     if (tp_no_ldnlp())
@@ -236,7 +238,7 @@ static int tp_addr_disp_words(int bytes)
     return bytes >> 2;
 }
 
-/* Set by tccgen.c around the final `+` of a pointer computation.
+/* Set around the final `+` of a pointer computation (tp_ptradd_addr).
  *
  * `bsub` and `sum` compute the same thing (AReg + BReg, commutative), but the
  * T9000 grouper charges `bsub` to stage 2 (address calculations, 2 per cycle,
@@ -247,7 +249,6 @@ static int tp_addr_disp_words(int bytes)
  * What the flag still decides is the constant form: a pointer plus a whole
  * number of words becomes `ldnlp`, also stage 2 (tp_addr_disp_words), where an
  * integer keeps the error-checking `adc`. */
-ST_DATA int tp_ptr_add_is_addr;
 
 static void tp_areg_invalidate(void) { tp_areg_tag = TP_AREG_TAG_NONE; }
 
@@ -10784,7 +10785,7 @@ static int tp_ptradd_const_folds(void)
 }
 
 /* T800 fast path for pointer arithmetic on 4-byte (word) elements. */
-ST_FUNC int gen_ptradd_wsub(void) {
+static int gen_ptradd_wsub(void) {
     if (tp_ptradd_const_folds())
         return 0;
     /* Push index then base straight onto the eval stack, so `a[i]` becomes
@@ -10863,7 +10864,7 @@ static int gen_ptradd_wsub_gv2(void) {
  * through to the generic path, which folds them into a single `adc`.
  *
  * `bsub` is commutative, so unlike WSUB the operand order does not matter. */
-ST_FUNC int gen_ptradd_bsub(void) {
+static int gen_ptradd_bsub(void) {
     SValue sv_base, sv_index;
     int result_v;
 
@@ -10907,14 +10908,14 @@ ST_FUNC int gen_ptradd_bsub(void) {
  * Expects vstack: vtop[-1] = base pointer, vtop[0] = unscaled index.
  * TCWG wsubdb semantics: AReg = base, BReg = index → result = AReg + BReg * 8.
  * Returns 1 when emitted. */
-ST_FUNC int gen_ptradd_wsubdb(void);
+static int gen_ptradd_wsubdb(void);
 
 /* T9000 fast path for pointer arithmetic on 2-byte (16-bit) elements.
  * ssub: AReg := AReg + 2*BReg, i.e. the same operand order as WSUB.
  * Returns 0 without emitting anything when -mt9000 is off or when the
  * operands are not in the simple form, so the caller's generic
  * multiply-then-add lowering still runs. */
-ST_FUNC int gen_ptradd_ssub(void) {
+static int gen_ptradd_ssub(void) {
     if (!tp_have_t9000_feat(TP_T9K_SSUB))
         return 0;
     if (tp_ptradd_const_folds())
@@ -10948,7 +10949,7 @@ ST_FUNC int gen_ptradd_ssub(void) {
     return 0;
 }
 
-ST_FUNC int gen_ptradd_wsubdb(void) {
+static int gen_ptradd_wsubdb(void) {
     SValue sv_base, sv_index;
     int result_v;
 
@@ -10994,6 +10995,52 @@ ST_FUNC int gen_ptradd_wsubdb(void) {
         Tp_STL(result_v);
     }
     return 1;
+}
+
+/* TCC_TRANSPUTER_WSUB_OPT=0 (bsub=0) or TCC_TRANSPUTER_BSUB_OPT=0 (bsub=1)
+   turns an indexed pointer-add lowering off, for A/B measurement.  Read
+   once: this is asked on every pointer addition. */
+static int tp_ptradd_opt_off(int bsub)
+{
+    static int off[2] = { -1, -1 };
+    if (off[bsub] < 0) {
+        const char *e = getenv(bsub ? "TCC_TRANSPUTER_BSUB_OPT"
+                                    : "TCC_TRANSPUTER_WSUB_OPT");
+        off[bsub] = e && !strcmp(e, "0");
+    }
+    return off[bsub];
+}
+
+/* base + index*elem_size in one indexed instruction - the whole point of
+ * the transputer's indexed addressing.  vtop[-1] is the base, vtop[0] the
+ * unscaled index.  Returns 0, with nothing emitted, where the element size
+ * has no such instruction on this part or the generic multiply-then-add
+ * does better. */
+ST_FUNC int gen_ptradd_indexed(int elem_size)
+{
+    if (tp_ptradd_opt_off(0))
+        return 0;
+    switch (elem_size) {
+    case 4:
+        return gen_ptradd_wsub();
+    case 8:
+        return gen_ptradd_wsubdb();
+    case 1:
+        /* separately gateable so the A/B can be measured */
+        return tp_ptradd_opt_off(1) ? 0 : gen_ptradd_bsub();
+    case 2:
+        /* T9000 only; a distinct element size from bsub's */
+        return gen_ptradd_ssub();
+    }
+    return 0;
+}
+
+/* The add tccgen.c does between tp_ptradd_addr(1) and tp_ptradd_addr(0)
+ * yields an address, so it can go on the T9000's spare stage-2 address
+ * slot instead of the contended stage-4 ALU (tp_addr_disp_words). */
+ST_FUNC void tp_ptradd_addr(int on)
+{
+    tp_ptr_add_is_addr = on && !tp_ptradd_opt_off(1);
 }
 
 static int tp_mul_const_strength(long c, int *out)

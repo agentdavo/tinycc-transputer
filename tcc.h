@@ -1913,12 +1913,14 @@ ST_FUNC void tp_cmp_hint_branch_true(int on);
 /* A call to a transputer builtin: parse its arguments and generate it.
    Returns 0 if `tok` is not one. */
 ST_FUNC int gen_transputer_builtin_call(int tok);
-/* T800 pointer arithmetic fast paths */
-ST_DATA int tp_ptr_add_is_addr;       /* final `+` of a pointer computation */
-ST_FUNC int gen_ptradd_bsub(void);    /* base + index   via BSUB */
-ST_FUNC int gen_ptradd_wsub(void);    /* base + index*4 via WSUB */
-ST_FUNC int gen_ptradd_wsubdb(void);  /* base + index*8 via WSUBDB */
-ST_FUNC int gen_ptradd_ssub(void);    /* base + index*2 via SSUB (T9000, -mt9000) */
+/* Pointer + integer: vtop[-1] is the pointer, vtop[0] the unscaled index.
+   gen_ptradd_indexed() returns 1 having left base + index*elem_size on
+   vtop with one indexed instruction (wsub, wsubdb, bsub, ssub or ldnlp),
+   or 0 having emitted nothing.  The caller then scales the index and
+   adds, and brackets that add with tp_ptradd_addr(1) .. tp_ptradd_addr(0)
+   to say its result is an address. */
+ST_FUNC int gen_ptradd_indexed(int elem_size);
+ST_FUNC void tp_ptradd_addr(int on);
 ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym);
 /* an expression statement, or a for loop's init or step, is complete */
 ST_FUNC void tp_stmt_end(void);
