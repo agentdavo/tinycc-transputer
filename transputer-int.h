@@ -731,10 +731,7 @@ static void tp_roll_back_to(int off)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
-    tp_last_opc = tp_prev_opc = -1;
-    tp_last_off = tp_last_end = tp_prev_off = tp_prev_end = -1;
 }
 
 /* gtu (opr 0x5F) arrived with the T9000: the T414/T425/T800/T805

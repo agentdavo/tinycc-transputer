@@ -253,14 +253,7 @@ static int tp_addr_disp_words(int bytes)
 
 static void tp_areg_invalidate(void) { tp_areg_tag = TP_AREG_TAG_NONE; }
 
-/* Tracks the STL that was emitted most recently, so a matching LDL of the same
- * workspace-slot register can cancel it instead of round-tripping the value
- * through memory. Valid only while tp_last_stl_end == ind, i.e. while nothing
- * whatsoever has been emitted since — which also makes raw g() byte writes
- * invalidate it for free. */
-static int tp_last_stl_reg = -1;
-static int tp_last_stl_off = -1;
-static int tp_last_stl_end = -1;
+#include "transputer-hist.h"
 
 /* The slot gen_opf last stored an FPU result to, and where that `ldlp slot;
  * fpstnl` is; see tp_fpu_take_resident(). */
@@ -269,94 +262,6 @@ static int tp_fpr_off = -1;
 static int tp_fpr_end = -1;
 static int tp_fpr_db;
 static int tp_fpu_take_resident(SValue *sv, int is_db);
-
-/* Same idea, but for the immediately preceding instruction of any kind. Used
- * to fold a constant address adjustment into the following non-local access. */
-static int tp_last_opc = -1;
-static int tp_last_val = 0;
-static int tp_last_off = -1;
-static int tp_last_end = -1;
-
-/* One further back, so that cancelling a store can re-expose the instruction
- * that preceded it — typically the ADC whose offset we then want to fold into
- * the following LDNL/STNL. */
-static int tp_prev_opc = -1;
-static int tp_prev_val = 0;
-static int tp_prev_off = -1;
-static int tp_prev_end = -1;
-
-/* A short trailing window of emitted instructions.
- *
- * The two trackers above only reach one and two instructions back, which is
- * enough to fold `ADC k` into the LDNL that immediately follows it. The store
- * path needs more: by the time store() runs, the address has been computed,
- * offset and spilled, and the whole RHS has been emitted on top of it, so the
- * ADC is four or more instructions behind the STNL. Keeping a small window of
- * what was emitted lets store() roll the tail back and rebuild it in the order
- * the T9000 wants.
- *
- * Only instructions emitted through emit_instr() and emit_local_op() are
- * recorded. Anything written with a raw g() — LDC_ABS relocation placeholders,
- * jump placeholders — leaves a gap that the contiguity check below detects, so
- * those invalidate the window for free, exactly as they do for tp_last_*. */
-#define TP_HIST_N 24
-#define TP_HIST_INSTR 0    /* emitted by emit_instr(): val is the operand   */
-#define TP_HIST_LOCAL 1    /* emitted by emit_local_op(): val is a byte offset */
-
-struct tp_hist_ent {
-    int kind;
-    int opc;
-    int val;
-    int off;
-    int end;
-};
-
-/* hist[0] is the most recently emitted instruction. */
-static struct tp_hist_ent tp_hist[TP_HIST_N];
-static int tp_hist_n;
-
-static void tp_hist_clear(void)
-{
-    tp_hist_n = 0;
-}
-
-/* Code from `off` onwards has been rolled back; forget it. */
-static void tp_hist_rollback(int off)
-{
-    while (tp_hist_n > 0 && tp_hist[0].end > off) {
-        int i;
-        for (i = 0; i < tp_hist_n - 1; i++)
-            tp_hist[i] = tp_hist[i + 1];
-        tp_hist_n--;
-    }
-}
-
-static void tp_hist_record(int kind, int opc, int val, int off, int end)
-{
-    int i;
-    for (i = (tp_hist_n < TP_HIST_N ? tp_hist_n : TP_HIST_N - 1); i > 0; i--)
-        tp_hist[i] = tp_hist[i - 1];
-    tp_hist[0].kind = kind;
-    tp_hist[0].opc = opc;
-    tp_hist[0].val = val;
-    tp_hist[0].off = off;
-    tp_hist[0].end = end;
-    if (tp_hist_n < TP_HIST_N)
-        tp_hist_n++;
-}
-
-static void tp_stl_track_clear(void)
-{
-    tp_last_stl_reg = -1;
-    tp_last_stl_off = -1;
-    tp_last_stl_end = -1;
-    tp_last_opc = -1;
-    tp_last_off = -1;
-    tp_last_end = -1;
-    tp_prev_opc = -1;
-    tp_prev_off = -1;
-    tp_prev_end = -1;
-}
 
 /* Fold `ADC k` into the word offset of the LDNL/STNL that follows it.
  *
@@ -372,38 +277,38 @@ static void tp_stl_track_clear(void)
 static int tp_fold_adc_into_nonlocal(int base_words)
 {
     int words;
+    const struct tp_hist_ent *last;
 
     /* Never rewind under nocode_wanted: emission is suppressed, so `ind` is
      * frozen and the trackers may describe *live* pre-region code.  Folding
      * would delete that code while the replacement is itself suppressed. */
     if (nocode_wanted)
         return base_words;
-    if ((tp_last_opc != TP_OP_ADC && tp_last_opc != TP_OP_LDNLP) ||
-        tp_last_end != ind || tp_last_off < 0)
+    last = tp_hist_last_instr();
+    if (!last || (last->opc != TP_OP_ADC && last->opc != TP_OP_LDNLP))
         return base_words;
-    if (tp_last_off < func_start_ind)
+    if (last->off < func_start_ind)
         return base_words;
-    if (tp_last_val == 0)
+    if (last->val == 0)
         return base_words;
-    if (tp_last_opc == TP_OP_LDNLP) {
+    if (last->opc == TP_OP_LDNLP) {
         /* LDNLP already carries a word displacement.  Folding it away is still
          * a win: the access resolves the displacement itself, so this removes
          * an instruction as well as a stage-2 slot. */
-        words = base_words + tp_last_val;
+        words = base_words + last->val;
     } else {
-        if (tp_last_val & 3)
+        if (last->val & 3)
             return base_words;
-        words = base_words + (tp_last_val >> 2);
+        words = base_words + (last->val >> 2);
     }
     /* Keep the folded form to encodings that are no longer than what we
      * removed; a huge displacement would just move the prefix bytes around. */
     if (words < 0 || words > 4095)
         return base_words;
 
-    ind = tp_last_off;
+    ind = last->off;
     cur_text_section->data_offset = ind;
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     return words;
 }
 
@@ -432,27 +337,16 @@ static int tp_reg_live_on_vstack(int r, SValue *except)
 static int tp_push_reg_or_cancel_stl(int r, SValue *except)
 {
     /* See tp_fold_adc_into_nonlocal: no rollback while emission is off. */
-    if (!nocode_wanted &&
-        tp_last_stl_reg == r && tp_last_stl_end == ind &&
-        tp_last_stl_off >= 0 && tp_last_stl_off >= func_start_ind &&
-        !tp_reg_live_on_vstack(r, except)) {
-        int roll_to = tp_last_stl_off;
-        int p_opc = tp_prev_opc, p_val = tp_prev_val;
-        int p_off = tp_prev_off, p_end = tp_prev_end;
+    int roll_to = tp_hist_last_stl(r);
 
+    if (!nocode_wanted && roll_to >= 0 && roll_to >= func_start_ind &&
+        !tp_reg_live_on_vstack(r, except)) {
         ind = roll_to;
         cur_text_section->data_offset = ind;
-        tp_hist_rollback(ind);
-        tp_stl_track_clear();
         /* The instruction before the cancelled store is once again the last
-         * thing emitted, so re-expose it — otherwise a preceding ADC can no
-         * longer be folded into the LDNL/STNL that follows. */
-        if (p_end == roll_to) {
-            tp_last_opc = p_opc;
-            tp_last_val = p_val;
-            tp_last_off = p_off;
-            tp_last_end = p_end;
-        }
+         * thing emitted: a preceding ADC can still be folded into the
+         * LDNL/STNL that follows. */
+        tp_hist_rollback_keep_last(ind);
         tp_areg_invalidate();
         abcreg_push(1);
         return 1;
@@ -1328,7 +1222,6 @@ static void emit_instr(int opc, int v) {
         ind = tp_hist[0].off;
         cur_text_section->data_offset = ind;
         tp_hist_rollback(ind);
-        tp_stl_track_clear();
         start_off = ind;
         v = v == TP_FPU_LDNLSN ? TP_OPR_FPLDNLSNI : TP_OPR_FPLDNLDBI;
     }
@@ -1342,7 +1235,7 @@ static void emit_instr(int opc, int v) {
          *
          * Every rule that rewrites already-emitted code decides it is safe by
          * checking that nothing has been emitted since - and it tests that
-         * with `tp_last_stl_end == ind`.  While emission is suppressed `ind`
+         * by the newest entry of the window ending at `ind`.  While emission is suppressed `ind`
          * does not move, so a whole parenthesised expression can go by without
          * disturbing the trackers, and a rule then matches an instruction from
          * *before* the suppressed region against one from after it.
@@ -1357,7 +1250,6 @@ static void emit_instr(int opc, int v) {
          * exactly this shape, which made cpu_capacity_span() return the struct
          * base instead of its ->cpus member; __set_bit then OR'd a bit into a
          * list pointer and asym_cpu_capacity_scan() looped forever. */
-        tp_stl_track_clear();
         tp_hist_clear();
         return;
     }
@@ -1366,21 +1258,6 @@ static void emit_instr(int opc, int v) {
     for (i = 0; i < len; i++) {
         g(buf[i]);
     }
-    if (opc == TP_OP_STL && v >= 0 && v < NB_REGS) {
-        tp_last_stl_reg = v;
-        tp_last_stl_off = start_off;
-        tp_last_stl_end = ind;
-    } else {
-        tp_stl_track_clear();
-    }
-    tp_prev_opc = tp_last_opc;
-    tp_prev_val = tp_last_val;
-    tp_prev_off = tp_last_off;
-    tp_prev_end = tp_last_end;
-    tp_last_opc = opc;
-    tp_last_val = v;
-    tp_last_off = start_off;
-    tp_last_end = ind;
     tp_hist_record(TP_HIST_INSTR, opc, v, start_off, ind);
     tp_trace_emit_bytes("emit_instr", start_off, ind);
 }
@@ -2863,7 +2740,6 @@ static int tp_store_swap_addr_value(int r, SValue *v, int vr, int is_lval)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(roll_to);
     tp_hist_clear();
-    tp_stl_track_clear();
     tp_areg_invalidate();
 
     /* Value first: STNL wants AReg = address, BReg = value, and pushing the
@@ -2895,8 +2771,7 @@ static int tp_store_addr_cancels_stl(SValue *v, int vr, int is_lval)
     if (is_lval && v->c.i < 0)
         return 0;
     return !nocode_wanted
-        && tp_last_stl_reg == vr && tp_last_stl_end == ind
-        && tp_last_stl_off >= 0 && tp_last_stl_off >= func_start_ind
+        && tp_hist_last_stl(vr) >= 0 && tp_hist_last_stl(vr) >= func_start_ind
         && !tp_reg_live_on_vstack(vr, v);
 }
 
@@ -3424,7 +3299,6 @@ ST_FUNC void gsym_addr(int t, int a)
     struct jump_patch_meta *meta;
 
     /* Code at `a` is now a branch target; nothing may be rolled back over it. */
-    tp_stl_track_clear();
     tp_hist_clear();
 
     /* Control-flow joins cannot safely rely on the previous virtual ABC/FPU
@@ -6551,7 +6425,6 @@ ST_FUNC void gfunc_leave(void)
     /* Nothing reaches the code after this but a jump to a label. */
     abcreg_stack_depth = 0;
     tp_hist_clear();
-    tp_stl_track_clear();
     tp_areg_invalidate();
 }
 

@@ -169,7 +169,6 @@ static int tp_fpu_take_resident(SValue *sv, int is_db)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
     for (i = 0; i < n; i++) {
@@ -490,7 +489,6 @@ static int tp_stmt_double_store_mem(struct tp_hist_ent *w, int *keep, int *mod,
 ST_FUNC void tp_label_here(void)
 {
     tp_hist_clear();
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
 }
@@ -650,7 +648,6 @@ ST_FUNC void tp_stmt_end(void)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
     for (j = first; j < n; j++) {
@@ -831,7 +828,6 @@ static int tp_fpu_take_under(SValue *sv, int is_db)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
     for (i = 0; i < n; i++) {
@@ -1073,7 +1069,6 @@ static int tp_fpu_take_moved(SValue *sv, int is_db)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
     for (j = 0; j < 2; j++) {
@@ -1134,7 +1129,6 @@ static int tp_fpu_load_early(SValue *sv, int is_db)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
     emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
@@ -1254,7 +1248,6 @@ static int tp_fpu_square_twin(SValue *sv, int is_db)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(ind);
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     tp_areg_invalidate();
     tp_fpr_reg = -1;
     return 1;
@@ -1290,7 +1283,7 @@ static int tp_fpu_addr_just_parked(SValue *sv)
     int v = sv->r & VT_VALMASK;
 
     return (sv->r & VT_LVAL) && !(sv->r & VT_SYM) && v < VT_CONST &&
-           sv->c.i >= 0 && tp_last_stl_reg == v && tp_last_stl_end == ind;
+           sv->c.i >= 0 && tp_hist_last_stl(v) >= 0;
 }
 
 /* Unary minus: flip the sign bit.  0.0 - x is not negation: it gives
