@@ -1157,6 +1157,113 @@ static int tp_fpu_indexed_ok(void)
     return ok;
 }
 
+/******************************************************/
+/* Basic byte emit helpers                            */
+/******************************************************/
+ST_FUNC void g(int c)
+{
+    int ind1;
+    static int last_byte = -1;
+    static int nfix_opr_log_count = 0;
+    static int nfix_opr_warn;
+    static int prefix_count = 0;
+    static int call_log_count = 0;
+    static int call_log_limit;
+    static int call_log_short;
+    static const char *call_log_filter;
+    static int env_read;
+    if (nocode_wanted)
+        return;
+    if (!cur_text_section)
+        return;
+    /* Read the trace knobs once: this runs for every byte emitted. */
+    if (!env_read) {
+        const char *env;
+        env = getenv("T4_NFIX_OPR_WARN");
+        nfix_opr_warn = env && *env ? atoi(env) : 0;
+        env = getenv("T4_CALL_EMIT_TRACE");
+        call_log_limit = env && *env ? atoi(env) : 0;
+        env = getenv("T4_CALL_EMIT_SHORT");
+        call_log_short = env && *env ? atoi(env) : 0;
+        call_log_filter = getenv("T4_CALL_EMIT_FILTER");
+        env_read = 1;
+    }
+    ind1 = ind + 1;
+    if (ind1 > cur_text_section->data_allocated)
+        section_realloc(cur_text_section, ind1);
+    cur_text_section->data[ind] = c;
+    if (nfix_opr_warn && nfix_opr_log_count < 64
+        && last_byte >= 0
+        && ((last_byte & 0xF0) == 0x60)
+        && ((c & 0xF0) == 0xF0)) {
+        const char *fname = file ? file->filename : "<unknown>";
+        const char *func = funcname ? funcname : "<no func>";
+        fprintf(stderr, "WARN: g(): NFIX->OPR sequence 0x%02X 0x%02X at offset=0x%x file=%s func=%s\n",
+                last_byte, c, ind, fname, func);
+        nfix_opr_log_count++;
+    }
+    /* Note: 0xF3 is a valid Transputer instruction byte (OPR 3).
+     * When preceded by PFIX 3 (0x23), it encodes OPR 0x33 = XOR.
+     * This is used legitimately in unsigned comparison code.
+     * Do NOT intercept or replace this byte! */
+    ind = ind1;
+    /* Keep data_offset in sync with ind */
+    if (ind > cur_text_section->data_offset)
+        cur_text_section->data_offset = ind;
+    last_byte = c;
+
+    if ((c & 0xF0) == 0x20 || (c & 0xF0) == 0x60) {
+        prefix_count++;
+    } else {
+        if (call_log_limit > 0 && call_log_count < call_log_limit) {
+            int opc = c & 0xF0;
+            if (opc == 0x90 || opc == 0x00 || opc == 0xA0) {
+                const char *fname = file ? file->filename : "<unknown>";
+                const char *func = funcname ? funcname : "<no func>";
+                fprintf(stderr,
+                        "CALL_EMIT: byte=0x%02X prefixes=%d offset=0x%x file=%s func=%s\n",
+                        c, prefix_count, ind - 1, fname, func);
+                call_log_count++;
+            }
+        } else if (call_log_short > 0 && call_log_count < call_log_short) {
+#define TP_IPREL_NIBBLES 9
+
+            int opc = c & 0xF0;
+            if ((opc == 0x90 || opc == 0x00 || opc == 0xA0) &&
+                prefix_count < (TP_IPREL_NIBBLES - 1)) {
+                const char *fname = file ? file->filename : "<unknown>";
+                const char *func = funcname ? funcname : "<no func>";
+                if (call_log_filter && *call_log_filter) {
+                    if (!strstr(fname, call_log_filter) &&
+                        (!func || !strstr(func, call_log_filter))) {
+                        prefix_count = 0;
+                        return;
+                    }
+                }
+                fprintf(stderr,
+                        "CALL_EMIT_SHORT: byte=0x%02X prefixes=%d offset=0x%x file=%s func=%s\n",
+                        c, prefix_count, ind - 1, fname, func);
+                call_log_count++;
+            }
+        }
+        prefix_count = 0;
+    }
+}
+
+ST_FUNC void gen_le16(int v)
+{
+    g(v);
+    g(v >> 8);
+}
+
+ST_FUNC void gen_le32(int v)
+{
+    g(v);
+    g(v >> 8);
+    g(v >> 16);
+    g(v >> 24);
+}
+
 /* Classify only the direct workspace opcodes; callers apply their own
  * operand bounds and account for any indirect access following LDLP. */
 static int tp_is_direct_workspace_op(int opc)
