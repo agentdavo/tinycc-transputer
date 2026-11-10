@@ -31,6 +31,7 @@
     K(TCC_TRANSPUTER_LDIFF_CMP, "0...: unsigned compares flip signs instead of using ldiff") \
     K(TCC_TRANSPUTER_SHIFT_MASK, "0...: no byte load in place of a shift and mask") \
     K(TCC_TRANSPUTER_VPOP_DEAD, "0...: keep dead parking at statement end; 2...: report each removal") \
+    K(TCC_TRANSPUTER_DBL_MEM_STORE, "0...: a double result is copied to memory word by word, not stored by the FPU") \
     K(TCC_TRANSPUTER_VPOP_ONLY, "name: dead-parking removal only in functions whose name contains it") \
     K(TCC_TRANSPUTER_FPSTACK, "0...: no FPU-stack residency; 2...: report") \
     K(TCC_TRANSPUTER_FPSTACK_ONLY, "name: FPU-stack residency only in functions whose name contains it") \

@@ -10187,7 +10187,7 @@ static int tp_stmt_double_store_mem(struct tp_hist_ent *w, int *keep, int *mod,
     int q[12], count = 0, i, x, hi, p, f;
 
     if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_DBL_MEM_STORE");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_DBL_MEM_STORE);
         off = e && *e == '0';
     }
     if (off || w[a].kind != TP_HIST_INSTR || w[a].opc != TP_OP_LDLP ||
