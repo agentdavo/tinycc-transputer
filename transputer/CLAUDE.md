@@ -874,9 +874,10 @@ the occam compiler does, and what new codegen should be held to:
   functions keep the register path.  Doom's R_DrawColumn -1.3%, ~100
   bytes less code; `test_deref_local_ptr.c`.
 
-- `-mjump-tables` (off by default; `-mno-jump-tables`, and
-  `T4_SWITCH_JT=1` still works) compiles a dense switch - more than six
-  selectors, at least a third of the span used - to a table of jumps
+- Jump tables are on by default since 2026-11-10 (`-mno-jump-tables` or
+  `T4_SWITCH_JT=0` for the compare chain; linux-7 boots with 101 of them,
+  boot cycles unchanged).  A dense switch - more than six
+  selectors, at least a third of the span used - compiles to a table of jumps
   (`gen_switch_jump_table`): `ldc 0; ldl x; ldc n; ldiff; rev; cj default`
   (one unsigned test of x - base for both ends; `gtu` on the T9000), then
   `ldl x; ldc 2; ldpi; wsub; gcall` and a four-byte `j` for each index, 11

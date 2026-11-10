@@ -899,6 +899,7 @@ LIBTCCAPI TCCState *tcc_new(void)
        identical CRCs. Pass -mt805 to fall back to the T805 subset; TVX
        needs -mt9000tvx. */
     s->tp_isa = TP_ISA_T9000;
+    s->tp_jump_tables = 1;
 #endif
 
 #ifdef CHAR_IS_UNSIGNED

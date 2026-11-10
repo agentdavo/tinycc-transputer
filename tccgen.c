@@ -9029,11 +9029,12 @@ again:
 #ifdef TCC_TARGET_TRANSPUTER
         {
             /*
-             * Jump tables for dense switches are off unless -mjump-tables
-             * (or T4_SWITCH_JT=1) asks for them: the first version was
-             * implicated in intermittent maple_tree wr_invalid BUGs (enum
-             * store_type) during early kernel boot, which nobody has
-             * retested since.  gcase() compares.
+             * A dense switch goes through a jump table unless
+             * -mno-jump-tables (or T4_SWITCH_JT=0) says to compare with
+             * gcase().  They were off until 2026-11-10: the first version
+             * was suspected of intermittent maple_tree wr_invalid BUGs
+             * during early kernel boot, which the reworked tables do not
+             * show.
              */
             const char *jt = tp_knob(TPK_T4_SWITCH_JT);
             int use_jt = tcc_state->tp_jump_tables;
