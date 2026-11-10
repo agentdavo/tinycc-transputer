@@ -1926,8 +1926,9 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym);
 ST_FUNC void tp_stmt_end(void);
 /* the current pc is a jump target (gind(): loop heads, case labels) */
 ST_FUNC void tp_label_here(void);
-/* an operand of the binary operation gen_op is doing is volatile */
-ST_DATA int tp_opf_volatile;
+/* gen_op says whether an operand of the binary operation it is about to do
+   is a volatile read; returns the previous setting, to give back after it */
+ST_FUNC int tp_opf_set_volatile(int on);
 /* char/short to int conversion via XWORD sign extension */
 ST_FUNC void gen_cvt_csti(int t);
 

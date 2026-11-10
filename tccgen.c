@@ -3608,10 +3608,10 @@ ST_FUNC void gen_op(int op)
     /* The arithmetic conversion gives both operands the unqualified common
        type before the back end sees them: tell it whether either was a
        volatile read, which must not be merged with another. */
-    int saved_volatile = tp_opf_volatile;
-    tp_opf_volatile = ((vtop[-1].type.t | vtop[0].type.t) & VT_VOLATILE) != 0;
+    int saved_volatile = tp_opf_set_volatile(
+        ((vtop[-1].type.t | vtop[0].type.t) & VT_VOLATILE) != 0);
     gen_op1(op);
-    tp_opf_volatile = saved_volatile;
+    tp_opf_set_volatile(saved_volatile);
     if (narrow)
         gen_cast_s(VT_FLOAT16);
 }

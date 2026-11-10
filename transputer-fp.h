@@ -1141,7 +1141,19 @@ static int tp_fpu_load_early(SValue *sv, int is_db)
     return 1;
 }
 
-ST_DATA int tp_opf_volatile;
+/* An operand of the binary operation gen_op() is doing is a volatile read,
+ * which must not be merged with another.  The arithmetic conversion gives
+ * both operands the unqualified common type before gen_opf() sees them, so
+ * the front end says so here, and gives back the returned setting after. */
+static int tp_opf_volatile;
+
+ST_FUNC int tp_opf_set_volatile(int on)
+{
+    int was = tp_opf_volatile;
+
+    tp_opf_volatile = on;
+    return was;
+}
 
 /* Does an object of type t hold, at byte off, a scalar of basic type bt that
  * is not volatile?  Through arrays (off modulo the element size) and the

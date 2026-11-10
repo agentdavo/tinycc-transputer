@@ -157,7 +157,7 @@ static void tp_ldc_pooled(int v);
 static void Tp_STL(int v);
 static void Tp_LDL(int v);
 static void abcreg_push(int count);
-static int func_start_ind;
+static int func_start_ind = -1;  /* where the function being compiled begins */
 
 /* DUP optimization: track what's in AReg after tp_push_sv().
  * If next push wants the same value, emit DUP instead of reloading.
@@ -758,7 +758,6 @@ static int func_frame_reserved = FRAME_SLOT_MIN_LOCALS;
  * read by the evaluation-stack scheduler. */
 static int func_frame_words;
 extern const char *funcname;
-static int func_start_ind = -1;
 static int func_start_nsym;   /* symtab size when the function began */
 static int func_start_nrel;   /* its code section's relocation count then */
 static Sym *func_start_sym;   /* the function itself */
