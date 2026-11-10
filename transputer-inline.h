@@ -1,0 +1,607 @@
+/*
+ *  Transputer: inline functions - calls expanded in place, and the sections
+ *  the out-of-line copies go to.
+ *
+ *  Code, not declarations: tccgen.c includes this once, under
+ *  TCC_TARGET_TRANSPUTER, ahead of unary(), because it parses with tccgen.c's
+ *  static state (the value stack, scopes, `loc`, the token stream).  tccgen.c
+ *  uses three functions of it:
+ *
+ *    tp_inline_call()            at each call, before gfunc_call()
+ *    tp_inline_function_start()  as each function body begins
+ *    resolve_inline_sections()   before gen_inline_functions() emits anything
+ */
+
+static void new_scope(struct scope *o);
+static void prev_scope(struct scope *o, int is_expr);
+
+/* ------------------------------------------------------------------ */
+/* Sections of the out-of-line copies */
+
+/* TinyCC does not perform general source-level inlining.  It records an
+   inline definition and emits one out-of-line copy if the definition is
+   referenced.  Record the sections of calls from normal functions here;
+   resolve_inline_sections later combines these roots with the complete graph
+   of deferred inline bodies before any outline is emitted. */
+static void note_inline_call_section(SValue *call_target)
+{
+    Sym *call_sym;
+    int i;
+
+    if (!cur_text_section || nocode_wanted
+        || !(call_target->r & VT_SYM) || !call_target->sym)
+        return;
+
+    call_sym = call_target->sym;
+    for (i = 0; i < tcc_state->nb_inline_fns; ++i) {
+        InlineFunc *fn = tcc_state->inline_fns[i];
+        Sym *inline_sym = fn->sym;
+
+        if (!inline_sym)
+            continue;
+        if (inline_sym != call_sym
+            && (!inline_sym->v || inline_sym->v != call_sym->v))
+            continue;
+        if (fn->section || fn->call_section_conflict)
+            return;
+        if (!fn->call_section)
+            fn->call_section = cur_text_section;
+        else if (fn->call_section != cur_text_section)
+            fn->call_section_conflict = 1;
+        return;
+    }
+}
+
+typedef struct InlineSectionEdge {
+    int callee;
+    unsigned char indirect;
+} InlineSectionEdge;
+
+typedef struct InlineSectionNode {
+    InlineSectionEdge *edges;
+    int nb_edges;
+    Section *placement;
+    unsigned char reachable;
+} InlineSectionNode;
+
+static void add_inline_section_edge(InlineSectionNode *node, int callee,
+                                    int indirect)
+{
+    InlineSectionEdge *edge;
+    int i;
+
+    for (i = 0; i < node->nb_edges; ++i) {
+        edge = &node->edges[i];
+        if (edge->callee == callee) {
+            if (indirect)
+                edge->indirect = 1;
+            return;
+        }
+    }
+    node->edges = tcc_realloc(node->edges,
+                              (node->nb_edges + 1) * sizeof *node->edges);
+    edge = &node->edges[node->nb_edges++];
+    edge->callee = callee;
+    edge->indirect = indirect;
+}
+
+/* Build a conservative call graph from the already-preprocessed token
+   strings.  A function-name token immediately followed by '(' is a direct
+   edge.  Any other reference may escape through a pointer, so it forces the
+   referenced outline to ordinary .text once its containing function is
+   reachable. */
+static void scan_inline_section_edges(TCCState *s, InlineSectionNode *nodes,
+                                      int *by_token, int caller)
+{
+    TokenString stream;
+    int pending = -1;
+
+    stream = *s->inline_fns[caller]->func_str;
+    begin_macro(&stream, 0);
+    next();
+    while (tok != TOK_EOF) {
+        if (pending >= 0) {
+            add_inline_section_edge(&nodes[caller], pending, tok != '(');
+            pending = -1;
+        }
+        if (tok >= TOK_IDENT && tok < tok_ident && by_token[tok])
+            pending = by_token[tok] - 1;
+        next();
+    }
+    if (pending >= 0)
+        add_inline_section_edge(&nodes[caller], pending, 1);
+    end_macro();
+}
+
+static Section *join_inline_section(Section *old, Section *incoming)
+{
+    if (!old)
+        return incoming;
+    if (old == incoming)
+        return old;
+    /* Ordinary .text is the conservative top of the placement lattice. */
+    return text_section;
+}
+
+/* Resolve all deferred-inline placements before emitting any of them.
+
+   Parsing an outline can make another outline live.  Deciding placement at
+   that point is order-dependent: an .init.text path may be seen before a
+   later permanent path to the same callee.  Instead, seed this graph with
+   calls from normal functions, then propagate reachability and section joins
+   to a fixed point.  Explicit section attributes are barriers and remain
+   authoritative.  Address escapes, conflicting callers, and unknown roots
+   use ordinary .text. */
+static void resolve_inline_sections(TCCState *s)
+{
+    InlineSectionNode *nodes;
+    int *by_token;
+    unsigned char *scanned;
+    int changed, i, j;
+
+    nodes = tcc_mallocz(s->nb_inline_fns * sizeof *nodes);
+    by_token = tcc_mallocz(tok_ident * sizeof *by_token);
+    scanned = tcc_mallocz(s->nb_inline_fns);
+    for (i = 0; i < s->nb_inline_fns; ++i) {
+        InlineFunc *fn = s->inline_fns[i];
+        if (fn->sym && fn->sym->v >= TOK_IDENT && fn->sym->v < tok_ident)
+            by_token[fn->sym->v] = i + 1;
+    }
+    for (i = 0; i < s->nb_inline_fns; ++i) {
+        InlineFunc *fn = s->inline_fns[i];
+        Sym *sym = fn->sym;
+
+        if (!sym)
+            continue;
+        if (sym->c || !(sym->type.t & VT_INLINE)) {
+            nodes[i].reachable = 1;
+            if (fn->section)
+                nodes[i].placement = fn->section;
+            else if (sym->a.addrtaken || fn->call_section_conflict
+                     || !fn->call_section)
+                nodes[i].placement = text_section;
+            else
+                nodes[i].placement = fn->call_section;
+        }
+    }
+
+    do {
+        changed = 0;
+        for (i = 0; i < s->nb_inline_fns; ++i) {
+            InlineSectionNode *caller = &nodes[i];
+
+            if (!caller->reachable || !caller->placement)
+                continue;
+            if (!scanned[i]) {
+                scan_inline_section_edges(s, nodes, by_token, i);
+                scanned[i] = 1;
+            }
+            for (j = 0; j < caller->nb_edges; ++j) {
+                InlineSectionEdge *edge = &caller->edges[j];
+                InlineSectionNode *callee = &nodes[edge->callee];
+                InlineFunc *callee_fn = s->inline_fns[edge->callee];
+                Sym *callee_sym = callee_fn->sym;
+                Section *incoming, *joined;
+
+                if (!callee_sym)
+                    continue;
+                if (!callee->reachable) {
+                    callee->reachable = 1;
+                    changed = 1;
+                }
+                if (callee_fn->section) {
+                    joined = callee_fn->section;
+                } else {
+                    incoming = edge->indirect ? text_section
+                                              : caller->placement;
+                    if (callee_sym->a.addrtaken)
+                        incoming = text_section;
+                    joined = join_inline_section(callee->placement, incoming);
+                }
+                if (joined != callee->placement) {
+                    callee->placement = joined;
+                    changed = 1;
+                }
+            }
+        }
+    } while (changed);
+    tcc_free(scanned);
+    tcc_free(by_token);
+
+    for (i = 0; i < s->nb_inline_fns; ++i) {
+        InlineFunc *fn = s->inline_fns[i];
+        if (!fn->section && nodes[i].reachable)
+            fn->call_section = nodes[i].placement ? nodes[i].placement
+                                                  : text_section;
+        tcc_free(nodes[i].edges);
+    }
+    tcc_free(nodes);
+}
+
+/* ------------------------------------------------------------------ */
+/*
+ * Calls to tiny inline functions, expanded in place.
+ *
+ * TCC emits an inline function out of line and calls it.  On the transputer
+ * the call, the callee's frame and its return cost more than a one-line
+ * body - rol32(), an empty instrumentation hook, an accessor - and the kernel
+ * makes hundreds of thousands of such calls while it boots.  A call to an
+ * inline function whose saved body is expression statements and at most a
+ * final `return x;` is replaced by the body: the arguments, already
+ * converted to the parameter types, go to frame temporaries named like the
+ * parameters in a scope of their own, and the body's tokens are parsed again
+ * in place, as gen_inline_functions() parses them to emit the function.  A
+ * parameter the body never names gets no temporary.  Later expansions in the
+ * same function reuse the temporaries.
+ *
+ * Only a body that means the same in the caller qualifies: no declarations,
+ * labels, control statements, statement expressions or asm, no keyword
+ * outside the types, qualifiers, sizeof, typeof and three builtins, and no
+ * name but a parameter's that a local of the caller could be shadowing.
+ * Parameters and the result are scalars, the prototype has no ellipsis, and
+ * the body is at most TP_INLINE_MAX_TOKS tokens.  Not with debug information.
+ * TCC_TRANSPUTER_INLINE=0 turns it off.
+ */
+#define TP_INLINE_MAX_TOKS  32
+#define TP_INLINE_MAX_ARGS  6
+#define TP_INLINE_MAX_DEPTH 3
+#define TP_INLINE_NTMP      32
+
+static int tp_inline_depth;
+static struct { int loc, size, align, busy; } tp_inline_tmp[TP_INLINE_NTMP];
+static int tp_inline_ntmp;
+
+static int tp_inline_on(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TCC_TRANSPUTER_INLINE");
+        v = !(e && *e == '0');
+    }
+    return v;
+}
+
+static int tp_inline_scalar(CType *t)
+{
+    if (t->t & (VT_ARRAY | VT_VLA | VT_BITFIELD))
+        return 0;
+    switch (t->t & VT_BTYPE) {
+    case VT_BYTE: case VT_SHORT: case VT_INT: case VT_LLONG:
+    case VT_PTR: case VT_BOOL: case VT_FLOAT: case VT_DOUBLE:
+        return 1;
+    }
+    return 0;
+}
+
+static int tp_inline_keyword_ok(int t)
+{
+    switch (t) {
+    case TOK_VOID: case TOK_CHAR: case TOK_SHORT: case TOK_INT:
+    case TOK_LONG: case TOK_FLOAT: case TOK_DOUBLE: case TOK_BOOL:
+    case TOK_UNSIGNED: case TOK_SIGNED1: case TOK_SIGNED2: case TOK_SIGNED3:
+    case TOK_CONST1: case TOK_CONST2: case TOK_CONST3:
+    case TOK_VOLATILE1: case TOK_VOLATILE2: case TOK_VOLATILE3:
+    case TOK_RESTRICT1: case TOK_RESTRICT2: case TOK_RESTRICT3:
+    case TOK_STRUCT: case TOK_UNION: case TOK_ENUM: case TOK_SIZEOF:
+    case TOK_ALIGNOF1: case TOK_ALIGNOF2: case TOK_ALIGNOF3:
+    case TOK_TYPEOF1: case TOK_TYPEOF2: case TOK_TYPEOF3:
+    case TOK_EXTENSION: case TOK_builtin_expect:
+    case TOK_builtin_constant_p: case TOK_builtin_types_compatible_p:
+        return 1;
+    }
+    return 0;
+}
+
+/* The saved body less its closing TOK_EOF, ending instead in the 0 that
+   lets next() drop back to the caller's tokens after the final '}'. */
+static TokenString *tp_inline_copy(TokenString *src)
+{
+    TokenString *c;
+    int i, n = src->len - 1;
+
+    if (n < 2 || src->str[n] != TOK_EOF)
+        return NULL;
+    c = tok_str_alloc();
+    for (i = 0; i < n; i++)
+        tok_str_add(c, src->str[i]);
+    tok_str_add(c, 0);
+    return c;
+}
+
+/* Can fn's body be expanded here?  Reads a copy of its tokens without
+   parsing them, and leaves the caller's token stream as it was.  *used gets
+   a bit for each parameter the body names, *written one for each it may
+   assign or take the address of. */
+static int tp_inline_shape(struct InlineFunc *fn, Sym *ftype, int *has_ret,
+                           int *used, int *written)
+{
+    TokenString *c = tp_inline_copy(fn->func_str);
+    int ok = 1, n = 0, braces = 0, paren = 0, quest = 0, stmt = 1;
+    int prev = '{', ret = 0, i, last = -1;
+    Sym *pa, *x;
+
+    *has_ret = *used = *written = 0;
+    if (!c)
+        return 0;
+    unget_tok(0);
+    begin_macro(c, 1);
+    next();                                 /* '{' */
+    next();
+    for (;;) {
+        int t = tok;
+        if (t == '}' && braces == 0)
+            break;
+        if (++n > TP_INLINE_MAX_TOKS)
+            ok = 0;
+        if (t == '{')
+            braces++, ok = 0;               /* block, statement expression */
+        else if (t == '}')
+            braces--;
+        else if (t == '(')
+            paren++;
+        else if (t == ')')
+            paren--;
+        if (last >= 0 && (t == '=' || TOK_ASSIGN(t) || t == TOK_INC
+                          || t == TOK_DEC))
+            *written |= 1 << last;
+        last = -1;
+        if (!ok) {
+        } else if (ret && stmt) {
+            ok = 0;                         /* anything after `return x;` */
+        } else if (t == TOK_RETURN) {
+            ok = stmt;
+            ret = 1;
+        } else if (t >= TOK_IDENT && t < TOK_UIDENT) {
+            ok = !stmt && tp_inline_keyword_ok(t);
+        } else if (t >= TOK_UIDENT && prev != '.' && prev != TOK_ARROW) {
+            for (pa = ftype->next, i = 0; pa; pa = pa->next, i++)
+                if ((pa->v & ~SYM_FIELD) == t)
+                    break;
+            if (pa) {
+                *used |= 1 << i;
+                last = i;
+                if (prev == '&' || prev == TOK_INC || prev == TOK_DEC)
+                    *written |= 1 << i;
+            } else {
+                x = (prev == TOK_STRUCT || prev == TOK_UNION ||
+                     prev == TOK_ENUM) ? struct_find(t) : sym_find(t);
+                if (!x || x->sym_scope)
+                    ok = 0;                 /* a caller's local could hide it */
+                else if (stmt && (x->type.t & VT_TYPEDEF))
+                    ok = 0;                 /* a declaration */
+            }
+        } else if (t == '?') {
+            quest++;
+        } else if (t == ':') {
+            ok = quest-- > 0;               /* a label otherwise */
+        }
+        stmt = t == ';' && paren == 0;
+        prev = t;
+        next();
+    }
+    next();                                 /* past '}': the caller's token */
+    *has_ret = ret;
+    return ok;
+}
+
+static int tp_inline_temp(int size, int align)
+{
+    int i;
+    for (i = 0; i < tp_inline_ntmp; i++)
+        if (!tp_inline_tmp[i].busy && tp_inline_tmp[i].size == size
+            && tp_inline_tmp[i].align >= align) {
+            tp_inline_tmp[i].busy = 1;
+            return i;
+        }
+    if (tp_inline_ntmp == TP_INLINE_NTMP)
+        return -1;
+    loc = (loc - size) & -align;
+    i = tp_inline_ntmp++;
+    tp_inline_tmp[i].loc = loc;
+    tp_inline_tmp[i].size = size;
+    tp_inline_tmp[i].align = align;
+    tp_inline_tmp[i].busy = 1;
+    return i;
+}
+
+/* The tokens to replay: fn's body, with each parameter konst[] marks
+   written as its constant, `( 16 )`, where the body names it - a literal of
+   the parameter's own int type, no symbol.  Read from a copy the way the
+   scan reads it, so the result also ends in the 0 that returns to the
+   caller's tokens. */
+static TokenString *tp_inline_body(struct InlineFunc *fn, Sym *ftype,
+                                   const int *konst, const uint64_t *val)
+{
+    TokenString *c, *b;
+    int braces = 0, prev = '{', i, any = 0;
+    Sym *pa;
+
+    for (pa = ftype->next, i = 0; pa; pa = pa->next, i++)
+        any |= konst[i];
+    c = tp_inline_copy(fn->func_str);
+    if (!any)
+        return c;
+    b = tok_str_alloc();
+    unget_tok(0);
+    begin_macro(c, 1);
+    next();                                 /* '{' */
+    for (;;) {
+        int t = tok;
+        pa = NULL;
+        if (t >= TOK_UIDENT && prev != '.' && prev != TOK_ARROW)
+            for (pa = ftype->next, i = 0; pa; pa = pa->next, i++)
+                if ((pa->v & ~SYM_FIELD) == t)
+                    break;
+        if (pa && konst[i]) {
+            tok = '(';
+            tok_str_add_tok(b);
+            if (pa->type.t & VT_UNSIGNED)
+                tok = TOK_CUINT, tokc.i = (uint32_t)val[i];
+            else
+                tok = TOK_CINT, tokc.i = (int)val[i];
+            tok_str_add_tok(b);
+            tok = ')';
+            tok_str_add_tok(b);
+        } else {
+            tok_str_add_tok(b);
+        }
+        if (t == '{')
+            braces++;
+        else if (t == '}' && --braces == 0)
+            break;
+        prev = t;
+        next();
+    }
+    next();                                 /* past '}': the caller's token */
+    tok_str_add(b, 0);
+    return b;
+}
+
+/* vstack: the function, then its nb_args arguments.  Returns 1 with the
+   call's value on the vstack instead, or 0 to make the call. */
+static int tp_inline_expand(Sym *ftype, int nb_args)
+{
+    SValue *fv = vtop - nb_args;
+    Sym *fsym = fv->sym, *pa, *params[TP_INLINE_MAX_ARGS];
+    struct InlineFunc *fn = NULL;
+    int tmp[TP_INLINE_MAX_ARGS], konst[TP_INLINE_MAX_ARGS];
+    uint64_t val[TP_INLINE_MAX_ARGS];
+    int i, n = 0, bt, has_ret, used, written, size, align, has_val = 0;
+    struct scope o;
+    TokenString *body;
+
+    if (!tp_inline_on() || nocode_wanted || debug_modes
+        || tp_inline_depth >= TP_INLINE_MAX_DEPTH
+        || (fv->r & (VT_VALMASK | VT_LVAL | VT_SYM)) != (VT_CONST | VT_SYM)
+        || fv->c.i || !fsym || !(fsym->type.t & VT_INLINE)
+        || fsym->f.func_noinline || ftype->f.func_type != FUNC_NEW
+        || nb_args > TP_INLINE_MAX_ARGS)
+        return 0;
+    bt = ftype->type.t & VT_BTYPE;
+    if (bt != VT_VOID && !tp_inline_scalar(&ftype->type))
+        return 0;
+    for (pa = ftype->next; pa; pa = pa->next) {
+        if (n == nb_args || !tp_inline_scalar(&pa->type)
+            || !(pa->v & ~SYM_FIELD))
+            return 0;
+        params[n++] = pa;
+    }
+    if (n != nb_args)
+        return 0;
+    for (i = 0; i < tcc_state->nb_inline_fns; i++)
+        if (tcc_state->inline_fns[i]->sym == fsym) {
+            fn = tcc_state->inline_fns[i];
+            break;
+        }
+    if (!fn || !tp_inline_shape(fn, ftype, &has_ret, &used, &written)
+        || (bt != VT_VOID && !has_ret))
+        return 0;
+    for (i = 0; i < n; i++) {
+        SValue *a = vtop - (n - 1 - i);
+        /* An int constant the body only reads is written into the body as
+           that constant, so it folds there (rol32(x, 16) shifts by 16). */
+        konst[i] = (a->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST
+            && (params[i]->type.t & VT_BTYPE) == VT_INT
+            && (used & (1 << i)) && !(written & (1 << i));
+        val[i] = a->c.i;
+        tmp[i] = -1;
+        if (!(used & (1 << i)) || konst[i])
+            continue;
+        size = type_size(&params[i]->type, &align);
+        if ((tmp[i] = tp_inline_temp(size, align)) < 0) {
+            while (--i >= 0)
+                if (tmp[i] >= 0)
+                    tp_inline_tmp[tmp[i]].busy = 0;
+            return 0;
+        }
+    }
+
+    new_scope(&o);
+    tp_inline_depth++;
+    for (i = n - 1; i >= 0; i--) {
+        CType *pt = &params[i]->type;
+        if (konst[i]) {
+            vpop();                         /* it is in the body instead */
+            continue;
+        }
+        if (tmp[i] < 0) {
+            /* unnamed in the body: evaluated, and a volatile read kept */
+            if ((vtop->r & VT_LVAL) && (vtop->type.t & VT_VOLATILE))
+                gv(RC_TYPE(vtop->type.t));
+            vpop();
+            continue;
+        }
+        sym_push(params[i]->v & ~SYM_FIELD, pt, VT_LOCAL | VT_LVAL,
+                 tp_inline_tmp[tmp[i]].loc);
+        vset(pt, VT_LOCAL | VT_LVAL, tp_inline_tmp[tmp[i]].loc);
+        vswap();
+        vstore();
+        vpop();
+    }
+    vpop();                                 /* the function */
+
+    body = tp_inline_body(fn, ftype, konst, val);
+    unget_tok(0);
+    begin_macro(body, 1);
+    next();                                 /* '{' */
+    next();
+    while (tok != '}') {
+        if (tok == ';') {
+            /* an empty statement, often what a no-op macro leaves */
+        } else if (tok == TOK_RETURN) {
+            next();
+            if (tok != ';') {
+                gexpr();
+                gen_assign_cast(&ftype->type);
+                has_val = 1;
+            }
+        } else {
+            gexpr();
+            vpop();
+        }
+        skip(';');
+    }
+    next();                                 /* past '}': the caller's token */
+
+    if (!has_val) {
+        CType vt;
+        vt.t = VT_VOID;
+        vt.ref = NULL;
+        vpush(&vt);
+    } else {
+        /* An lvalue would name a temporary the next expansion reuses. */
+        if (vtop->r & VT_LVAL)
+            gv(RC_TYPE(vtop->type.t));
+        /* as for a call's value (no PROMOTE_RET here) */
+        if (bt == VT_BYTE || bt == VT_SHORT || bt == VT_BOOL)
+            vtop->type.t = VT_INT;
+    }
+    prev_scope(&o, 1);
+    for (i = 0; i < n; i++)
+        if (tmp[i] >= 0)
+            tp_inline_tmp[tmp[i]].busy = 0;
+    tp_inline_depth--;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* The two entries the parser uses while it compiles a function */
+
+/* A call is about to be made.  vstack: the function, then its nb_args
+   arguments.  Returns 1 if the call was expanded in place, its value now on
+   the vstack instead; `expand` is 0 where the caller cannot take a value
+   that way.  Returns 0 to make the call, having noted the section it is
+   made from for resolve_inline_sections(). */
+static int tp_inline_call(Sym *ftype, int nb_args, int expand)
+{
+    if (expand && tp_inline_expand(ftype, nb_args))
+        return 1;
+    note_inline_call_section(vtop - nb_args);
+    return 0;
+}
+
+/* The frame temporaries belong to one function's frame. */
+static void tp_inline_function_start(void)
+{
+    tp_inline_ntmp = 0;
+}
