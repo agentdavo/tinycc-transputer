@@ -2722,44 +2722,32 @@ static void tp_gaddr_commit(Section *sec, const struct tp_relax_insn *ins)
     tpg.n = 0;
 }
 
-/* Returns 1 if the function was rewritten. */
-static int tp_relax_function(void)
-{
-    Section *sec = cur_text_section;
-    uint8_t *code;
+/* What the phases of tp_relax_function() share: the function's bytes
+ * decoded into instructions, and the new layout as it settles. */
+struct tp_relax {
+    Section *sec;
+    uint8_t *code;              /* the function's bytes, at base */
+    int base, size;
     struct tp_relax_insn *ins;
-    int n = 0, i, pass;
-    int base = func_start_ind;
-    int size = ind - func_start_ind;
-    int p, saved;
-    int *map;           /* old offset -> new offset */
-    int *tidx;          /* old offset -> instruction index */
-    uint8_t *out;
+    int n;
+    int *tidx;                  /* old offset -> instruction index */
+    int *map;                   /* old offset -> new offset */
+    uint8_t *out;               /* the new bytes */
     int outlen;
-    int grown = 0;      /* an instruction may now need more bytes */
+    int grown;                  /* an instruction may now need more bytes */
+};
 
-    if (base < 0 || size <= 0 || size > TP_RELAX_MAX_INSNS)
-        return tp_relax_bail("size");
-    /* Debug info records code offsets per line. */
-    if (tcc_state->do_debug)
-        return tp_relax_bail("debug");
+/* 1. Linear decode. */
+static const char *tp_relax_decode(struct tp_relax *r)
+{
+    uint8_t *code = r->code;
+    struct tp_relax_insn *ins = r->ins;
+    const int size = r->size;
+    int n = 0;
+    int *tidx;
+    int i;
+    int p;
 
-    /* An assembler addend can name an interior byte by its distance from a
-     * label. Preserve that layout, including for backward references. */
-    if (sec->reloc) {
-        ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
-        int end = sec->reloc->data_offset / sizeof(*rel);
-        for (i = func_start_nrel; i < end; i++) {
-            int type = ELFW(R_TYPE)(rel[i].r_info);
-            if (type == R_TRANSPUTER_INSN || tp_data_layout_reloc(type))
-                return tp_relax_bail("asm-addend");
-        }
-    }
-
-    code = sec->data + base;
-    ins = tcc_malloc(sizeof(*ins) * (size + 1));
-
-    /* 1. Linear decode. */
     for (p = 0; p < size; ) {
         int opc = -1, opd = 0;
         int len;
@@ -2789,8 +2777,7 @@ static int tp_relax_function(void)
 
         len = tp_decode_instr_at(code, size, p, &opc, &opd);
         if (len <= 0) {           /* malformed tail — bail out entirely */
-            tcc_free(ins);
-            return tp_relax_bail("decode");
+            return "decode";
         }
         ins[n].old_off = p;
         ins[n].old_len = len;
@@ -2810,14 +2797,27 @@ static int tp_relax_function(void)
     /* An offset -> index map. Branch retargeting is done three times over
      * (shrink fixpoint, emit, validation) and a linear search there made the
      * whole pass quadratic in the size of the function. */
-    tidx = tcc_malloc(sizeof(int) * (size + 1));
+    r->n = n;
+    tidx = r->tidx = tcc_malloc(sizeof(int) * (size + 1));
     for (i = 0; i <= size; i++)
         tidx[i] = -1;
     for (i = 0; i < n; i++)
         tidx[ins[i].old_off] = i;
+    return NULL;
+}
 
-    /* 2. Pin anything a relocation points into.  This function's
-     * relocations are the ones added since its prologue. */
+/* 2. Pin anything a relocation points into.  This function's
+ * relocations are the ones added since its prologue. */
+static const char *tp_relax_pin(struct tp_relax *r)
+{
+    Section *sec = r->sec;
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int base = r->base;
+    const int size = r->size;
+    const int n = r->n;
+    int i;
+
     if (sec->reloc) {
         ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
         int nrel = sec->reloc->data_offset / sizeof(*rel);
@@ -2831,8 +2831,7 @@ static int tp_relax_function(void)
                 ;
             k = tidx[k];
             if (k < 0 || ro >= ins[k].old_off + ins[k].old_len) {
-                tcc_free(tidx); tcc_free(ins);
-                return tp_relax_bail("reloc-outside");
+                return "reloc-outside";
             }
             /* A relocated placeholder such as the 8-byte LDC_ABS chain
              * is now decoded as a run of PFIX 0 no-ops followed by the
@@ -2859,15 +2858,25 @@ static int tp_relax_function(void)
         else if (t >= 0 && t < size && tidx[t] >= 0)
             ok = 1;
         if (!ok) {
-            tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("branch-target");
+            return "branch-target";
         }
     }
+    return NULL;
+}
 
-    /* 2'. Switch jump tables.  Find each table's dispatch and entries, and
-     * pin them through the passes below, which only need to know where
-     * control goes (tp_sched_function gives a dispatch every entry as a
-     * successor). */
+/* 2'. Switch jump tables.  Find each table's dispatch and entries, and
+ * pin them through the passes below, which only need to know where
+ * control goes (tp_sched_function gives a dispatch every entry as a
+ * successor). */
+static const char *tp_relax_tables_find(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int base = r->base;
+    const int size = r->size;
+    const int n = r->n;
+    int i;
+
     for (i = 0; i < swtab_count; i++) {
         static const int shape[6][2] = {
             { TP_ENC_LDC, TP_SWITCH_JUMP_SLOT_SIZE }, { TP_ENC_OPR, TP_OPR_PROD },
@@ -2901,47 +2910,45 @@ static int tp_relax_function(void)
             }
         }
         if (!ok) {
-            tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("switch-table");
+            return "switch-table";
         }
     }
+    return NULL;
+}
 
-    /* 2a. Give the placeholders gfunc_epilog could not fit (wide_log) their
-     * real operand and the width it needs.  This must come before the
-     * scheduler, which would otherwise take them for accesses to slot 0. */
+/* 2a. Give the placeholders gfunc_epilog could not fit (wide_log) their
+ * real operand and the width it needs.  This must come before the
+ * scheduler, which would otherwise take them for accesses to slot 0. */
+static const char *tp_relax_wide(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int base = r->base;
+    const int size = r->size;
+    int i;
+
     for (i = 0; i < wide_log_count; i++) {
         int o = wide_log[i].offset - base;
         int k = (o >= 0 && o < size) ? tidx[o] : -1;
         if (k < 0 || ins[k].pinned || ins[k].opcode != wide_log[i].opcode) {
-            tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("wide");
+            return "wide";
         }
         ins[k].operand = wide_log[i].operand;
         ins[k].new_len = tp_encode_len(ins[k].opcode, ins[k].operand);
-        grown = 1;
+        r->grown = 1;
     }
+    return NULL;
+}
 
-    /* 2a'. Keep the addresses of busy globals in frame words of their own.
-     * This renumbers the frame, so it comes before the passes that reason
-     * about frame words. */
-    if (tp_gaddr_cache(&ins, &n, tidx, size))
-        grown = 1;
+/* 2b+. Jump tables are sized from here on.  An entry's J takes over its
+ * whole slot: the padding in front of it goes, and the J is emitted
+ * padded to the width the table settles on. */
+static void tp_relax_tables_open(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    const int n = r->n;
+    int i;
 
-    /* 2b. Evaluation-stack scheduling: delete the workspace round trips the
-     * always-STL register model leaves behind. Deleted instructions become
-     * zero-length no-ops, which the shrink pass below already knows how to
-     * drop; a rewritten one keeps its slot and is re-encoded from its new
-     * opcode/operand. */
-    tp_sched_function(ins, n, size, tpg.n);
-
-    /* 2b'. Renumber the frame by use.  Moving a cold unit up can widen an
-     * access, which the growth pass below then makes room for. */
-    if (tp_slot_remap(ins, n, tpg.n))
-        grown = 1;
-
-    /* 2b+. Jump tables are sized from here on.  An entry's J takes over its
-     * whole slot: the padding in front of it goes, and the J is emitted
-     * padded to the width the table settles on. */
     for (i = 0; i < n; i++) {
         if (!ins[i].tab)
             continue;
@@ -2951,19 +2958,29 @@ static int tp_relax_function(void)
                 ins[i].new_len = TP_SWITCH_JUMP_SLOT_SIZE;
             else
                 ins[i].new_len = 0;
-            grown = 1;
+            r->grown = 1;
         }
     }
+}
 
-    /* 2b''. Narrowed direct calls (near_call_log) stayed pinned through the
-     * scheduler.  Now make each a branch to its callee: that sits before this
-     * function and does not move, so the call re-encodes like a J - shorter
-     * as the code in front of it shrinks, longer if widening pushed it away.
-     * Its pfix 0 front padding becomes deletable no-ops; the relocation,
-     * on the first of them, then slides onto the call itself.  Only a call
-     * still encoded with the logged callee's displacement is the logged one;
-     * anything else there stays pinned, as re-targeting it would send it to
-     * the wrong function. */
+/* 2b''. Narrowed direct calls (near_call_log) stayed pinned through the
+ * scheduler.  Now make each a branch to its callee: that sits before this
+ * function and does not move, so the call re-encodes like a J - shorter
+ * as the code in front of it shrinks, longer if widening pushed it away.
+ * Its pfix 0 front padding becomes deletable no-ops; the relocation,
+ * on the first of them, then slides onto the call itself.  Only a call
+ * still encoded with the logged callee's displacement is the logged one;
+ * anything else there stays pinned, as re-targeting it would send it to
+ * the wrong function. */
+static void tp_relax_near_calls(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int base = r->base;
+    const int size = r->size;
+    const int n = r->n;
+    int i;
+
     for (i = 0; i < near_call_count; i++) {
         int o = near_call_log[i].offset - base;
         int k = (o >= 0 && o < size) ? tidx[o] : -1;
@@ -2983,11 +3000,23 @@ static int tp_relax_function(void)
         ins[m].ext = 1;
         ins[m].target_old = t;
     }
+}
 
-    /* 2c. Widening pushes code apart, so a branch across a widened
-     * instruction may no longer reach with the width it had. Grow those
-     * first: sizes only ever increase here, so this settles, and the shrink
-     * pass below then starts from widths that all fit. */
+/* 2c. Widening pushes code apart, so a branch across a widened
+ * instruction may no longer reach with the width it had. Grow those
+ * first: sizes only ever increase here, so this settles, and the shrink
+ * pass below then starts from widths that all fit. */
+static void tp_relax_grow(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int size = r->size;
+    const int n = r->n;
+    const int grown = r->grown;
+    int outlen = 0;
+    int i;
+    int pass;
+
     for (pass = 0; grown && pass < 16; pass++) {
         int changed = 0;
         int off = 0;
@@ -3015,8 +3044,20 @@ static int tp_relax_function(void)
         if (!changed)
             break;
     }
+}
 
-    /* 3. Shrink to fixpoint. Sizes only ever decrease, so this terminates. */
+/* 3. Shrink to fixpoint. Sizes only ever decrease, so this terminates. */
+static void tp_relax_shrink(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int size = r->size;
+    const int n = r->n;
+    int outlen = 0;
+    int i;
+    int p;
+    int pass;
+
     for (pass = 0; pass < 16; pass++) {
         int changed = 0;
         int off = 0;
@@ -3090,10 +3131,18 @@ static int tp_relax_function(void)
         if (!changed)
             break;
     }
+}
 
-    /* Each table's dispatch for the width it settled on: four-byte entries
-     * are indexed by wsub, and the multiply goes; any other width is the
-     * multiplier.  Removing two bytes only brings branches closer. */
+/* Each table's dispatch for the width it settled on: four-byte entries
+ * are indexed by wsub, and the multiply goes; any other width is the
+ * multiplier.  Removing two bytes only brings branches closer. */
+static const char *tp_relax_tables_dispatch(struct tp_relax *r)
+{
+    struct tp_relax_insn *ins = r->ins;
+    const int n = r->n;
+    int i;
+    int p;
+
     for (p = 1; p <= swtab_count; p++) {
         int d[6], nd = 0, w = 0;
         for (i = 0; i < n; i++) {
@@ -3105,8 +3154,7 @@ static int tp_relax_function(void)
         if (nd != 6 || ins[d[0]].opcode != TP_ENC_LDC ||
             ins[d[1]].operand != TP_OPR_PROD ||
             ins[d[4]].operand != TP_OPR_BSUB || w < 4 || w > 8) {
-            tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("switch-dispatch");
+            return "switch-dispatch";
         }
         if (w == 4) {
             ins[d[0]].opcode = ins[d[1]].opcode = -1;
@@ -3116,24 +3164,36 @@ static int tp_relax_function(void)
             ins[d[0]].operand = w;
         }
     }
+    return NULL;
+}
 
-    /* Recompute final offsets after the last shrink. */
-    {
-        int off = 0;
-        for (i = 0; i < n; i++) {
-            ins[i].new_off = off;
-            off += ins[i].new_len;
-        }
-        outlen = off;
-    }
-    if (outlen == size && !grown) {
-        tcc_free(tidx); tcc_free(ins);
-        return tp_relax_bail("nogain");
-    }
+/* Final offsets, after the last change of width. */
+static void tp_relax_layout(struct tp_relax *r)
+{
+    int i, off = 0;
 
-    /* 4. Emit the relaxed stream. */
-    out = tcc_malloc(outlen > size ? outlen : size);
-    map = tcc_malloc(sizeof(int) * (size + 1));
+    for (i = 0; i < r->n; i++) {
+        r->ins[i].new_off = off;
+        off += r->ins[i].new_len;
+    }
+    r->outlen = off;
+}
+
+/* 4. Emit the relaxed stream. */
+static const char *tp_relax_emit(struct tp_relax *r)
+{
+    uint8_t *code = r->code;
+    struct tp_relax_insn *ins = r->ins;
+    int *tidx = r->tidx;
+    const int size = r->size;
+    const int n = r->n;
+    const int outlen = r->outlen;
+    uint8_t *out;
+    int *map;
+    int i;
+
+    out = r->out = tcc_malloc(outlen > size ? outlen : size);
+    map = r->map = tcc_malloc(sizeof(int) * (size + 1));
     for (i = 0; i <= size; i++)
         map[i] = -1;
 
@@ -3171,8 +3231,7 @@ static int tp_relax_function(void)
             len = tp_encode_instr(buf, ins[i].opcode, ins[i].operand);
         }
         if (len > ins[i].new_len) {      /* encoder wanted more — abandon */
-            tcc_free(out); tcc_free(map); tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("encoder");
+            return "encoder";
         }
         /* A branch displacement is measured from the end of the instruction,
          * so shortening the instruction lengthens the displacement: there are
@@ -3190,9 +3249,19 @@ static int tp_relax_function(void)
         memcpy(out + ins[i].new_off, buf, len);
     }
     map[size] = outlen;
+    return NULL;
+}
 
-    /* Every relocation must land on a mapped byte, otherwise the rewrite would
-     * strand it. Verify before committing anything. */
+/* Every relocation must land on a mapped byte, otherwise the rewrite would
+ * strand it. Verify before committing anything. */
+static const char *tp_relax_check_moves(struct tp_relax *r)
+{
+    Section *sec = r->sec;
+    int *map = r->map;
+    const int base = r->base;
+    const int size = r->size;
+    int i;
+
     if (sec->reloc) {
         ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
         int nrel = sec->reloc->data_offset / sizeof(*rel);
@@ -3201,8 +3270,7 @@ static int tp_relax_function(void)
             if (ro < 0 || ro > size)
                 continue;
             if (map[ro] < 0) {
-                tcc_free(out); tcc_free(map); tcc_free(tidx); tcc_free(ins);
-                return tp_relax_bail("reloc-unmapped");
+                return "reloc-unmapped";
             }
         }
     }
@@ -3212,11 +3280,25 @@ static int tp_relax_function(void)
         for (s = global_label_stack; s; s = s->prev) {
             int o = s->jnext - base;
             if (s->r == LABEL_DEFINED && o >= 0 && o <= size && map[o] < 0) {
-                tcc_free(out); tcc_free(map); tcc_free(tidx); tcc_free(ins);
-                return tp_relax_bail("label-unmapped");
+                return "label-unmapped";
             }
         }
     }
+    return NULL;
+}
+
+static int tp_relax_commit(struct tp_relax *r)
+{
+    Section *sec = r->sec;
+    uint8_t *code = r->code;
+    struct tp_relax_insn *ins = r->ins;
+    int *map = r->map;
+    uint8_t *out = r->out;
+    const int base = r->base;
+    const int size = r->size;
+    const int outlen = r->outlen;
+    int saved;
+    int i;
 
     if (base + outlen > sec->data_allocated) {
         section_realloc(sec, base + outlen);
@@ -3265,10 +3347,92 @@ static int tp_relax_function(void)
                 es->st_value = base + map[o];
         }
     }
-
-    tcc_free(out);
-    tcc_free(map);
-    tcc_free(tidx);
-    tcc_free(ins);
     return saved;
+}
+
+/* Rewrite the finished function with the passes above and the shortest
+ * encodings.  Returns the bytes saved, or 0 having left it alone. */
+static int tp_relax_function(void)
+{
+    Section *sec = cur_text_section;
+    struct tp_relax r;
+    const char *why;
+    int i, saved;
+    int base = func_start_ind;
+    int size = ind - func_start_ind;
+
+    if (base < 0 || size <= 0 || size > TP_RELAX_MAX_INSNS)
+        return tp_relax_bail("size");
+    /* Debug info records code offsets per line. */
+    if (tcc_state->do_debug)
+        return tp_relax_bail("debug");
+
+    /* An assembler addend can name an interior byte by its distance from a
+     * label. Preserve that layout, including for backward references. */
+    if (sec->reloc) {
+        ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
+        int end = sec->reloc->data_offset / sizeof(*rel);
+        for (i = func_start_nrel; i < end; i++) {
+            int type = ELFW(R_TYPE)(rel[i].r_info);
+            if (type == R_TRANSPUTER_INSN || tp_data_layout_reloc(type))
+                return tp_relax_bail("asm-addend");
+        }
+    }
+
+    memset(&r, 0, sizeof r);
+    r.sec = sec;
+    r.base = base;
+    r.size = size;
+    r.code = sec->data + base;
+    r.ins = tcc_malloc(sizeof(*r.ins) * (size + 1));
+
+    if ((why = tp_relax_decode(&r)) || (why = tp_relax_pin(&r)) ||
+        (why = tp_relax_tables_find(&r)) || (why = tp_relax_wide(&r)))
+        goto bail;
+
+    /* 2a'. Keep the addresses of busy globals in frame words of their own.
+     * This renumbers the frame, so it comes before the passes that reason
+     * about frame words. */
+    if (tp_gaddr_cache(&r.ins, &r.n, r.tidx, size))
+        r.grown = 1;
+
+    /* 2b. Evaluation-stack scheduling: delete the workspace round trips the
+     * always-STL register model leaves behind. Deleted instructions become
+     * zero-length no-ops, which the shrink pass below already knows how to
+     * drop; a rewritten one keeps its slot and is re-encoded from its new
+     * opcode/operand. */
+    tp_sched_function(r.ins, r.n, size, tpg.n);
+
+    /* 2b'. Renumber the frame by use.  Moving a cold unit up can widen an
+     * access, which the growth pass below then makes room for. */
+    if (tp_slot_remap(r.ins, r.n, tpg.n))
+        r.grown = 1;
+
+    tp_relax_tables_open(&r);
+    tp_relax_near_calls(&r);
+    tp_relax_grow(&r);
+    tp_relax_shrink(&r);
+    if ((why = tp_relax_tables_dispatch(&r)))
+        goto bail;
+    tp_relax_layout(&r);
+    if (r.outlen == size && !r.grown) {
+        why = "nogain";
+        goto bail;
+    }
+    if ((why = tp_relax_emit(&r)) || (why = tp_relax_check_moves(&r)))
+        goto bail;
+    saved = tp_relax_commit(&r);
+
+    tcc_free(r.out);
+    tcc_free(r.map);
+    tcc_free(r.tidx);
+    tcc_free(r.ins);
+    return saved;
+
+bail:
+    tcc_free(r.out);
+    tcc_free(r.map);
+    tcc_free(r.tidx);
+    tcc_free(r.ins);
+    return tp_relax_bail(why);
 }
