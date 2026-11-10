@@ -145,7 +145,8 @@ environment switch, read through `tp_knob()`: add a new one to its table),
 `transputer-fp.h` (`gen_opf` as `tp_opf_*` paths, FPU residency, the
 statement-end rules). `transputer-link.c` includes `transputer-linux.h`
 (kernel-image knowledge) and `transputer-linkopt.h` (peephole, ICF, call
-relaxation); `tccgen.c` includes `transputer-inline.h`. A new file must be
+relaxation); `tccgen.c` includes `transputer-front.h` (inline expansion, the rotated
+`while`/`for` loops, the builtins `unary()` hands over). A new file must be
 added to `transputer_FILES` in the Makefile as a `.h`.
 
 ## Closure checkpoint

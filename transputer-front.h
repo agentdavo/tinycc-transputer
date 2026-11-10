@@ -1,16 +1,20 @@
 /*
- *  Transputer: inline functions - calls expanded in place, and the sections
- *  the out-of-line copies go to.
+ *  Transputer: the front end's share - what tccgen.c does differently for
+ *  this target, where that is more than a line or two.
  *
  *  Code, not declarations: tccgen.c includes this once, under
  *  TCC_TARGET_TRANSPUTER, ahead of unary(), because it parses with tccgen.c's
  *  static state (the value stack, scopes, `loc`, the token stream).  tccgen.c
- *  uses four functions of it:
+ *  uses these functions of it:
  *
- *    tp_inline_call()            at each call, before gfunc_call()
- *    tp_unary_builtin()          at a name unary() has no case for
+ *    tp_inline_call()            at each call, before gfunc_call(): a tiny
+ *                                inline function is expanded in place
  *    tp_inline_function_start()  as each function body begins
- *    resolve_inline_sections()   before gen_inline_functions() emits anything
+ *    resolve_inline_sections()   before gen_inline_functions() emits anything:
+ *                                which section each out-of-line copy goes to
+ *    tp_block_while()            a while loop, its test after its body
+ *    tp_block_for()              a for loop, likewise
+ *    tp_unary_builtin()          at a name unary() has no case for
  */
 
 #include "transputer-knobs.h"
@@ -585,6 +589,248 @@ static int tp_inline_expand(Sym *ftype, int nb_args)
             tp_inline_tmp[tmp[i]].busy = 0;
     tp_inline_depth--;
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Loops */
+
+static void lblock(int *bsym, int *csym);
+static void new_scope_s(struct scope *o);
+static void prev_scope_s(struct scope *o);
+
+/* Record the tokens of one loop clause - a for(;;) init/test/increment, or a
+   while() test - *without* parsing them, so the clause can be generated later,
+   at a different point in the instruction stream (see TOK_FOR and TOK_WHILE).
+   Stops on `term' at bracket level 0.  Unlike skip_or_save_block(), a
+   top-level ',' is not a terminator: these clauses may legally be comma
+   expressions.  Returns NULL for an empty clause.
+
+   Sets *tag_decl if the clause defines an enum (`enum {' or `enum tag {') or
+   a tagged struct/union (`struct tag {'): the enumerators or tag are in scope
+   in the loop body, so such a clause cannot be moved after the body.  An
+   anonymous `struct {' declares no name - the kernel's ARRAY_SIZE() puts one
+   in many loop tests - and anything nested in it is scanned anyway. */
+static TokenString *for_clause_save(int term, int *tag_decl)
+{
+    TokenString *str;
+    int level = 0, prev = 0, prev2 = 0;
+
+#define IS_TAG_KW(t) ((t) == TOK_STRUCT || (t) == TOK_UNION || (t) == TOK_ENUM)
+    if (tok == term)
+        return NULL;
+    str = tok_str_alloc();
+    for (;;) {
+        int t = tok;
+        if (level == 0 && t == term)
+            break;
+        if (t == TOK_EOF)
+            tcc_error("unexpected end of file");
+        if (t == '(' || t == '[' || t == '{')
+            level++;
+        else if (t == ')' || t == ']' || t == '}')
+            level--;
+        if (t == '{' && (prev == TOK_ENUM
+                         || (prev >= TOK_UIDENT && IS_TAG_KW(prev2))))
+            *tag_decl = 1;
+        prev2 = prev, prev = t;
+        tok_str_add_tok(str);
+        next();
+    }
+#undef IS_TAG_KW
+    tok_str_add(str, TOK_EOF);
+    return str;
+}
+
+/* `while' has been read: compile the loop. */
+static void tp_block_while(void)
+{
+    int a, b, c, d, e;
+    struct scope o;
+    /* Same rotation as TOK_FOR: record the controlling expression and
+       generate it after the body, so a running iteration executes only the
+       backward conditional branch and no unconditional jump.
+
+                 j    test              ; once, on entry
+          body:  BODY
+          test:  CONDITION              ; `continue' lands here
+                 cj   body
+    */
+    int body_addr, tag_decl = 0;
+    TokenString *cond_str;
+
+    new_scope_s(&o);
+    skip('(');
+    cond_str = for_clause_save(')', &tag_decl);
+    if (!cond_str)
+        expect("expression");
+    skip(')');
+    a = b = 0;
+    TP_LOOP_POOL_OPEN();    /* preheader: dominates the loop */
+    if (tag_decl) {
+        /* The condition declares something the body can see: parse it
+           first and keep the test at the top. */
+        d = gind();
+        unget_tok(0);
+        begin_macro(cond_str, 1);
+        next();
+        gexpr();
+        a = gvtst(1, 0);
+        if (tok != TOK_EOF)
+            expect(")");
+        end_macro();
+        next();
+        lblock(&a, &b);
+        gjmp_addr(d);
+    } else {
+        e = gjmp(0);            /* entry -> test */
+        body_addr = gind();
+        lblock(&a, &b);
+        gsym(e);                /* test label; also re-enables codegen */
+        d = gind();             /* `continue' target is the test */
+        unget_tok(0);
+        begin_macro(cond_str, 1);
+        next();
+        TP_CMP_BRANCH_TRUE_BEGIN();  /* the back-edge branches when true */
+        gexpr();
+        TP_CMP_BRANCH_TRUE_END();
+        c = gvtst(0, 0);
+        if (tok != TOK_EOF)
+            expect(")");
+        end_macro();
+        next();                 /* restore the token after the loop */
+        gsym_addr(c, body_addr);
+    }
+    gsym_addr(b, d);
+    gsym(a);
+    TP_LOOP_POOL_CLOSE();
+    prev_scope_s(&o);
+}
+
+/* `for' has been read: compile the loop. */
+static void tp_block_for(void)
+{
+    int a, b, c, d, e;
+    struct scope o;
+    /* Rotated layout.  The straightforward one-pass emission order
+       (test, jump-over-increment, increment, jump-back-to-test, body,
+       jump-to-increment) costs two taken unconditional jumps on every
+       iteration on top of the conditional one.  Instead record the
+       controlling expression and the increment as token strings and
+       generate them *after* the body:
+
+                 j    test              ; once, on entry
+          body:  BODY
+          incr:  INCREMENT              ; `continue' lands here
+          test:  CONDITION
+                 cj   body              ; taken while the loop runs
+
+       so a running iteration executes no unconditional jump at all.  The
+       clauses are lexed once and parsed once — only the point at which
+       they are parsed moves — so this is not a second pass and nothing is
+       evaluated twice at compile time or at run time. */
+    int body_addr, tag_decl = 0;
+    TokenString *cond_str, *incr_str;
+
+    new_scope(&o);
+
+    skip('(');
+    if (tok != ';') {
+        /* c99 for-loop init decl? */
+        if (!decl(VT_JMP)) {
+            /* no, regular for-loop init expr */
+            gexpr();
+            vpop();
+            tp_stmt_end();
+        }
+    }
+    skip(';');
+    a = b = 0;
+    cond_str = for_clause_save(';', &tag_decl);
+    skip(';');
+    incr_str = for_clause_save(')', &tag_decl);
+    skip(')');
+
+    TP_LOOP_POOL_OPEN();            /* preheader: dominates the loop */
+    if (tag_decl) {
+        /* A clause declares something the body can see: parse the
+           clauses first, in source order, and keep the plain layout. */
+        unget_tok(0);
+        c = d = gind();
+        if (cond_str) {
+            begin_macro(cond_str, 1);
+            next();
+            gexpr();
+            a = gvtst(1, 0);
+            if (tok != TOK_EOF)
+                expect(";");
+            end_macro();
+        }
+        if (incr_str) {
+            e = gjmp(0);
+            d = gind();
+            begin_macro(incr_str, 1);
+            next();
+            gexpr();
+            vpop();
+            tp_stmt_end();
+            if (tok != TOK_EOF)
+                expect(")");
+            end_macro();
+            gjmp_addr(c);
+            gsym(e);
+        }
+        next();
+        lblock(&a, &b);
+        gjmp_addr(d);
+    } else {
+        e = cond_str ? gjmp(0) : 0;     /* entry -> test */
+        body_addr = gind();
+        lblock(&a, &b);
+        /* gind() is also what re-enables code generation when the body
+           ended with a return/goto: the increment and the test are still
+           reachable, from the `continue' edge and from the entry jump,
+           so they must be emitted even then. */
+        d = gind();                     /* `continue' target */
+
+        if (cond_str || incr_str) {
+            /* Replaying a token string clobbers the current token; stash
+               it and restore it with the final next(). */
+            unget_tok(0);
+            if (incr_str) {
+                begin_macro(incr_str, 1);
+                next();
+                gexpr();
+                vpop();
+                tp_stmt_end();
+                if (tok != TOK_EOF)
+                    expect(")");
+                end_macro();
+            }
+            if (cond_str) {
+                gsym(e);                /* test label */
+                begin_macro(cond_str, 1);
+                next();
+                TP_CMP_BRANCH_TRUE_BEGIN();  /* branches when true */
+                gexpr();
+                TP_CMP_BRANCH_TRUE_END();
+                c = gvtst(0, 0);        /* jump back into the body if true */
+                if (tok != TOK_EOF)
+                    expect(";");
+                end_macro();
+                gsym_addr(c, body_addr);
+            } else {
+                gjmp_addr(body_addr);   /* for (init; ; incr) */
+            }
+            next();                     /* restore the token after the loop */
+        } else {
+            gjmp_addr(body_addr);       /* for (;;) */
+        }
+    }
+
+    gsym_addr(b, d);
+    gsym(a);
+    TP_LOOP_POOL_CLOSE();
+    prev_scope(&o, 0);
 }
 
 /* ------------------------------------------------------------------ */
