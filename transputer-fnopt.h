@@ -492,25 +492,19 @@ static int tps_proven_nonvolatile_ldl(struct tp_relax_insn *ins, int i)
     return 0;
 }
 
-/*
- * Mark the redundant workspace round trips in a decoded function.  `top` is
- * the number of words tp_gaddr_cache put over the locals.
- * Returns the number of instructions removed.
- */
-static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
-                             int top)
-{
+/* What the phases of tp_sched_function() share. */
+struct tps {
+    struct tp_relax_insn *ins;
     struct tps_ann *an;
     int *idx;               /* byte offset -> instruction index */
-    int i, pass, round, removed = 0;
-    int resv_escape;        /* a reserved word's address escapes (S10) */
-    static int sched_off = -1;
+    int n, size;
+    int top;                /* words tp_gaddr_cache put over the locals */
     /* Slots this pass is allowed to treat as pseudo-registers.  The frame's
      * reserved region can now be smaller than NB_REGS, in which case locals
      * occupy low slot numbers; an LDLP of one of *these* must disqualify the
      * whole function. */
-    const int nreg = (func_frame_reserved < NB_REGS)
-                     ? func_frame_reserved : NB_REGS;
+    int nreg;
+
     /* Slots the pass reasons about at all.  Every word of the function's own
      * frame qualifies, not just the register file:
      *
@@ -536,36 +530,35 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
      *
      * Capped at 32 because `liveout` is a 32-bit mask - which happens to be
      * the T9000 workspace-cache size as well. */
-    int nslot = func_frame_words;
+    int nslot;
     /* No LDLP hands out the address of a workspace word, and there is no
      * inline assembly, so nothing outside this function can write one. */
     int frame_private;
+    int resv_escape;        /* a reserved word's address escapes (S10) */
+    int removed;            /* instructions removed so far */
+};
 
-    if (sched_off < 0) {
-        sched_off = getenv("TP_NO_SCHED") ? 1 : 0;
-    }
-    if (sched_off || n <= 0 || size <= 0)
-        return 0;
+/* Pre-scan: does any LDLP hand out the address of a frame word in a shape
+ * this pass cannot follow?  The recognised form is LDLP immediately
+ * followed by STNL or LDNL, which is the back end staging an outgoing call
+ * argument or reading one back - a plain access to a known slot.  Anything
+ * else (`&local` passed to a callee, the FPU's `ldlp s ; fpldnlsn`) puts
+ * the word beyond this pass's sight, so give up the widened range and
+ * reason about the register file alone, as before.
+ *
+ * Inline assembly is opaque for the same reason and gets the same
+ * treatment. */
+static void tps_prescan(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    const int n = s->n;
+    const int nreg = s->nreg;
+    int i;
 
-    if (nslot > 32)
-        nslot = 32;
-    if (nslot < nreg)
-        nslot = nreg;
-
-    /* Pre-scan: does any LDLP hand out the address of a frame word in a shape
-     * this pass cannot follow?  The recognised form is LDLP immediately
-     * followed by STNL or LDNL, which is the back end staging an outgoing call
-     * argument or reading one back - a plain access to a known slot.  Anything
-     * else (`&local` passed to a callee, the FPU's `ldlp s ; fpldnlsn`) puts
-     * the word beyond this pass's sight, so give up the widened range and
-     * reason about the register file alone, as before.
-     *
-     * Inline assembly is opaque for the same reason and gets the same
-     * treatment. */
     {
         int escapes_local = 0;
 
-        frame_private = !func_uses_inline_asm;
+        s->frame_private = !func_uses_inline_asm;
         for (i = 0; i < n; i++) {
             int j, opd = ins[i].operand;
             if (ins[i].opcode != TP_ENC_LDLP)
@@ -581,23 +574,27 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
             /* Nothing may hold the address of *any* workspace word for copy
              * propagation to re-materialise a value from a slot the def/use
              * annotations do not cover - an incoming argument, mainly. */
-            frame_private = 0;
-            if (opd >= 0 && opd < nslot)
+            s->frame_private = 0;
+            if (opd >= 0 && opd < s->nslot)
                 escapes_local = 1;          /* also disqualifies the local range */
         }
         if (escapes_local || func_uses_inline_asm)
-            nslot = nreg;
+            s->nslot = nreg;
     }
+}
 
-    an = tcc_mallocz(sizeof(*an) * n);
-    idx = tcc_malloc(sizeof(int) * (size + 1));
-    for (i = 0; i <= size; i++)
-        idx[i] = -1;
-    for (i = 0; i < n; i++)
-        idx[ins[i].old_off] = i;
-    idx[size] = -1;                       /* a branch past the last byte */
+/* ---- 1. annotate, and refuse anything this model cannot describe ---- */
+static int tps_annotate(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int *idx = s->idx;
+    const int n = s->n;
+    const int size = s->size;
+    const int nreg = s->nreg;
+    const int nslot = s->nslot;
+    int i;
 
-    /* ---- 1. annotate, and refuse anything this model cannot describe ---- */
     for (i = 0; i < n; i++) {
         int opc = ins[i].opcode, opd = ins[i].operand;
         int rd = 0, dl = 0;
@@ -659,7 +656,6 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
              * the local range is not being reasoned about at all. */
             if (!indirect && opd >= 0 && opd < nreg) {
                 tps_bail("ldlp-escape");
-                tcc_free(idx); tcc_free(an);
                 return 0;
             }
         } else if (opc == TP_ENC_AJW) {
@@ -677,12 +673,10 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
             if (i != first && !(j < n && ins[j].opcode == TP_ENC_OPR &&
                                 ins[j].operand == TP_OPR_RET)) {
                 tps_bail("ajw-midfunction");
-                tcc_free(idx); tcc_free(an);
                 return 0;
             }
         } else if (opc == TP_ENC_OPR && opd == TP_OPR_GAJW) {
             tps_bail("gajw");
-            tcc_free(idx); tcc_free(an);
             return 0;
         } else if (opc == TP_ENC_CALL ||
                    (opc == TP_ENC_OPR && opd == TP_OPR_GCALL)) {
@@ -722,16 +716,26 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
             if (j < n && !(p >= 0 && ins[p].opcode == TP_ENC_AJW &&
                            ins[p].operand >= 0)) {
                 tps_bail("ret-midfunction");
-                tcc_free(idx); tcc_free(an);
                 return 0;
             }
             an[i].succ1 = -1;
         }
     }
+    return 1;
+}
 
-    /* ---- 2. branch targets.  The emitter zeroes its evaluation-stack
-     * bookkeeping at every label, so a target is a point where the depth is
-     * known to be zero. ---- */
+/* ---- 2. branch targets.  The emitter zeroes its evaluation-stack
+ * bookkeeping at every label, so a target is a point where the depth is
+ * known to be zero. ---- */
+static void tps_mark_heads(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int *idx = s->idx;
+    const int n = s->n;
+    const int size = s->size;
+    int i;
+
     an[0].head = 1;
     for (i = 0; i < n; i++) {
         int k;
@@ -743,10 +747,18 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
         if (k >= 0)
             an[k].head = 1;
     }
+}
 
-    /* Record the original pair before S4 removes the address staging store.
-     * Both reads must be proven nonvolatile, and the intervening store must
-     * not change the index. Branch entries and relocations are barriers. */
+/* Record the original pair before S4 removes the address staging store.
+ * Both reads must be proven nonvolatile, and the intervening store must
+ * not change the index. Branch entries and relocations are barriers. */
+static void tps_note_indexed_pairs(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n && !tp_t414() && !func_uses_inline_asm; i++) {
         int j[7], k;
         j[0] = i;
@@ -762,8 +774,16 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
             !tps_free(ins, an, j[0], j[6])) continue;
         an[j[0]].proven_pair = j[4] + 1;
     }
+}
 
-    /* ---- 3. evaluation-stack depth within each block ---- */
+/* ---- 3. evaluation-stack depth within each block ---- */
+static void tps_depths(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int prev_call = i > 0 && ((ins[i - 1].opcode == TP_ENC_CALL) ||
                                   (ins[i - 1].opcode == TP_ENC_OPR &&
@@ -784,8 +804,15 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
             an[i].depth = -1;
         }
     }
+}
 
-    /* ---- 4. backward liveness over the pseudo-register slots ---- */
+/* ---- 4. backward liveness over the pseudo-register slots ---- */
+static int tps_liveness(struct tps *s)
+{
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i, pass;
+
     for (pass = 0; pass < 128; pass++) {
         int changed = 0;
         for (i = n - 1; i >= 0; i--) {
@@ -814,26 +841,35 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
     }
     if (pass == 128) {                    /* did not settle: do not risk it */
         tps_bail("liveness");
-        tcc_free(idx); tcc_free(an);
         return 0;
     }
+    return 1;
+}
 
-    /* ---- 4a. call results nobody reads (S9) ----
-     *
-     * gfunc_call() stores the result words of every non-void call whether or
-     * not the caller uses them, and a call whose value is discarded - most of
-     * them, in the kernel - leaves that store dead: 34k of the 62k `stl 7`
-     * in vmlinux.  Dropping it leaves the word on the stack, underneath
-     * everything pushed afterwards, where nothing reads it, because the
-     * emitter treats the stack as empty once the results are captured.
-     *
-     * Two things keep that true.  Only a dead *suffix* of the capture run
-     * may go, as an STL left after a deleted one would pop the wrong word.
-     * And it runs here, on the emitter's own stream: once the rules below
-     * start carrying values on the stack, a later instruction may read below
-     * its own pushes, and the instruction after the run is required to read
-     * nothing at all.  Removing a dead store changes no other slot's
-     * liveness, so the annotations stay valid for the passes that follow. */
+/* ---- 4a. call results nobody reads (S9) ----
+ *
+ * gfunc_call() stores the result words of every non-void call whether or
+ * not the caller uses them, and a call whose value is discarded - most of
+ * them, in the kernel - leaves that store dead: 34k of the 62k `stl 7`
+ * in vmlinux.  Dropping it leaves the word on the stack, underneath
+ * everything pushed afterwards, where nothing reads it, because the
+ * emitter treats the stack as empty once the results are captured.
+ *
+ * Two things keep that true.  Only a dead *suffix* of the capture run
+ * may go, as an STL left after a deleted one would pop the wrong word.
+ * And it runs here, on the emitter's own stream: once the rules below
+ * start carrying values on the stack, a later instruction may read below
+ * its own pushes, and the instruction after the run is required to read
+ * nothing at all.  Removing a dead store changes no other slot's
+ * liveness, so the annotations stay valid for the passes that follow. */
+static void tps_drop_unread_results(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    const int nslot = s->nslot;
+    int i;
+
     if (tps_on(8)) {
         for (i = 0; i < n; i++) {
             int j, k, last = -1;
@@ -858,63 +894,73 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
                 if (a < 0 || a >= nslot || (an[j].liveout & (1u << a)))
                     break;
                 an[j].dead = 1;
-                removed++;
+                s->removed++;
                 tps_note(8);
             }
         }
     }
+}
 
-    /* ---- 4b. copy propagation ----
-     *
-     * `LDL x ; STL y` copies one workspace word to another.  The peephole
-     * rules above can only remove it when y turns out to be dead (S6) or when
-     * the reload happens to sit within reach of the evaluation stack (S1, S4,
-     * S5) - and even then S5 pays a REV for the privilege:
-     *
-     *     ldl 11 ; stl 9 ; ldc 0 ; ldl 9      ->   ldl 11 ; ldc 0 ; rev
-     *
-     * If instead every reader of y loads x directly, the copy simply goes
-     * away, and nothing is added:
-     *
-     *                                         ->   ldc 0 ; ldl 11
-     *
-     * This is the shape TCC's prologue leaves behind for every parameter, and
-     * over a kernel corpus `ldl ; stl` pairs were the largest class of stores
-     * still standing after everything above.
-     *
-     * The rewrite is valid without any reaching-definitions machinery when two
-     * things hold:
-     *
-     *   - y has exactly one definition in the whole function, this one, so
-     *     every `LDL y` anywhere reads this copy (or reads y before it is
-     *     ever written, which was already undefined and stays that way);
-     *   - x is never written in the function at all, so `LDL x` yields the
-     *     same value at every point.
-     *
-     * "Never written" has to account for what the pass cannot see directly:
-     * a store through a pointer (excluded by frame_private) and a callee
-     * writing back through its own stacked parameters, which land in this
-     * function's outgoing-argument area - hence the func_max_outgoing_words
-     * floor on x.
-     *
-     * A proper must-availability dataflow was written and measured as the
-     * general replacement for those two tests, on the strength of a ceiling
-     * measurement: of 17,374 `LDL x ; STL y` pairs in the kernel corpus these
-     * rules take 49.8%, with 18.9% blocked only by x being written somewhere
-     * (often after the last use of y) and 3.8% only by y having several
-     * definitions.  It came out 2,003 instructions and 1,036 groups *worse*:
-     * batching 32 copies into one fixpoint, and forbidding two committed
-     * copies from sharing a slot, together lose more instances than the extra
-     * generality wins - the simple rules here re-read the instruction stream
-     * as they go, so a chain like `ldl 15; stl 13 ... ldl 13; stl 11` folds
-     * end to end, which the batched version cannot see.  Revisit only with a
-     * per-commit refresh, and measure.
-     *
-     * x is also required to stay inside the T9000 workspace cache and to
-     * encode no wider than y, so that no use site gets slower or longer.
-     *
-     * Runs before the peephole rounds: where both could fire, this is strictly
-     * the better outcome, and it exposes further round trips for them. */
+/* ---- 4b. copy propagation ----
+ *
+ * `LDL x ; STL y` copies one workspace word to another.  The peephole
+ * rules above can only remove it when y turns out to be dead (S6) or when
+ * the reload happens to sit within reach of the evaluation stack (S1, S4,
+ * S5) - and even then S5 pays a REV for the privilege:
+ *
+ *     ldl 11 ; stl 9 ; ldc 0 ; ldl 9      ->   ldl 11 ; ldc 0 ; rev
+ *
+ * If instead every reader of y loads x directly, the copy simply goes
+ * away, and nothing is added:
+ *
+ *                                         ->   ldc 0 ; ldl 11
+ *
+ * This is the shape TCC's prologue leaves behind for every parameter, and
+ * over a kernel corpus `ldl ; stl` pairs were the largest class of stores
+ * still standing after everything above.
+ *
+ * The rewrite is valid without any reaching-definitions machinery when two
+ * things hold:
+ *
+ *   - y has exactly one definition in the whole function, this one, so
+ *     every `LDL y` anywhere reads this copy (or reads y before it is
+ *     ever written, which was already undefined and stays that way);
+ *   - x is never written in the function at all, so `LDL x` yields the
+ *     same value at every point.
+ *
+ * "Never written" has to account for what the pass cannot see directly:
+ * a store through a pointer (excluded by frame_private) and a callee
+ * writing back through its own stacked parameters, which land in this
+ * function's outgoing-argument area - hence the func_max_outgoing_words
+ * floor on x.
+ *
+ * A proper must-availability dataflow was written and measured as the
+ * general replacement for those two tests, on the strength of a ceiling
+ * measurement: of 17,374 `LDL x ; STL y` pairs in the kernel corpus these
+ * rules take 49.8%, with 18.9% blocked only by x being written somewhere
+ * (often after the last use of y) and 3.8% only by y having several
+ * definitions.  It came out 2,003 instructions and 1,036 groups *worse*:
+ * batching 32 copies into one fixpoint, and forbidding two committed
+ * copies from sharing a slot, together lose more instances than the extra
+ * generality wins - the simple rules here re-read the instruction stream
+ * as they go, so a chain like `ldl 15; stl 13 ... ldl 13; stl 11` folds
+ * end to end, which the batched version cannot see.  Revisit only with a
+ * per-commit refresh, and measure.
+ *
+ * x is also required to stay inside the T9000 workspace cache and to
+ * encode no wider than y, so that no use site gets slower or longer.
+ *
+ * Runs before the peephole rounds: where both could fire, this is strictly
+ * the better outcome, and it exposes further round trips for them. */
+static void tps_copy_propagate(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    const int nslot = s->nslot;
+    const int frame_private = s->frame_private;
+    int i;
+
     if (frame_private) {
         for (i = 0; i < n; i++) {
             int x, y, j, k, ok = 1;
@@ -924,7 +970,7 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
             /* `LDC k ; STL y` was tried as a second source form and measured:
              * 326 instructions and 76 groups over the whole kernel corpus,
              * 0.09%.  Almost no constant copy survives, and the ones that do
-             * are already caught by S1/S4/S5/S6, so it was removed again. */
+             * are already caught by S1/S4/S5/S6, so it was s->removed again. */
             x = ins[i].operand;
             if (x < 0 || x >= 32)           /* stays in the workspace cache */
                 continue;
@@ -991,367 +1037,449 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
                 an[k].use = (x < nslot) ? x : -1;
             }
             an[i].dead = an[j].dead = 1;
-            removed += 2;
+            s->removed += 2;
             i = j;
         }
     }
+}
 
-    /* For S10 beyond the liveness mask: is every LDLP of a reserved word
-     * one access tps_dead_after can see? */
-    resv_escape = 0;
-    for (i = 0; i < n && !resv_escape; i++) {
+/* For S10 beyond the liveness mask: is every LDLP of a reserved word
+ * one access tps_dead_after can see? */
+static void tps_reserved_escape(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    const int n = s->n;
+    int i;
+
+    for (i = 0; i < n && !s->resv_escape; i++) {
         int j, lo, t = ins[i].operand;
         if (ins[i].opcode != TP_ENC_LDLP || t < 0 || t >= func_frame_reserved)
             continue;
         for (j = i + 1; j < n && ins[j].opcode == -1; j++)
             ;
         if (j == n || tpg_ldlp_extent(&ins[j], &lo) < 0)
-            resv_escape = 1;
+            s->resv_escape = 1;
     }
+}
 
-    /* ---- 5. pattern matching, iterated ---- */
-    for (round = 0; round < TPS_ROUNDS; round++) {
-        int changed = 0;
+/* The rules of one matching round.  Each is tried at instruction i and
+ * returns 1 if it rewrote something; where it gives *next, matching goes
+ * on after that instruction.  For the rules that start at a store,
+ * `STL a` is at i and i1 is the instruction after it. */
 
-        for (i = 0; i < n; i++) {
-            int a, b, i1, i2, i3, j, r, maxr;
+static int tps_s1(struct tps *s, int i, int a, int i1, int *next)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
 
-            if (an[i].dead || ins[i].pinned || ins[i].opcode == -1)
-                continue;
+    /* S1 */
+    if (tps_on(0) &&
+        ins[i1].opcode == TP_ENC_LDL && ins[i1].operand == a &&
+        !(an[i1].liveout & (1u << a)) && tps_free(ins, an, i, i1)) {
+        an[i].dead = an[i1].dead = 1;
+        s->removed += 2; tps_note(0);
+        *next = i1;
+        return 1;
+    }
+    return 0;
+}
 
-            if (ins[i].opcode != TP_ENC_STL)
-                goto try_copy;
+static int tps_s2_s3_s7(struct tps *s, int i, int a, int i1, int *next)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    const int nslot = s->nslot;
+    int b, i2, i3;
+
+    /* S2 / S3 */
+    if (ins[i1].opcode == TP_ENC_STL &&
+        ins[i1].operand >= 0 && ins[i1].operand < nslot &&
+        ins[i1].operand != a) {
+        b = ins[i1].operand;
+        i2 = tps_next(ins, an, n, i1);
+        i3 = i2 >= 0 ? tps_next(ins, an, n, i2) : -1;
+        if (i3 >= 0 && ins[i2].opcode == TP_ENC_LDL &&
+            ins[i3].opcode == TP_ENC_LDL &&
+            !(an[i3].liveout & ((1u << a) | (1u << b))) &&
+            tps_free(ins, an, i, i3)) {
+            if (tps_on(1) &&
+                ins[i2].operand == b && ins[i3].operand == a) {
+                an[i].dead = an[i1].dead = 1;
+                an[i2].dead = an[i3].dead = 1;
+                s->removed += 4; tps_note(1);
+                *next = i3;
+                return 1;
+            }
+            if (tps_on(2) &&
+                ins[i2].operand == a && ins[i3].operand == b) {
+                /* The pair comes back swapped: that is exactly REV. */
+                ins[i].opcode = TP_ENC_OPR;
+                ins[i].operand = TP_OPR_REV;
+                ins[i].is_branch = 0;
+                an[i].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
+                                         &an[i].delta, &an[i].reads);
+                an[i].use = an[i].def = -1;
+                an[i1].dead = an[i2].dead = an[i3].dead = 1;
+                s->removed += 3; tps_note(2);
+                *next = i3;
+                return 1;
+            }
+        }
+        /* S7: STL a ; STL b ; LDL a  ->  REV ; STL b.
+         * REV brings the second value to the top so the surviving
+         * store can take it, leaving the first where LDL a would
+         * have put it back.  Trades a store for an ALU operation and
+         * drops an instruction; this is the shape gfunc_call leaves
+         * after every call that captures both ABI result words. */
+        if (tps_on(6) && i2 >= 0 && ins[i2].opcode == TP_ENC_LDL &&
+            ins[i2].operand == a &&
+            !(an[i2].liveout & (1u << a)) &&
+            tps_free(ins, an, i, i2)) {
+            ins[i].opcode = TP_ENC_OPR;
+            ins[i].operand = TP_OPR_REV;
+            ins[i].is_branch = 0;
+            an[i].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
+                                     &an[i].delta, &an[i].reads);
+            an[i].use = an[i].def = -1;
+            an[i2].dead = 1;
+            s->removed += 1; tps_note(6);
+            *next = i2;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int tps_s11(struct tps *s, int i, int a, int i1)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    const int top = s->top;
+    const int nreg = s->nreg;
+    const int nslot = s->nslot;
+    const int frame_private = s->frame_private;
+    int j;
+
+    /* S11: LDL x ; [LDNLP k ;] STL a ; <e> ; LDL a ; <use>  ->
+     *      <e> ; LDL x ; <use>'
+     * Recompute an address where it is used instead of parking it.
+     * `p[k] = <e>` computes &p[k] before <e>, so the store found it
+     * under the value and S5 paid a REV to bring it back:
+     *     ldl 30; ldnlp 15; <e>; rev; stnl 0  ->  <e>; ldl 30; stnl 15
+     * With an LDNLP, <use> must be an LDNL/STNL/LDNLP, which takes k
+     * into its own displacement; without one, anything.  Valid when
+     * the run is straight-line code (no branch target anywhere in
+     * it, padding included: findRange's `if (c) a = x;` jumped over
+     * the copy), nothing in it writes x, nothing else touches a, and
+     * a is dead after.  The three s->removed instructions push and pop
+     * one word between them, so the stack under them is untouched.
+     * Where S4 would carry the value for nothing (the reload level
+     * with the store, no LDNLP to fold), S4 is left to do it. */
+    if (tps_on(12) && tps_bisect_ok()) {
+        int p0, p1 = tps_prev(ins, an, i), k = 0, x = -1, use = -1;
+        int jn = -1, ok = 1, r = 0, known = 1;
+        if (p1 >= 0 && ins[p1].opcode == TP_ENC_LDNLP) {
+            k = ins[p1].operand;
+            p0 = tps_prev(ins, an, p1);
+        } else {
+            p0 = p1;
+            p1 = -1;
+        }
+        /* A word whose address has escaped could be written through
+         * any pointer; a pseudo-register's never has (the pre-scan
+         * gives up on the function first).  Nor slot 0: outbyte,
+         * outword and the ALT instructions write Wptr[0] without
+         * naming it. */
+        if (p0 < 0 || ins[p0].opcode != TP_ENC_LDL ||
+            (x = ins[p0].operand) <= 0 || x == a ||
+            !tps_free(ins, an, p0, i))
+            ok = 0;
+        if (ok && !frame_private && x >= nreg &&
+            tps_word_escapes(ins, n, x, top))
+            ok = 0;
+        for (j = i1; ok && j >= 0 && j - i < TPS_MAXWIN;
+             j = tps_next(ins, an, n, j)) {
+            int o = ins[j].opcode, d = ins[j].operand, m;
+            if (ins[j].pinned || ins[j].is_branch) {
+                ok = 0;
+            } else if (o == TP_ENC_LDL && d == a) {
+                use = j;
+                break;
+            } else if (an[j].use == a || an[j].def == a ||
+                       (an[j].uses & (1u << a)) ||
+                       (o == TP_ENC_STL && (d == x || d == a)) ||
+                       (o == TP_ENC_LDLP && (d == x || d == x - 1 ||
+                                             d == a))) {
+                ok = 0;
+            } else if (o == TP_ENC_LDLP) {
+                m = tps_next(ins, an, n, j);
+                if (m >= 0 && ins[m].opcode == TP_ENC_STNL &&
+                    d + ins[m].operand == x)
+                    ok = 0;
+            } else if ((o == TP_ENC_CALL ||
+                        (o == TP_ENC_OPR && d == TP_OPR_GCALL)) &&
+                       x < func_max_outgoing_words) {
+                ok = 0;                 /* a callee could write x */
+            }
+            if (an[j].known)
+                r += an[j].delta;
+            else
+                known = 0;
+        }
+        if (use < 0 || !tps_free(ins, an, i, use) ||
+            (an[use].liveout & (1u << a)))
+            ok = 0;
+        if (ok && p1 < 0 && known && r == 0)
+            ok = 0;                     /* S4's, for free */
+        if (ok && p1 >= 0) {
+            jn = tps_next(ins, an, n, use);
+            if (!(jn >= 0 && tps_free(ins, an, use, jn) &&
+                  (ins[jn].opcode == TP_ENC_LDNL ||
+                   ins[jn].opcode == TP_ENC_STNL ||
+                   ins[jn].opcode == TP_ENC_LDNLP)))
+                ok = 0;
+        }
+        if (ok) {
+            an[p0].dead = an[i].dead = 1;
+            if (p1 >= 0) {
+                an[p1].dead = 1;
+                ins[jn].operand += k;
+                if (tp_encode_len(ins[jn].opcode, ins[jn].operand) >
+                    ins[jn].new_len)
+                    ins[jn].new_len = tp_encode_len(ins[jn].opcode,
+                                                    ins[jn].operand);
+            }
+            ins[use].operand = x;
+            if (tp_encode_len(TP_ENC_LDL, x) > ins[use].new_len)
+                ins[use].new_len = tp_encode_len(TP_ENC_LDL, x);
+            an[use].use = x < nslot ? x : -1;
+            /* x is now read at use: it is live from p0 on, which
+             * the liveness computed before the rewrite does not
+             * know.  Without this a later rule took x for dead and
+             * s->removed its store (c-testsuite 00182's `*p++`). */
+            if (x < 32) {
+                int q;
+                for (q = p0; q < use; q++)
+                    an[q].liveout |= 1u << x;
+            }
+            s->removed += p1 >= 0 ? 3 : 2;
+            tps_note(12);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int tps_s4_s5(struct tps *s, int i, int a, int i1, int *next)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int b, j, r, maxr;
+
+    /* S4 / S5: carry the value across a balanced run of code.
+     * `r` is the stack depth relative to the point just after the
+     * STL, so the carried value sits at r == -1 and <e> must never
+     * try to read there. */
+    if (an[i].depth < 1 || an[i].depth > 3 || !an[i].known)
+        return 0;
+    r = 0;
+    maxr = 0;
+    for (j = i1; j >= 0 && j - i < TPS_MAXWIN;
+         j = tps_next(ins, an, n, j)) {
+        if (ins[j].pinned || an[j].head || !an[j].known ||
+            ins[j].is_branch)
+            break;             /* a branch would strand the carry */
+        if (ins[j].opcode == TP_ENC_LDL && ins[j].operand == a) {
+            if (r > 1 || (an[j].liveout & (1u << a)) != 0)
+                break;
+            if (!tps_free(ins, an, i, j))
+                break;
+            if (r == 0) {
+                if (!tps_on(3)) break;
+                an[i].dead = an[j].dead = 1;
+                s->removed += 2; tps_note(3);
+            } else {
+                if (!tps_on(4)) break;
+                /* One value of <e> is stacked above the carry, so
+                 * they come back swapped: reuse the LDL slot as REV. */
+                ins[j].opcode = TP_ENC_OPR;
+                ins[j].operand = TP_OPR_REV;
+                ins[j].is_branch = 0;
+                an[j].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
+                                         &an[j].delta, &an[j].reads);
+                an[j].use = an[j].def = -1;
+                an[i].dead = 1;
+                s->removed += 1; tps_note(4);
+            }
+            /* Everything from here to the reload now runs one word
+             * deeper; a later round must see that. The reload itself
+             * is included because S5 keeps it (as REV). */
+            for (b = i + 1; b <= j; b++)
+                if (an[b].depth >= 0)
+                    an[b].depth++;
+            break;
+        }
+        if (an[j].use == a || an[j].def == a)
+            break;
+        if (an[j].reads > r)
+            break;             /* would consume the carried value */
+        r += an[j].delta;
+        if (r < 0)
+            break;
+        if (r > maxr)
+            maxr = r;
+        if (an[i].depth + maxr > 3)
+            break;             /* would not fit the 3-deep stack */
+    }
+    if (an[i].dead) {
+        *next = (j > i) ? j : i;
+        return 1;
+    }
+    return 0;
+}
+
+static int tps_s12(struct tps *s, int i, int *next)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i1;
+
+    /* S12: LDNLP k ; LDNL/STNL/LDNLP m  ->  LDNL/STNL/LDNLP k+m.
+     * The displacement folds; what S11 leaves behind and what the
+     * emitter could not fold across a parked register. */
+    if (tps_on(13) && ins[i].opcode == TP_ENC_LDNLP &&
+        (i1 = tps_next(ins, an, n, i)) >= 0 &&
+        (ins[i1].opcode == TP_ENC_LDNL ||
+         ins[i1].opcode == TP_ENC_STNL ||
+         ins[i1].opcode == TP_ENC_LDNLP) &&
+        tps_free(ins, an, i, i1)) {
+        ins[i1].operand += ins[i].operand;
+        if (tp_encode_len(ins[i1].opcode, ins[i1].operand) >
+            ins[i1].new_len)
+            ins[i1].new_len = tp_encode_len(ins[i1].opcode,
+                                            ins[i1].operand);
+        an[i].dead = 1;
+        s->removed += 1; tps_note(13);
+        *next = i1;
+        return 1;
+    }
+    return 0;
+}
+
+static int tps_s6_s10(struct tps *s, int i, int *next)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    const int nslot = s->nslot;
+    const int resv_escape = s->resv_escape;
+    int b, i1, i2, i3;
+
+    /* S6: a push straight into a slot nobody reads.  Deleting the
+     * pair is depth-neutral, and only ever leaves more of the stack
+     * intact than the original did. */
+    if (ins[i].opcode != TP_ENC_LDL && ins[i].opcode != TP_ENC_LDC)
+        return 0;
+    i1 = tps_next(ins, an, n, i);
+    if (i1 < 0 || ins[i1].opcode != TP_ENC_STL)
+        return 0;
+    b = ins[i1].operand;
+    if (b < 0)
+        return 0;
+
+    /* S10: LDL x ; STL b ; LDLP b ; <FP load from A>  ->
+     *      LDLP x ; <FP load>
+     * A float copied to a scratch word only to give the FPU an
+     * address can be read where it is, if the scratch word is dead
+     * afterwards.  Nothing in between writes x.  That is how a float
+     * constant kept in a frame word by tp_gaddr_cache is loaded. */
+    if (tps_on(9) && ins[i].opcode == TP_ENC_LDL &&
+        ins[i].operand >= 0 &&
+        (i2 = tps_next(ins, an, n, i1)) >= 0 &&
+        ins[i2].opcode == TP_ENC_LDLP && ins[i2].operand == b &&
+        (i3 = tps_next(ins, an, n, i2)) >= 0 &&
+        ins[i3].opcode == TP_ENC_OPR &&
+        (ins[i3].operand == TP_FPU_LDNLSN ||
+         ins[i3].operand == TP_FPU_LDNLADDSN ||
+         ins[i3].operand == TP_FPU_LDNLMULSN) &&
+        tps_free(ins, an, i, i3) &&
+        (b < nslot ? !(an[i3].liveout & (1u << b))
+                   : b >= func_max_outgoing_words &&
+                     b < func_frame_reserved && !resv_escape &&
+                     tps_dead_after(ins, an, n, i3, b))) {
+        int x = ins[i].operand;
+        ins[i2].operand = x;
+        if (tp_encode_len(TP_ENC_LDLP, x) > ins[i2].new_len)
+            ins[i2].new_len = tp_encode_len(TP_ENC_LDLP, x);
+        an[i2].use = x < nslot ? x : -1;
+        if (x < 32) {           /* now read at i2: live until it */
+            an[i].liveout |= 1u << x;
+            an[i1].liveout |= 1u << x;
+        }
+        an[i].dead = an[i1].dead = 1;
+        s->removed += 2; tps_note(9);
+        *next = i3;
+        return 1;
+    }
+    if (b >= nslot || !tps_on(5))
+        return 0;
+    if (an[i1].liveout & (1u << b))
+        return 0;
+    if (!tps_free(ins, an, i, i1))
+        return 0;
+    an[i].dead = an[i1].dead = 1;
+    s->removed += 2; tps_note(5);
+    *next = i1;
+    return 1;
+}
+
+/* ---- 5. pattern matching: one round.  Returns 1 if anything changed. ---- */
+static int tps_round(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    const int nslot = s->nslot;
+    int i, changed = 0;
+
+    for (i = 0; i < n; i++) {
+        int a, i1;
+
+        if (an[i].dead || ins[i].pinned || ins[i].opcode == -1)
+            continue;
+        if (ins[i].opcode == TP_ENC_STL) {
             a = ins[i].operand;
             if (a < 0 || a >= nslot)
                 continue;
             i1 = tps_next(ins, an, n, i);
             if (i1 < 0)
                 continue;
-
-            /* S1 */
-            if (tps_on(0) &&
-                ins[i1].opcode == TP_ENC_LDL && ins[i1].operand == a &&
-                !(an[i1].liveout & (1u << a)) && tps_free(ins, an, i, i1)) {
-                an[i].dead = an[i1].dead = 1;
-                removed += 2; changed = 1; tps_note(0);
-                i = i1;
-                continue;
-            }
-
-            /* S2 / S3 */
-            if (ins[i1].opcode == TP_ENC_STL &&
-                ins[i1].operand >= 0 && ins[i1].operand < nslot &&
-                ins[i1].operand != a) {
-                b = ins[i1].operand;
-                i2 = tps_next(ins, an, n, i1);
-                i3 = i2 >= 0 ? tps_next(ins, an, n, i2) : -1;
-                if (i3 >= 0 && ins[i2].opcode == TP_ENC_LDL &&
-                    ins[i3].opcode == TP_ENC_LDL &&
-                    !(an[i3].liveout & ((1u << a) | (1u << b))) &&
-                    tps_free(ins, an, i, i3)) {
-                    if (tps_on(1) &&
-                        ins[i2].operand == b && ins[i3].operand == a) {
-                        an[i].dead = an[i1].dead = 1;
-                        an[i2].dead = an[i3].dead = 1;
-                        removed += 4; changed = 1; tps_note(1);
-                        i = i3;
-                        continue;
-                    }
-                    if (tps_on(2) &&
-                        ins[i2].operand == a && ins[i3].operand == b) {
-                        /* The pair comes back swapped: that is exactly REV. */
-                        ins[i].opcode = TP_ENC_OPR;
-                        ins[i].operand = TP_OPR_REV;
-                        ins[i].is_branch = 0;
-                        an[i].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
-                                                 &an[i].delta, &an[i].reads);
-                        an[i].use = an[i].def = -1;
-                        an[i1].dead = an[i2].dead = an[i3].dead = 1;
-                        removed += 3; changed = 1; tps_note(2);
-                        i = i3;
-                        continue;
-                    }
-                }
-                /* S7: STL a ; STL b ; LDL a  ->  REV ; STL b.
-                 * REV brings the second value to the top so the surviving
-                 * store can take it, leaving the first where LDL a would
-                 * have put it back.  Trades a store for an ALU operation and
-                 * drops an instruction; this is the shape gfunc_call leaves
-                 * after every call that captures both ABI result words. */
-                if (tps_on(6) && i2 >= 0 && ins[i2].opcode == TP_ENC_LDL &&
-                    ins[i2].operand == a &&
-                    !(an[i2].liveout & (1u << a)) &&
-                    tps_free(ins, an, i, i2)) {
-                    ins[i].opcode = TP_ENC_OPR;
-                    ins[i].operand = TP_OPR_REV;
-                    ins[i].is_branch = 0;
-                    an[i].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
-                                             &an[i].delta, &an[i].reads);
-                    an[i].use = an[i].def = -1;
-                    an[i2].dead = 1;
-                    removed += 1; changed = 1; tps_note(6);
-                    i = i2;
-                    continue;
-                }
-            }
-
-            /* S11: LDL x ; [LDNLP k ;] STL a ; <e> ; LDL a ; <use>  ->
-             *      <e> ; LDL x ; <use>'
-             * Recompute an address where it is used instead of parking it.
-             * `p[k] = <e>` computes &p[k] before <e>, so the store found it
-             * under the value and S5 paid a REV to bring it back:
-             *     ldl 30; ldnlp 15; <e>; rev; stnl 0  ->  <e>; ldl 30; stnl 15
-             * With an LDNLP, <use> must be an LDNL/STNL/LDNLP, which takes k
-             * into its own displacement; without one, anything.  Valid when
-             * the run is straight-line code (no branch target anywhere in
-             * it, padding included: findRange's `if (c) a = x;` jumped over
-             * the copy), nothing in it writes x, nothing else touches a, and
-             * a is dead after.  The three removed instructions push and pop
-             * one word between them, so the stack under them is untouched.
-             * Where S4 would carry the value for nothing (the reload level
-             * with the store, no LDNLP to fold), S4 is left to do it. */
-            if (tps_on(12) && tps_bisect_ok()) {
-                int p0, p1 = tps_prev(ins, an, i), k = 0, x = -1, use = -1;
-                int jn = -1, ok = 1, r = 0, known = 1;
-                if (p1 >= 0 && ins[p1].opcode == TP_ENC_LDNLP) {
-                    k = ins[p1].operand;
-                    p0 = tps_prev(ins, an, p1);
-                } else {
-                    p0 = p1;
-                    p1 = -1;
-                }
-                /* A word whose address has escaped could be written through
-                 * any pointer; a pseudo-register's never has (the pre-scan
-                 * gives up on the function first).  Nor slot 0: outbyte,
-                 * outword and the ALT instructions write Wptr[0] without
-                 * naming it. */
-                if (p0 < 0 || ins[p0].opcode != TP_ENC_LDL ||
-                    (x = ins[p0].operand) <= 0 || x == a ||
-                    !tps_free(ins, an, p0, i))
-                    ok = 0;
-                if (ok && !frame_private && x >= nreg &&
-                    tps_word_escapes(ins, n, x, top))
-                    ok = 0;
-                for (j = i1; ok && j >= 0 && j - i < TPS_MAXWIN;
-                     j = tps_next(ins, an, n, j)) {
-                    int o = ins[j].opcode, d = ins[j].operand, m;
-                    if (ins[j].pinned || ins[j].is_branch) {
-                        ok = 0;
-                    } else if (o == TP_ENC_LDL && d == a) {
-                        use = j;
-                        break;
-                    } else if (an[j].use == a || an[j].def == a ||
-                               (an[j].uses & (1u << a)) ||
-                               (o == TP_ENC_STL && (d == x || d == a)) ||
-                               (o == TP_ENC_LDLP && (d == x || d == x - 1 ||
-                                                     d == a))) {
-                        ok = 0;
-                    } else if (o == TP_ENC_LDLP) {
-                        m = tps_next(ins, an, n, j);
-                        if (m >= 0 && ins[m].opcode == TP_ENC_STNL &&
-                            d + ins[m].operand == x)
-                            ok = 0;
-                    } else if ((o == TP_ENC_CALL ||
-                                (o == TP_ENC_OPR && d == TP_OPR_GCALL)) &&
-                               x < func_max_outgoing_words) {
-                        ok = 0;                 /* a callee could write x */
-                    }
-                    if (an[j].known)
-                        r += an[j].delta;
-                    else
-                        known = 0;
-                }
-                if (use < 0 || !tps_free(ins, an, i, use) ||
-                    (an[use].liveout & (1u << a)))
-                    ok = 0;
-                if (ok && p1 < 0 && known && r == 0)
-                    ok = 0;                     /* S4's, for free */
-                if (ok && p1 >= 0) {
-                    jn = tps_next(ins, an, n, use);
-                    if (!(jn >= 0 && tps_free(ins, an, use, jn) &&
-                          (ins[jn].opcode == TP_ENC_LDNL ||
-                           ins[jn].opcode == TP_ENC_STNL ||
-                           ins[jn].opcode == TP_ENC_LDNLP)))
-                        ok = 0;
-                }
-                if (ok) {
-                    an[p0].dead = an[i].dead = 1;
-                    if (p1 >= 0) {
-                        an[p1].dead = 1;
-                        ins[jn].operand += k;
-                        if (tp_encode_len(ins[jn].opcode, ins[jn].operand) >
-                            ins[jn].new_len)
-                            ins[jn].new_len = tp_encode_len(ins[jn].opcode,
-                                                            ins[jn].operand);
-                    }
-                    ins[use].operand = x;
-                    if (tp_encode_len(TP_ENC_LDL, x) > ins[use].new_len)
-                        ins[use].new_len = tp_encode_len(TP_ENC_LDL, x);
-                    an[use].use = x < nslot ? x : -1;
-                    /* x is now read at use: it is live from p0 on, which
-                     * the liveness computed before the rewrite does not
-                     * know.  Without this a later rule took x for dead and
-                     * removed its store (c-testsuite 00182's `*p++`). */
-                    if (x < 32) {
-                        int q;
-                        for (q = p0; q < use; q++)
-                            an[q].liveout |= 1u << x;
-                    }
-                    removed += p1 >= 0 ? 3 : 2;
-                    changed = 1; tps_note(12);
-                    continue;
-                }
-            }
-
-            /* S4 / S5: carry the value across a balanced run of code.
-             * `r` is the stack depth relative to the point just after the
-             * STL, so the carried value sits at r == -1 and <e> must never
-             * try to read there. */
-            if (an[i].depth < 1 || an[i].depth > 3 || !an[i].known)
-                continue;
-            r = 0;
-            maxr = 0;
-            for (j = i1; j >= 0 && j - i < TPS_MAXWIN;
-                 j = tps_next(ins, an, n, j)) {
-                if (ins[j].pinned || an[j].head || !an[j].known ||
-                    ins[j].is_branch)
-                    break;             /* a branch would strand the carry */
-                if (ins[j].opcode == TP_ENC_LDL && ins[j].operand == a) {
-                    if (r > 1 || (an[j].liveout & (1u << a)) != 0)
-                        break;
-                    if (!tps_free(ins, an, i, j))
-                        break;
-                    if (r == 0) {
-                        if (!tps_on(3)) break;
-                        an[i].dead = an[j].dead = 1;
-                        removed += 2; tps_note(3);
-                    } else {
-                        if (!tps_on(4)) break;
-                        /* One value of <e> is stacked above the carry, so
-                         * they come back swapped: reuse the LDL slot as REV. */
-                        ins[j].opcode = TP_ENC_OPR;
-                        ins[j].operand = TP_OPR_REV;
-                        ins[j].is_branch = 0;
-                        an[j].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
-                                                 &an[j].delta, &an[j].reads);
-                        an[j].use = an[j].def = -1;
-                        an[i].dead = 1;
-                        removed += 1; tps_note(4);
-                    }
-                    /* Everything from here to the reload now runs one word
-                     * deeper; a later round must see that. The reload itself
-                     * is included because S5 keeps it (as REV). */
-                    for (b = i + 1; b <= j; b++)
-                        if (an[b].depth >= 0)
-                            an[b].depth++;
-                    changed = 1;
-                    break;
-                }
-                if (an[j].use == a || an[j].def == a)
-                    break;
-                if (an[j].reads > r)
-                    break;             /* would consume the carried value */
-                r += an[j].delta;
-                if (r < 0)
-                    break;
-                if (r > maxr)
-                    maxr = r;
-                if (an[i].depth + maxr > 3)
-                    break;             /* would not fit the 3-deep stack */
-            }
-            if (an[i].dead) {
-                i = (j > i) ? j : i;
-                continue;
-            }
-            continue;
-
-try_copy:
-            /* S12: LDNLP k ; LDNL/STNL/LDNLP m  ->  LDNL/STNL/LDNLP k+m.
-             * The displacement folds; what S11 leaves behind and what the
-             * emitter could not fold across a parked register. */
-            if (tps_on(13) && ins[i].opcode == TP_ENC_LDNLP &&
-                (i1 = tps_next(ins, an, n, i)) >= 0 &&
-                (ins[i1].opcode == TP_ENC_LDNL ||
-                 ins[i1].opcode == TP_ENC_STNL ||
-                 ins[i1].opcode == TP_ENC_LDNLP) &&
-                tps_free(ins, an, i, i1)) {
-                ins[i1].operand += ins[i].operand;
-                if (tp_encode_len(ins[i1].opcode, ins[i1].operand) >
-                    ins[i1].new_len)
-                    ins[i1].new_len = tp_encode_len(ins[i1].opcode,
-                                                    ins[i1].operand);
-                an[i].dead = 1;
-                removed += 1; changed = 1; tps_note(13);
-                i = i1;
-                continue;
-            }
-
-            /* S6: a push straight into a slot nobody reads.  Deleting the
-             * pair is depth-neutral, and only ever leaves more of the stack
-             * intact than the original did. */
-            if (ins[i].opcode != TP_ENC_LDL && ins[i].opcode != TP_ENC_LDC)
-                continue;
-            i1 = tps_next(ins, an, n, i);
-            if (i1 < 0 || ins[i1].opcode != TP_ENC_STL)
-                continue;
-            b = ins[i1].operand;
-            if (b < 0)
-                continue;
-
-            /* S10: LDL x ; STL b ; LDLP b ; <FP load from A>  ->
-             *      LDLP x ; <FP load>
-             * A float copied to a scratch word only to give the FPU an
-             * address can be read where it is, if the scratch word is dead
-             * afterwards.  Nothing in between writes x.  That is how a float
-             * constant kept in a frame word by tp_gaddr_cache is loaded. */
-            if (tps_on(9) && ins[i].opcode == TP_ENC_LDL &&
-                ins[i].operand >= 0 &&
-                (i2 = tps_next(ins, an, n, i1)) >= 0 &&
-                ins[i2].opcode == TP_ENC_LDLP && ins[i2].operand == b &&
-                (i3 = tps_next(ins, an, n, i2)) >= 0 &&
-                ins[i3].opcode == TP_ENC_OPR &&
-                (ins[i3].operand == TP_FPU_LDNLSN ||
-                 ins[i3].operand == TP_FPU_LDNLADDSN ||
-                 ins[i3].operand == TP_FPU_LDNLMULSN) &&
-                tps_free(ins, an, i, i3) &&
-                (b < nslot ? !(an[i3].liveout & (1u << b))
-                           : b >= func_max_outgoing_words &&
-                             b < func_frame_reserved && !resv_escape &&
-                             tps_dead_after(ins, an, n, i3, b))) {
-                int x = ins[i].operand;
-                ins[i2].operand = x;
-                if (tp_encode_len(TP_ENC_LDLP, x) > ins[i2].new_len)
-                    ins[i2].new_len = tp_encode_len(TP_ENC_LDLP, x);
-                an[i2].use = x < nslot ? x : -1;
-                if (x < 32) {           /* now read at i2: live until it */
-                    an[i].liveout |= 1u << x;
-                    an[i1].liveout |= 1u << x;
-                }
-                an[i].dead = an[i1].dead = 1;
-                removed += 2; changed = 1; tps_note(9);
-                i = i3;
-                continue;
-            }
-            if (b >= nslot || !tps_on(5))
-                continue;
-            if (an[i1].liveout & (1u << b))
-                continue;
-            if (!tps_free(ins, an, i, i1))
-                continue;
-            an[i].dead = an[i1].dead = 1;
-            removed += 2; changed = 1; tps_note(5);
-            i = i1;
+            if (tps_s1(s, i, a, i1, &i) || tps_s2_s3_s7(s, i, a, i1, &i) ||
+                tps_s11(s, i, a, i1) || tps_s4_s5(s, i, a, i1, &i))
+                changed = 1;
+        } else if (tps_s12(s, i, &i) || tps_s6_s10(s, i, &i)) {
+            changed = 1;
         }
-
-        if (!changed)
-            break;
     }
+    return changed;
+}
 
-    /* S4 may expose:
-     *   LDL i; LDLP a; WSUB; LDL i; LDLP a; FPLDNLSNI
-     * The already-computed address can instead be duplicated:
-     *   LDL i; LDLP a; WSUB; DUP; FPLDNLSN
-     * The floating-point access remains in place and occurs exactly once. */
+/* S4 may expose:
+ *   LDL i; LDLP a; WSUB; LDL i; LDLP a; FPLDNLSNI
+ * The already-computed address can instead be duplicated:
+ *   LDL i; LDLP a; WSUB; DUP; FPLDNLSN
+ * The floating-point access remains in place and occurs exactly once. */
+static void tps_dup_indexed_pair(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int j[6], k;
         if (!an[i].proven_pair || an[i].dead) continue;
@@ -1376,25 +1504,33 @@ try_copy:
         an[j[4]].known = 1; an[j[4]].delta = an[j[4]].reads = 0;
         ins[j[5]].operand = TP_FPU_LDNLSN;
         an[j[5]].known = tps_effect(ins[j[5]].opcode, ins[j[5]].operand, &an[j[5]].delta, &an[j[5]].reads);
-        removed++;
+        s->removed++;
     }
+}
 
-    /* ---- 5a. delete a REV by swapping the two pure pushes that feed it ----
-     *
-     * `LDL a ; LDL b ; REV` and `LDL b ; LDL a` leave exactly the same stack:
-     * LDL and LDC are pure pushes that read no stack and have no side effect,
-     * so the REV only undoes the order they were emitted in. Emitting them the
-     * other way round removes the instruction outright — strictly better than
-     * the commutative-consumer rule below, which only applies when the
-     * consumer tolerates either order.
-     *
-     * This is the dominant shape: of the 17,808 `REV; STNL` sites measured
-     * across 462 kernel translation units, 84.6% are preceded by exactly two
-     * LDLs. STNL wants AReg=address, BReg=value, so those REVs are purely the
-     * scheduler having produced the pair the wrong way round.
-     *
-     * Both pushes must be reached together: if the second one is a branch
-     * target, control can arrive without having executed the first. */
+/* ---- 5a. delete a REV by swapping the two pure pushes that feed it ----
+ *
+ * `LDL a ; LDL b ; REV` and `LDL b ; LDL a` leave exactly the same stack:
+ * LDL and LDC are pure pushes that read no stack and have no side effect,
+ * so the REV only undoes the order they were emitted in. Emitting them the
+ * other way round removes the instruction outright — strictly better than
+ * the commutative-consumer rule below, which only applies when the
+ * consumer tolerates either order.
+ *
+ * This is the dominant shape: of the 17,808 `REV; STNL` sites measured
+ * across 462 kernel translation units, 84.6% are preceded by exactly two
+ * LDLs. STNL wants AReg=address, BReg=value, so those REVs are purely the
+ * scheduler having produced the pair the wrong way round.
+ *
+ * Both pushes must be reached together: if the second one is a branch
+ * target, control can arrive without having executed the first. */
+static void tps_rev_swap_pushes(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int j0, j1, k;
         if (an[i].dead || ins[i].pinned || an[i].head)
@@ -1444,30 +1580,38 @@ try_copy:
             an[j1].use = t_use;
         }
         an[i].dead = 1;
-        removed += 1;
+        s->removed += 1;
         tps_note(7);
     }
+}
 
-    /* ---- 5a'. hoist a pure push over the run that computed the value
-     * under it ----
-     *
-     * S5 keeps a value on the stack under <e> and pays a REV, as the two come
-     * back swapped.  Where <e> is a single pure push, the code that computed
-     * the value is a straight run, and the push depends on nothing the run
-     * does, the push can simply go first:
-     *
-     *     ldl i ; ldl p ; wsub ; ldc 0 ; rev ; stnl 0
-     *  -> ldc 0 ; ldl i ; ldl p ; wsub ; stnl 0
-     *
-     * which is every word-fill loop's body.  The run is the shortest that ends
-     * just before the push, leaves exactly one word, and never reads below
-     * where it started; it then runs one word deeper, which must still fit
-     * the stack.  It holds no store, call, branch, FPU operation or pinned or
-     * synthesised instruction, so an LDL push reads the same word before it
-     * as after, and only its first instruction may be a branch target - entry
-     * there now executes the push and then the run, as before it executed the
-     * run and then the push.  Like 5a this moves contents, not positions:
-     * old_off, the CFG and branch targets stay where they are. */
+/* ---- 5a'. hoist a pure push over the run that computed the value
+ * under it ----
+ *
+ * S5 keeps a value on the stack under <e> and pays a REV, as the two come
+ * back swapped.  Where <e> is a single pure push, the code that computed
+ * the value is a straight run, and the push depends on nothing the run
+ * does, the push can simply go first:
+ *
+ *     ldl i ; ldl p ; wsub ; ldc 0 ; rev ; stnl 0
+ *  -> ldc 0 ; ldl i ; ldl p ; wsub ; stnl 0
+ *
+ * which is every word-fill loop's body.  The run is the shortest that ends
+ * just before the push, leaves exactly one word, and never reads below
+ * where it started; it then runs one word deeper, which must still fit
+ * the stack.  It holds no store, call, branch, FPU operation or pinned or
+ * synthesised instruction, so an LDL push reads the same word before it
+ * as after, and only its first instruction may be a branch target - entry
+ * there now executes the push and then the run, as before it executed the
+ * run and then the push.  Like 5a this moves contents, not positions:
+ * old_off, the CFG and branch targets stay where they are. */
+static void tps_rev_hoist_push(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n && tps_on(10); i++) {
         int jp, j0, m, k, cand, best = -1, maxr = 0;
         if (an[i].dead || ins[i].pinned || an[i].head)
@@ -1582,15 +1726,23 @@ try_copy:
             an[best].liveout = an[best].liveout | pa.liveout;
         }
         an[i].dead = 1;
-        removed += 1;
+        s->removed += 1;
         tps_note(7);
     }
+}
 
-    /* A three-word copy loop often computes the indexed destination before
-     * loading the indexed local source, then uses REV for STNL. Both address
-     * calculations only read workspace words. Load the source first, then
-     * compute the destination, so STNL receives them in its natural order.
-     * Restrict this to an empty stack and the exact indexed-local sequence. */
+/* A three-word copy loop often computes the indexed destination before
+ * loading the indexed local source, then uses REV for STNL. Both address
+ * calculations only read workspace words. Load the source first, then
+ * compute the destination, so STNL receives them in its natural order.
+ * Restrict this to an empty stack and the exact indexed-local sequence. */
+static void tps_copy_loop_order(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int q[9], j, k, order[7] = { 3, 4, 5, 6, 0, 1, 2 };
         struct tp_relax_insn saved[7];
@@ -1638,22 +1790,32 @@ try_copy:
             an[q[j]].known = saved_ann[k].known;
         }
         an[q[7]].dead = 1;
-        removed++;
+        s->removed++;
         tps_note(7);
     }
+}
 
-    /* ---- 5a''. a CJ that only skips a forward J ----
-     *
-     *     cj L1 ; j L2 ; L1:      ->      eqc 0 ; cj L2 ; L1:
-     *
-     * TCC's `c ? a : b` leaves this whenever the first arm needs no code of
-     * its own (a constant or a variable): the CJ to the second arm jumps over
-     * nothing but the J to where the first arm's value is loaded.  EQC 0
-     * inverts the test, so the CJ goes where the J went and the fall-through
-     * is the old target.  Only the stack junk at the two targets differs
-     * (a taken CJ leaves its zero in AReg), and nothing is live at a label.
-     * The J must not be a branch target itself, and must go forwards: a
-     * backward J may be a loop's only timeslice point. */
+/* ---- 5a''. a CJ that only skips a forward J ----
+ *
+ *     cj L1 ; j L2 ; L1:      ->      eqc 0 ; cj L2 ; L1:
+ *
+ * TCC's `c ? a : b` leaves this whenever the first arm needs no code of
+ * its own (a constant or a variable): the CJ to the second arm jumps over
+ * nothing but the J to where the first arm's value is loaded.  EQC 0
+ * inverts the test, so the CJ goes where the J went and the fall-through
+ * is the old target.  Only the stack junk at the two targets differs
+ * (a taken CJ leaves its zero in AReg), and nothing is live at a label.
+ * The J must not be a branch target itself, and must go forwards: a
+ * backward J may be a loop's only timeslice point. */
+static void tps_cj_over_j(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int *idx = s->idx;
+    const int n = s->n;
+    const int size = s->size;
+    int i;
+
     for (i = 0; i < n && tps_on(11); i++) {
         int jj, t1, k, nx;
         if (an[i].dead || ins[i].pinned || ins[i].opcode != TP_ENC_CJ ||
@@ -1687,22 +1849,30 @@ try_copy:
         an[jj].succ2 = an[jj].succ1;
         an[jj].succ1 = jj + 1 < n ? jj + 1 : -1;
     }
+}
 
-    /* ---- 5b. drop REVs whose consumer does not care about operand order ----
-     *
-     * Rules S2, S4/S5 and S7 all pay for removing a store by inserting a REV,
-     * because the two values come back off the stack swapped. But REV is a
-     * stage-4 ALU operation, and a group gets only one of those — so a REV
-     * closes a group exactly as a store did, and the win is only the byte
-     * saved, not the pipeline slot.
-     *
-     * When the very next thing to execute is a commutative binary operation,
-     * the swap is unobservable and the REV is pure waste. Measured after this
-     * scheduler landed: rev went 24,871 -> 120,942 while ALU group closures
-     * rose 19.9% -> 26.7%, which is most of the group-width regression.
-     *
-     * Only exact 2-in/1-out commutative OPRs qualify. DIFF, SUB, GT, the
-     * shifts and WSUB are all order-sensitive and must keep their REV. */
+/* ---- 5b. drop REVs whose consumer does not care about operand order ----
+ *
+ * Rules S2, S4/S5 and S7 all pay for removing a store by inserting a REV,
+ * because the two values come back off the stack swapped. But REV is a
+ * stage-4 ALU operation, and a group gets only one of those — so a REV
+ * closes a group exactly as a store did, and the win is only the byte
+ * saved, not the pipeline slot.
+ *
+ * When the very next thing to execute is a commutative binary operation,
+ * the swap is unobservable and the REV is pure waste. Measured after this
+ * scheduler landed: rev went 24,871 -> 120,942 while ALU group closures
+ * rose 19.9% -> 26.7%, which is most of the group-width regression.
+ *
+ * Only exact 2-in/1-out commutative OPRs qualify. DIFF, SUB, GT, the
+ * shifts and WSUB are all order-sensitive and must keep their REV. */
+static void tps_rev_commutative(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int j;
         if (an[i].dead || ins[i].pinned)
@@ -1727,21 +1897,29 @@ try_copy:
             if (an[j].reads != 2)
                 break;
             an[i].dead = 1;
-            removed += 1;
+            s->removed += 1;
             tps_note(7);
             break;
         default:
             break;
         }
     }
+}
 
-    /* ---- 5b. rev ; rev  ==  nothing ----
-     * REV exchanges AReg and BReg, so two in a row restore the original
-     * stack.  Pairs arise when gen_store_addr already leaves AReg=address /
-     * BReg=value and store()'s narrow path adds its own REV to guarantee that
-     * order: every initialised byte of `char buf[16] = "hello"` emitted one.
-     * The second REV must not be a branch target, or control could arrive
-     * having executed only one of the pair. */
+/* ---- 5b. rev ; rev  ==  nothing ----
+ * REV exchanges AReg and BReg, so two in a row restore the original
+ * stack.  Pairs arise when gen_store_addr already leaves AReg=address /
+ * BReg=value and store()'s narrow path adds its own REV to guarantee that
+ * order: every initialised byte of `char buf[16] = "hello"` emitted one.
+ * The second REV must not be a branch target, or control could arrive
+ * having executed only one of the pair. */
+static void tps_rev_rev(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int j;
         if (an[i].dead || ins[i].pinned)
@@ -1755,14 +1933,22 @@ try_copy:
             continue;
         an[i].dead = 1;
         an[j].dead = 1;
-        removed += 2;
+        s->removed += 2;
         tps_note(7);
     }
+}
 
-    /* A table index can shift right and then scale back up by the same
-     * power of two (e.g. table[bits >> 4] with 16-byte rows). Clear the
-     * low bits directly. Match the decoded sequence so spills removed by
-     * scheduling do not hide it, and preserve every interior entry point. */
+/* A table index can shift right and then scale back up by the same
+ * power of two (e.g. table[bits >> 4] with 16-byte rows). Clear the
+ * low bits directly. Match the decoded sequence so spills removed by
+ * scheduling do not hide it, and preserve every interior entry point. */
+static void tps_shift_mask(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i;
+
     for (i = 0; i < n; i++) {
         int right, count, left, shift, mask, width;
         if (an[i].dead || ins[i].opcode != TP_ENC_LDC)
@@ -1792,12 +1978,77 @@ try_copy:
         ins[left].operand = TP_OPR_AND;   /* same encoded width as SHL */
         ins[right].new_len = ins[count].new_len = 0;
         an[right].dead = an[count].dead = 1;
-        removed += 2;
+        s->removed += 2;
     }
+}
+
+/*
+ * Mark the redundant workspace round trips in a decoded function.  `top` is
+ * the number of words tp_gaddr_cache put over the locals.
+ * Returns the number of instructions removed.
+ */
+static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
+                             int top)
+{
+    struct tps s;
+    int i, round;
+    static int sched_off = -1;
+
+    if (sched_off < 0) {
+        sched_off = getenv("TP_NO_SCHED") ? 1 : 0;
+    }
+    if (sched_off || n <= 0 || size <= 0)
+        return 0;
+
+    s.ins = ins;
+    s.n = n;
+    s.size = size;
+    s.top = top;
+    s.removed = 0;
+    s.resv_escape = 0;
+    s.nreg = (func_frame_reserved < NB_REGS) ? func_frame_reserved : NB_REGS;
+    s.nslot = func_frame_words;
+    if (s.nslot > 32)
+        s.nslot = 32;
+    if (s.nslot < s.nreg)
+        s.nslot = s.nreg;
+    tps_prescan(&s);
+
+    s.an = tcc_mallocz(sizeof(*s.an) * n);
+    s.idx = tcc_malloc(sizeof(int) * (size + 1));
+    for (i = 0; i <= size; i++)
+        s.idx[i] = -1;
+    for (i = 0; i < n; i++)
+        s.idx[ins[i].old_off] = i;
+    s.idx[size] = -1;                     /* a branch past the last byte */
+
+    if (!tps_annotate(&s))
+        goto done;
+    tps_mark_heads(&s);
+    tps_note_indexed_pairs(&s);
+    tps_depths(&s);
+    if (!tps_liveness(&s))
+        goto done;
+    tps_drop_unread_results(&s);
+    tps_copy_propagate(&s);
+    tps_reserved_escape(&s);
+
+    for (round = 0; round < TPS_ROUNDS; round++)
+        if (!tps_round(&s))
+            break;
+
+    tps_dup_indexed_pair(&s);
+    tps_rev_swap_pushes(&s);
+    tps_rev_hoist_push(&s);
+    tps_copy_loop_order(&s);
+    tps_cj_over_j(&s);
+    tps_rev_commutative(&s);
+    tps_rev_rev(&s);
+    tps_shift_mask(&s);
 
     /* ---- 6. commit ---- */
     for (i = 0; i < n; i++) {
-        if (an[i].dead) {
+        if (s.an[i].dead) {
             ins[i].opcode = -1;
             ins[i].operand = 0;
             ins[i].is_branch = 0;
@@ -1810,10 +2061,11 @@ try_copy:
                 tps_stats[0], tps_stats[1], tps_stats[2], tps_stats[3],
                 tps_stats[4], tps_stats[5], tps_stats[6], tps_stats[7],
                 tps_stats[8], tps_stats[9], tps_stats[12], tps_stats[13],
-                funcname ? funcname : "?", removed);
-    tcc_free(idx);
-    tcc_free(an);
-    return removed;
+                funcname ? funcname : "?", s.removed);
+done:
+    tcc_free(s.idx);
+    tcc_free(s.an);
+    return s.removed;
 }
 
 /*
