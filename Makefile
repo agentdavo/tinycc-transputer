@@ -224,6 +224,12 @@ c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
 transputer_FILES = $(CORE_FILES) transputer-gen.c transputer-link.c transputer-asm.c transputer-enc.h transputer-hist.h transputer-front.h transputer-fnopt.h transputer-call.h transputer-int.h transputer-fp.h transputer-linkopt.h transputer-linux.h transputer-knobs.h transputer-opcodes.h lib/transputer/tvx/tvx.h
 
+# The transputer back end is written against tccgen.c's own statics (the
+# value stack, gind(), gvtst(), ...), so it builds only as one source file.
+ifeq ($(T)-$(ONE_SOURCE),transputer-no)
+$(error the transputer target builds only as one source file: leave ONE_SOURCE unset)
+endif
+
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 
 # libtcc sources
