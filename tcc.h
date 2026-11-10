@@ -1964,6 +1964,35 @@ ST_FUNC int tp_select_target(TCCState *s1, const char *name);
 ST_FUNC const char *tp_target_name(TCCState *s1);
 ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
                                   const char *member);
+
+/* One object file while tcc_load_object_file merges it: what the hooks
+   below may look at.  They check each relocation against its section and
+   do the T4_RELOC_* and T4_SYMMERGE_DEBUG tracing. */
+struct tp_objload {
+    TCCState *s1;
+    const char *member;         /* archive member name, or NULL */
+    ElfW(Shdr) *shdr;           /* the object's section headers */
+    int shnum;
+    const char *strsec;         /* section names */
+    ElfW(Sym) *symtab;          /* the object's symbols */
+    int nb_syms;
+    const char *strtab;         /* symbol names */
+    int *old_to_new_syms;
+    /* the hooks' own */
+    const char **iprel_syms;
+    int *iprel_counts;
+    int iprel_count, iprel_cap;
+};
+/* symbol `i` of the object has become symbol `new_index` of the output */
+ST_FUNC void tp_objload_sym(struct tp_objload *o, int i, int new_index);
+/* `rel`, of relocation section `sh`, before it is rebased: `ts` is the
+   output section it applies to and `offseti` where the object's part of
+   that begins.  -1 after reporting an error. */
+ST_FUNC int tp_objload_reloc(struct tp_objload *o, ElfW(Shdr) *sh,
+                             ElfW_Rel *rel, Section *ts,
+                             unsigned long offseti);
+/* the object is merged */
+ST_FUNC void tp_objload_end(struct tp_objload *o);
 #endif
 
 /* ------------ c67-gen.c ------------ */

@@ -114,6 +114,256 @@ ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
 }
 
 /*
+ * Hooks from tcc_load_object_file (struct tp_objload in tcc.h).
+ *
+ * Tracing, each switched on by an environment variable:
+ *   T4_RELOC_LOG            RELOC_LOAD: every relocation as it is loaded;
+ *     T4_RELOC_SYM=<text>     only for symbols containing <text>
+ *     T4_RELOC_TYPE=<n>       only of type <n>
+ *     T4_RELOC_LOAD_DUMP      plus the bytes at an IPREL32 and what they decode to
+ *   T4_RELOC_SUMMARY        RELOC_SUMMARY: IPREL32 counts per symbol per object
+ *   T4_RELOC_SYMINFO[=<text>]  RELOC_SYMINFO: the symbol behind each relocation
+ *   T4_RELOC_LDC_MISMATCH   an IPREL32 that sits on an ldc
+ *   T4_SYMMERGE_DEBUG=<text>  SYMMERGE / SYMMERGE_RELOC: how symbols containing
+ *                           <text> are renumbered
+ */
+static struct {
+    int init;
+    int log;
+    const char *sym_filter;
+    int type_filter;
+    int load_dump;
+    int summary;
+    int syminfo;
+    const char *syminfo_filter;
+    int ldc_mismatch;
+    const char *symmerge;
+} tp_lt;
+
+static void tp_load_trace_init(void)
+{
+    const char *env;
+
+    if (tp_lt.init)
+        return;
+    tp_lt.init = 1;
+    env = getenv("T4_RELOC_LOG");
+    tp_lt.log = env && *env;
+    tp_lt.sym_filter = getenv("T4_RELOC_SYM");
+    tp_lt.type_filter = -1;
+    env = getenv("T4_RELOC_TYPE");
+    if (env && *env)
+        tp_lt.type_filter = (int)strtol(env, NULL, 0);
+    env = getenv("T4_RELOC_LOAD_DUMP");
+    tp_lt.load_dump = env && *env;
+    env = getenv("T4_RELOC_SUMMARY");
+    tp_lt.summary = env && *env;
+    env = getenv("T4_RELOC_SYMINFO");
+    tp_lt.syminfo = env && *env;
+    tp_lt.syminfo_filter = env && strcmp(env, "1") ? env : NULL;
+    env = getenv("T4_RELOC_LDC_MISMATCH");
+    tp_lt.ldc_mismatch = env && *env;
+    tp_lt.symmerge = getenv("T4_SYMMERGE_DEBUG");
+}
+
+static const char *tp_objload_file(struct tp_objload *o)
+{
+    return o->s1->current_filename ? o->s1->current_filename : "<unknown>";
+}
+
+ST_FUNC void tp_objload_sym(struct tp_objload *o, int i, int new_index)
+{
+    ElfW(Sym) *sym = &o->symtab[i];
+    const char *name = o->strtab + sym->st_name;
+
+    tp_load_trace_init();
+    if (tp_lt.symmerge && name && strstr(name, tp_lt.symmerge)) {
+        fprintf(stderr, "SYMMERGE: file=%s sym='%s' old_idx=%d new_idx=%d "
+                "bind=%d type=%d shndx=%d value=0x%lx\n",
+                tp_objload_file(o), name, i, new_index,
+                ELFW(ST_BIND)(sym->st_info), ELFW(ST_TYPE)(sym->st_info),
+                sym->st_shndx, (unsigned long)sym->st_value);
+    }
+}
+
+/* Count an IPREL32 against its symbol for RELOC_SUMMARY. */
+static void tp_objload_count_iprel(struct tp_objload *o, unsigned sym_index)
+{
+    const char *sum_name = "<unknown>";
+    int si;
+
+    if (o->strtab && o->symtab[sym_index].st_name)
+        sum_name = o->strtab + o->symtab[sym_index].st_name;
+    for (si = 0; si < o->iprel_count; si++) {
+        if (o->iprel_syms[si] == sum_name ||
+            (o->iprel_syms[si] && sum_name &&
+             0 == strcmp(o->iprel_syms[si], sum_name))) {
+            o->iprel_counts[si]++;
+            return;
+        }
+    }
+    if (o->iprel_count == o->iprel_cap) {
+        o->iprel_cap = o->iprel_cap ? o->iprel_cap * 2 : 16;
+        o->iprel_syms = tcc_realloc(o->iprel_syms,
+                                    o->iprel_cap * sizeof(*o->iprel_syms));
+        o->iprel_counts = tcc_realloc(o->iprel_counts,
+                                      o->iprel_cap * sizeof(*o->iprel_counts));
+    }
+    o->iprel_syms[o->iprel_count] = sum_name;
+    o->iprel_counts[o->iprel_count] = 1;
+    o->iprel_count++;
+}
+
+/* The first byte at or after `off` in `ts` that is not a pfix/nfix: the
+ * instruction a relocation sits on.  Returns its top nibble in place, or
+ * -1, and how many prefix bytes came before it. */
+static int tp_objload_opcode_at(Section *ts, unsigned long off, int *pscan)
+{
+    unsigned char *data = (unsigned char *)ts->data;
+    int opcode = -1;
+    int scan = 0;
+
+    for (; off + scan < ts->data_offset && scan < 16; scan++) {
+        unsigned char hi = data[off + scan] & 0xF0;
+        if (hi != 0x20 && hi != 0x60) {
+            opcode = hi;
+            break;
+        }
+    }
+    *pscan = scan;
+    return opcode;
+}
+
+ST_FUNC int tp_objload_reloc(struct tp_objload *o, ElfW(Shdr) *sh,
+                             ElfW_Rel *rel, Section *ts,
+                             unsigned long offseti)
+{
+    TCCState *s1 = o->s1;       /* for tcc_error_noabort */
+    int type = ELFW(R_TYPE)(rel->r_info);
+    unsigned sym_index = ELFW(R_SYM)(rel->r_info);
+    ElfW(Shdr) *target = &o->shdr[sh->sh_info];
+    const char *sym_name = "<unknown>";
+    const char *sec_name = "<unknown>";
+
+    tp_load_trace_init();
+    /* Check the original input extent before merging sections:
+     * the next object's data must never complete this field. */
+    if (target->sh_flags & SHF_ALLOC) {
+        int width = tp_reloc_width(type, target->sh_flags & SHF_EXECINSTR);
+        if (width > 0 && (rel->r_offset > target->sh_size
+            || target->sh_size - rel->r_offset < (unsigned)width)) {
+            tcc_error_noabort("relocation %d outside %s at offset 0x%lx",
+                              type, o->strsec + target->sh_name,
+                              (unsigned long)rel->r_offset);
+            return -1;
+        }
+    }
+    if (sym_index >= (unsigned)o->nb_syms)
+        return 0;       /* the caller reports it */
+
+    if (tp_lt.summary && type == R_TRANSPUTER_IPREL32)
+        tp_objload_count_iprel(o, sym_index);
+
+    if (tp_lt.log || tp_lt.syminfo) {
+        if (o->strtab && o->symtab[sym_index].st_name)
+            sym_name = o->strtab + o->symtab[sym_index].st_name;
+        if (sh->sh_info < (unsigned)o->shnum)
+            sec_name = o->strsec + target->sh_name;
+        if ((!tp_lt.sym_filter || strstr(sym_name, tp_lt.sym_filter)) &&
+            (tp_lt.type_filter < 0 || tp_lt.type_filter == type)) {
+            fprintf(stderr,
+                    "RELOC_LOAD: file=%s member=%s section=%s r_offset=0x%lx type=%d sym=%s\n",
+                    tp_objload_file(o), o->member ? o->member : "<none>",
+                    sec_name, (unsigned long)rel->r_offset, type, sym_name);
+            if (tp_lt.load_dump && type == R_TRANSPUTER_IPREL32) {
+                unsigned long off = rel->r_offset + offseti;
+                if (ts && ts->data && off < ts->data_offset) {
+                    unsigned long start = off >= 8 ? off - 8 : 0;
+                    unsigned long end = off + 8;
+                    unsigned char *data = (unsigned char *)ts->data;
+                    unsigned long di;
+                    int opcode, scan;
+                    const char *kind = "unknown";
+                    if (end >= ts->data_offset)
+                        end = ts->data_offset - 1;
+                    fprintf(stderr, "RELOC_LOAD_BYTES:");
+                    for (di = start; di <= end; di++)
+                        fprintf(stderr, " %02x", data[di]);
+                    fprintf(stderr, "\n");
+                    opcode = tp_objload_opcode_at(ts, off, &scan);
+                    if (opcode >= 0)
+                        opcode >>= 4;
+                    if (opcode == 0x9)
+                        kind = "call";
+                    else if (opcode == 0x0)
+                        kind = "j";
+                    else if (opcode == 0xA)
+                        kind = "cj";
+                    else if (opcode == 0x4)
+                        kind = "ldc";
+                    fprintf(stderr,
+                            "RELOC_LOAD_DECODE: start=0x%lx opcode=0x%x kind=%s scan=%d\n",
+                            off, opcode, kind, scan);
+                }
+            }
+        }
+        if (tp_lt.ldc_mismatch && type == R_TRANSPUTER_IPREL32) {
+            unsigned long off = rel->r_offset + offseti;
+            int scan;
+            if (ts && ts->data && off < ts->data_offset
+                && tp_objload_opcode_at(ts, off, &scan) == 0x40) {
+                fprintf(stderr,
+                        "RELOC_LDC_MISMATCH: file=%s member=%s section=%s r_offset=0x%lx sym=%s scan=%d\n",
+                        tp_objload_file(o), o->member ? o->member : "<none>",
+                        sec_name, (unsigned long)rel->r_offset, sym_name, scan);
+            }
+        }
+        if (tp_lt.syminfo && (!tp_lt.syminfo_filter ||
+            strstr(sym_name, tp_lt.syminfo_filter))) {
+            unsigned char st_info = o->symtab[sym_index].st_info;
+            fprintf(stderr,
+                    "RELOC_SYMINFO: sym=%s st_info=0x%x bind=%u type=%u shndx=%u st_value=0x%lx\n",
+                    sym_name, st_info, ELFW(ST_BIND)(st_info),
+                    ELFW(ST_TYPE)(st_info),
+                    (unsigned) o->symtab[sym_index].st_shndx,
+                    (unsigned long) o->symtab[sym_index].st_value);
+        }
+    }
+
+    if (tp_lt.symmerge && o->strtab && o->symtab[sym_index].st_name) {
+        const char *merge_name = o->strtab + o->symtab[sym_index].st_name;
+        if (strstr(merge_name, tp_lt.symmerge)) {
+            fprintf(stderr,
+                    "SYMMERGE_RELOC: file=%s sym='%s' old_sym=%u "
+                    "new_sym=%u type=%d offset=0x%lx\n",
+                    tp_objload_file(o), merge_name, sym_index,
+                    (unsigned)o->old_to_new_syms[sym_index],
+                    type, (unsigned long)rel->r_offset);
+        }
+    }
+    return 0;
+}
+
+ST_FUNC void tp_objload_end(struct tp_objload *o)
+{
+    if (tp_lt.summary && o->iprel_count) {
+        int si;
+        fprintf(stderr, "RELOC_SUMMARY: file=%s member=%s iprel32=%d\n",
+                tp_objload_file(o), o->member ? o->member : "<none>",
+                o->iprel_count);
+        for (si = 0; si < o->iprel_count; si++) {
+            fprintf(stderr, "RELOC_SUMMARY_ITEM: sym=%s count=%d\n",
+                    o->iprel_syms[si] ? o->iprel_syms[si] : "<unknown>",
+                    o->iprel_counts[si]);
+        }
+    }
+    tcc_free(o->iprel_syms);
+    tcc_free(o->iprel_counts);
+    o->iprel_syms = NULL;
+    o->iprel_counts = NULL;
+}
+
+/*
  * Transputer post-compilation optimizers.
  * These run on individual .text sections after compilation but before
  * final section address assignment and relocation patching.
