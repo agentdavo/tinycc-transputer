@@ -54,7 +54,31 @@ struct tp_relax_insn {
     int pinned;       /* relocation points into this instruction */
     int synth;        /* inserted by tp_gaddr_cache: no bytes in the old code;
                          old_off is that of the instruction it precedes */
+    int tab;          /* switch jump table t: t + 1 on its entries (each a J
+                         and the padding before it), -(t + 1) on the six
+                         instructions of its dispatch */
 };
+
+/* Give the entries of each jump table one width: that of the widest. */
+static int tp_swtab_level(struct tp_relax_insn *ins, int n)
+{
+    int t, i, changed = 0;
+
+    for (t = 1; t <= swtab_count; t++) {
+        int mx = 0;
+        for (i = 0; i < n; i++)
+            if (ins[i].tab == t && ins[i].opcode == TP_ENC_J &&
+                ins[i].new_len > mx)
+                mx = ins[i].new_len;
+        for (i = 0; i < n; i++)
+            if (ins[i].tab == t && ins[i].opcode == TP_ENC_J &&
+                ins[i].new_len != mx) {
+                ins[i].new_len = mx;
+                changed = 1;
+            }
+    }
+    return changed;
+}
 
 /* A branch's target after relaxation, as a new offset. */
 static int tp_relax_newt(const struct tp_relax_insn *ins, int i,
@@ -720,6 +744,12 @@ static int tps_annotate(struct tps *s)
             }
             an[i].succ1 = -1;
         }
+        /* A jump table's dispatch (a gcall) falls into the first entry, and
+         * each entry, besides going to its case, leads on to the next: so
+         * whatever any case reads is live at the dispatch.  The last entry
+         * leads into the jump to the default, which is one more case. */
+        if (ins[i].tab > 0 && opc == TP_ENC_J)
+            an[i].succ2 = (i + 1 < n) ? i + 1 : -1;
     }
     return 1;
 }
@@ -739,6 +769,8 @@ static void tps_mark_heads(struct tps *s)
     an[0].head = 1;
     for (i = 0; i < n; i++) {
         int k;
+        if (ins[i].tab > 0)
+            an[i].head = 1;             /* a table entry is entered by gcall */
         if (!ins[i].is_branch)
             continue;
         if (ins[i].target_old < 0 || ins[i].target_old > size)
@@ -2708,10 +2740,6 @@ static int tp_relax_function(void)
 
     if (base < 0 || size <= 0 || size > TP_RELAX_MAX_INSNS)
         return tp_relax_bail("size");
-    /* Switch jump tables embed absolute code addresses that are patched later
-     * from recorded slot offsets; relaxing under them would invalidate both. */
-    if (func_has_switch_slots)
-        return tp_relax_bail("switch");
     /* Debug info records code offsets per line. */
     if (tcc_state->do_debug)
         return tp_relax_bail("debug");
@@ -2753,6 +2781,7 @@ static int tp_relax_function(void)
             ins[n].target_old = 0;
             ins[n].ext = 0;
             ins[n].synth = 0;
+            ins[n].tab = 0;
             n++;
             p++;
             continue;
@@ -2773,6 +2802,7 @@ static int tp_relax_function(void)
         ins[n].target_old = ins[n].is_branch ? (p + len + opd) : 0;
         ins[n].ext = 0;
         ins[n].synth = 0;
+        ins[n].tab = 0;
         n++;
         p += len;
     }
@@ -2834,6 +2864,48 @@ static int tp_relax_function(void)
         }
     }
 
+    /* 2'. Switch jump tables.  Find each table's dispatch and entries, and
+     * pin them through the passes below, which only need to know where
+     * control goes (tp_sched_function gives a dispatch every entry as a
+     * successor). */
+    for (i = 0; i < swtab_count; i++) {
+        static const int shape[6][2] = {
+            { TP_ENC_LDC, TP_SWITCH_JUMP_SLOT_SIZE }, { TP_ENC_OPR, TP_OPR_PROD },
+            { TP_ENC_LDC, 2 }, { TP_ENC_OPR, TP_OPR_LDPI },
+            { TP_ENC_OPR, TP_OPR_BSUB }, { TP_ENC_OPR, TP_OPR_GCALL } };
+        int o = swtab_log[i].scale - base, e, ok;
+        int k = (o >= 0 && o < size) ? tidx[o] : -1;
+
+        ok = k >= 0 && k + 6 <= n;
+        for (e = 0; ok && e < 6; e++)
+            ok = ins[k + e].opcode == shape[e][0] &&
+                 ins[k + e].operand == shape[e][1] && !ins[k + e].pinned;
+        for (e = 0; ok && e < 6; e++) {
+            ins[k + e].tab = -(i + 1);
+            ins[k + e].pinned = 1;
+        }
+        for (e = 0; ok && e < swtab_log[i].entries; e++) {
+            int eo = swtab_log[i].table - base + e * TP_SWITCH_JUMP_SLOT_SIZE;
+            int m = (eo >= 0 && eo < size) ? tidx[eo] : -1;
+
+            for (; m >= 0 && m < n && ins[m].opcode == -1 &&
+                   ins[m].old_off < eo + TP_SWITCH_JUMP_SLOT_SIZE; m++) {
+                ins[m].tab = i + 1;
+                ins[m].pinned = 1;
+            }
+            ok = m >= 0 && m < n && ins[m].opcode == TP_ENC_J && !ins[m].pinned &&
+                 ins[m].old_off + ins[m].old_len == eo + TP_SWITCH_JUMP_SLOT_SIZE;
+            if (ok) {
+                ins[m].tab = i + 1;
+                ins[m].pinned = 1;
+            }
+        }
+        if (!ok) {
+            tcc_free(tidx); tcc_free(ins);
+            return tp_relax_bail("switch-table");
+        }
+    }
+
     /* 2a. Give the placeholders gfunc_epilog could not fit (wide_log) their
      * real operand and the width it needs.  This must come before the
      * scheduler, which would otherwise take them for accesses to slot 0. */
@@ -2866,6 +2938,22 @@ static int tp_relax_function(void)
      * access, which the growth pass below then makes room for. */
     if (tp_slot_remap(ins, n, tpg.n))
         grown = 1;
+
+    /* 2b+. Jump tables are sized from here on.  An entry's J takes over its
+     * whole slot: the padding in front of it goes, and the J is emitted
+     * padded to the width the table settles on. */
+    for (i = 0; i < n; i++) {
+        if (!ins[i].tab)
+            continue;
+        ins[i].pinned = 0;
+        if (ins[i].tab > 0) {
+            if (ins[i].opcode == TP_ENC_J)
+                ins[i].new_len = TP_SWITCH_JUMP_SLOT_SIZE;
+            else
+                ins[i].new_len = 0;
+            grown = 1;
+        }
+    }
 
     /* 2b''. Narrowed direct calls (near_call_log) stayed pinned through the
      * scheduler.  Now make each a branch to its callee: that sits before this
@@ -2922,6 +3010,8 @@ static int tp_relax_function(void)
                 changed = 1;
             }
         }
+        if (tp_swtab_level(ins, n))
+            changed = 1;
         if (!changed)
             break;
     }
@@ -2941,6 +3031,8 @@ static int tp_relax_function(void)
             int want;
             if (ins[i].pinned)
                 continue;
+            if (ins[i].tab > 0 && ins[i].opcode == TP_ENC_J)
+                continue;               /* sized as a table, below */
             if (ins[i].is_branch) {
                 /* Displacement is relative to the end of this instruction, so
                  * it depends on its own length. Solve by trying lengths from
@@ -2968,8 +3060,61 @@ static int tp_relax_function(void)
                 changed = 1;
             }
         }
+        /* A table's entries shrink together, to the width the widest still
+         * needs, and not below four bytes: wsub indexes those, and a
+         * narrower table would need a multiply. */
+        for (p = 1; p <= swtab_count; p++) {
+            int cur = 0, mx = 4;
+            for (i = 0; i < n; i++) {
+                int want, newt;
+                if (ins[i].tab != p || ins[i].opcode != TP_ENC_J)
+                    continue;
+                newt = tp_relax_newt(ins, i, tidx, size, outlen);
+                cur = want = ins[i].new_len;
+                while (want > 4) {
+                    int disp = newt - (ins[i].new_off + want - 1);
+                    if (tp_encode_len(TP_ENC_J, disp) > want - 1)
+                        break;
+                    want--;
+                }
+                if (want > mx)
+                    mx = want;
+            }
+            if (mx < cur) {
+                for (i = 0; i < n; i++)
+                    if (ins[i].tab == p && ins[i].opcode == TP_ENC_J)
+                        ins[i].new_len = mx;
+                changed = 1;
+            }
+        }
         if (!changed)
             break;
+    }
+
+    /* Each table's dispatch for the width it settled on: four-byte entries
+     * are indexed by wsub, and the multiply goes; any other width is the
+     * multiplier.  Removing two bytes only brings branches closer. */
+    for (p = 1; p <= swtab_count; p++) {
+        int d[6], nd = 0, w = 0;
+        for (i = 0; i < n; i++) {
+            if (ins[i].tab == -p && nd < 6)
+                d[nd++] = i;
+            else if (ins[i].tab == p && ins[i].opcode == TP_ENC_J)
+                w = ins[i].new_len;
+        }
+        if (nd != 6 || ins[d[0]].opcode != TP_ENC_LDC ||
+            ins[d[1]].operand != TP_OPR_PROD ||
+            ins[d[4]].operand != TP_OPR_BSUB || w < 4 || w > 8) {
+            tcc_free(tidx); tcc_free(ins);
+            return tp_relax_bail("switch-dispatch");
+        }
+        if (w == 4) {
+            ins[d[0]].opcode = ins[d[1]].opcode = -1;
+            ins[d[0]].new_len = ins[d[1]].new_len = 0;
+            ins[d[4]].operand = TP_OPR_WSUB;
+        } else {
+            ins[d[0]].operand = w;
+        }
     }
 
     /* Recompute final offsets after the last shrink. */

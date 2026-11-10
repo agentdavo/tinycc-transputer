@@ -874,6 +874,35 @@ the occam compiler does, and what new codegen should be held to:
   functions keep the register path.  Doom's R_DrawColumn -1.3%, ~100
   bytes less code; `test_deref_local_ptr.c`.
 
+- `-mjump-tables` (off by default; `-mno-jump-tables`, and
+  `T4_SWITCH_JT=1` still works) compiles a dense switch - more than six
+  selectors, at least a third of the span used - to a table of jumps
+  (`gen_switch_jump_table`): `ldc 0; ldl x; ldc n; ldiff; rev; cj default`
+  (one unsigned test of x - base for both ends; `gtu` on the T9000), then
+  `ldl x; ldc 2; ldpi; wsub; gcall` and a four-byte `j` for each index, 11
+  T800 cycles to the entry.  A table that starts within 16 of zero is
+  indexed by the value itself.  `default: __builtin_unreachable();`
+  (directly under the label) drops the range test, as with gcc.
+  Until 2026-11-10 the tables were nine-byte slots behind `ldc 9; prod`
+  and a padded `ldc`, and - what cost far more - a function with one was
+  left out of the whole post-pass (relaxation, scheduler, slot remap,
+  global cache), so every local access in it kept its five-byte
+  placeholder: dEngine's shader interpreter ran 5% slower with a table
+  than with compares.  Now `tp_relax_function` knows the tables
+  (`swtab_log`, `tab` on each instruction): the entries are sized as a
+  group, never below four bytes (a function over 64 KB is not relaxed and
+  keeps five-byte entries behind `ldc 5; prod`), and in the scheduler a
+  dispatch leads into the first entry and each entry on to the next, so
+  what any case reads is live at the dispatch.  Such a function is still
+  not relaxed again at link time (`tp_mark_relaxable`): a narrowed call
+  would move the entries apart.  Measured on dEngine (one node, shadows,
+  bump and specular off, estimated T800 cycles a frame): compares
+  1,953 M, tables 1,914 M, with the interpreter's default unreachable
+  1,850 M (-5.3%), frames identical.  Default-off because the first
+  version was implicated in a kernel boot failure (maple_tree
+  wr_invalid) that nobody has retested; the kernel is the test still
+  owed before it becomes the default.  `test_switch_table.c`.
+
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`
   (loop heads, `continue` targets, goto and case labels, through

@@ -71,6 +71,18 @@ ST_FUNC int tp_select_target(TCCState *s1, const char *name)
     return 0;
 }
 
+/* The -m options that are not parts. */
+ST_FUNC int tp_select_option(TCCState *s1, const char *name)
+{
+    int on = strncmp(name, "no-", 3) != 0;
+
+    if (!strcmp(name + (on ? 0 : 3), "jump-tables")) {
+        s1->tp_jump_tables = on;
+        return 1;
+    }
+    return 0;
+}
+
 ST_FUNC const char *tp_target_name(TCCState *s1)
 {
     return tp_part_name(s1->tp_isa);

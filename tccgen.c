@@ -7044,6 +7044,12 @@ ST_FUNC void unary(void)
         break;
     case TOK_builtin_unreachable:
 	parse_builtin_params(0, ""); /* just skip '()' */
+#ifdef TCC_TARGET_TRANSPUTER
+        /* directly under `default:`, with no code between */
+        if (cur_switch && !nocode_wanted && cur_switch->def_sym > 0
+            && cur_switch->def_sym == ind)
+            cur_switch->def_unreachable = 1;
+#endif
         type.t = VT_VOID;
         vpush(&type);
         CODE_OFF();
@@ -9114,13 +9120,14 @@ again:
 #ifdef TCC_TARGET_TRANSPUTER
         {
             /*
-             * Jump-table switches default OFF.  Fixed-slot J/GCALL dispatch
-             * has been implicated in intermittent maple_tree wr_invalid BUGs
-             * (enum store_type) during early kernel boot.  Comparison-chain
-             * gcase() is slower but correct.  Set T4_SWITCH_JT=1 to re-enable.
+             * Jump tables for dense switches are off unless -mjump-tables
+             * (or T4_SWITCH_JT=1) asks for them: the first version was
+             * implicated in intermittent maple_tree wr_invalid BUGs (enum
+             * store_type) during early kernel boot, which nobody has
+             * retested since.  gcase() compares.
              */
             const char *jt = getenv("T4_SWITCH_JT");
-            int use_jt = 0;
+            int use_jt = tcc_state->tp_jump_tables;
             if (jt && *jt)
                 use_jt = (int)strtoul(jt, NULL, 0) != 0;
             d = 0;

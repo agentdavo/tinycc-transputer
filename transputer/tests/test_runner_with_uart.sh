@@ -99,6 +99,7 @@ declare -A EXTRA_SOURCES=(
 # TVX is built with.
 declare -A EXTRA_CFLAGS=(
     [test_gguf_decode_parts]="-nostdinc -I$ROOT_DIR/lib/transputer/tvx/include"
+    [test_switch_table]="-mjump-tables"
 )
 
 declare -A FORCE_SKIP=(

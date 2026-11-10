@@ -128,8 +128,6 @@ static uint64_t tp_switch_total_selectors(struct switch_t *sw, int is_unsigned);
 static void tp_switch_emit_instr(int opcode, int operand);
 static void tp_switch_emit_fixed_slot(int opcode, int operand, int slot_size);
 static void tp_switch_patch_fixed_slot(int offset, int opcode, int operand, int slot_size);
-static void switch_slot_add(int instr_offset, int slot_size, int opcode,
-                            int target_addr, int base_addr);
 static void tp_builtin_return_void(void);
 static void tp_gen_flag_result(int opr);
 static void tp_builtin_word_result(void);
@@ -379,7 +377,33 @@ static void tp_builtin_return_void(void)
     vtop->type.t = VT_VOID;
 }
 
-#define TP_SWITCH_JUMP_SLOT_SIZE 9
+/* A jump table as it is emitted: `ldl idx; ldc 5; prod; ldc 2; ldpi; bsub;
+ * gcall`, then one five-byte `j` for each index (front-padded with pfix 0,
+ * the width of every other jump placeholder).  gcall's return address is
+ * dropped: the stack is empty at a case label.  tp_relax_function() then
+ * gives the entries the common width their displacements need, and when
+ * that is four bytes indexes them with wsub: `ldl idx; ldc 2; ldpi; wsub;
+ * gcall`, 11 T800 cycles. */
+#define TP_SWITCH_JUMP_SLOT_SIZE 5
+/* The tables of the function being compiled: section offsets of the
+ * dispatch's `ldc width` and of the first entry. */
+struct tp_swtab {
+    int scale, table, entries;
+};
+static struct tp_swtab *swtab_log;
+static int swtab_count, swtab_cap;
+
+static void swtab_add(int scale, int table, int entries)
+{
+    if (swtab_count == swtab_cap) {
+        swtab_cap = swtab_cap ? swtab_cap * 2 : 8;
+        swtab_log = tcc_realloc(swtab_log, swtab_cap * sizeof(*swtab_log));
+    }
+    swtab_log[swtab_count].scale = scale;
+    swtab_log[swtab_count].table = table;
+    swtab_log[swtab_count].entries = entries;
+    swtab_count++;
+}
 #define TP_SWITCH_MAX_SPAN      2048
 
 static int tp_case_cmp(uint64_t a, uint64_t b, int is_unsigned)
@@ -467,7 +491,8 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     uint64_t span_u64, total_u64;
     int *targets = NULL;
     int *entry_offs = NULL;
-    int ldc_slot_off, table_anchor, table_off, miss_ind;
+    int scale_off, table_off, miss_ind;
+    uint32_t base_u;
     int switch_t;
     int idx_reg;
 
@@ -498,6 +523,14 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     if (total_u64 * 3 < (uint64_t)entries)  /* density >= 33% (was 50%) */
         return 0;
 
+    /* A table that starts just above zero is indexed by the value itself:
+     * a few unused entries cost less than a subtraction at every dispatch. */
+    base_u = min_u;
+    if (min_u != 0 && min_u <= 16 && (is_unsigned || (int32_t)max_u > 0)) {
+        base_u = 0;
+        entries = (int)max_u + 1;
+    }
+
     targets = tcc_malloc(entries * sizeof(*targets));
     entry_offs = tcc_malloc(entries * sizeof(*entry_offs));
     for (i = 0; i < entries; ++i)
@@ -508,7 +541,7 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
         if (is_unsigned) {
             uint32_t v, v2 = (uint32_t)p->v2;
             for (v = (uint32_t)p->v1; ; ++v) {
-                int idx = (int)((uint64_t)v - (uint64_t)min_u);
+                int idx = (int)((uint64_t)v - (uint64_t)base_u);
                 if (idx < 0 || idx >= entries)
                     tcc_error("transputer switch index out of bounds");
                 targets[idx] = p->ind;
@@ -516,7 +549,7 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
                     break;
             }
         } else {
-            int64_t v, v2 = (int32_t)p->v2, min_s = (int32_t)min_u;
+            int64_t v, v2 = (int32_t)p->v2, min_s = (int32_t)base_u;
             for (v = (int32_t)p->v1; tp_case_cmp(v, v2, 0) <= 0; ++v) {
                 int idx = (int)(v - min_s);
                 if (idx < 0 || idx >= entries)
@@ -528,24 +561,22 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
 
     d = *pdsym;
 
-    {
-        int ty = is_unsigned ? (VT_INT | VT_UNSIGNED) : VT_INT;
-
+    /* The index, x - base as an unsigned word, and one unsigned test for
+     * both ends of the range: a value below the base wraps to a large one.
+     * Unsigned so that the subtraction cannot set the Error flag.  No test
+     * when the default is `__builtin_unreachable()`: the program promises
+     * a case. */
+    vdup();
+    vtop->type.t = VT_INT | VT_UNSIGNED;
+    if (base_u != 0) {
+        vpush64(VT_INT | VT_UNSIGNED, base_u);
+        gen_op('-');
+    }
+    if (!sw->def_unreachable) {
         vdup();
-        vpush64(ty, min_u);
-        gen_op(TOK_LT);
-        d = gvtst(0, d);
-
-        vdup();
-        vpush64(ty, max_u);
-        gen_op(TOK_GT);
-        d = gvtst(0, d);
-
-        vdup();
-        if (min_u != 0) {
-            vpush64(ty, min_u);
-            gen_op('-');
-        }
+        vpush64(VT_INT | VT_UNSIGNED, (uint32_t)entries);
+        gen_op(TOK_ULT);
+        d = gvtst(1, d);
     }
 
     gv(RC_INT);
@@ -557,16 +588,12 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     else
         tcc_error("transputer switch: unsupported idx value form");
 
-    if (TP_SWITCH_JUMP_SLOT_SIZE != 1) {
-        tp_switch_emit_instr(TP_OP_LDC, TP_SWITCH_JUMP_SLOT_SIZE);
-        tp_switch_emit_instr(TP_OP_OPR, TP_OPR_PROD);
-    }
-
-    ldc_slot_off = ind;
-    tp_switch_emit_fixed_slot(TP_OP_LDC, 0, TP_SWITCH_JUMP_SLOT_SIZE);
+    scale_off = ind;
+    tp_switch_emit_instr(TP_OP_LDC, TP_SWITCH_JUMP_SLOT_SIZE);
+    tp_switch_emit_instr(TP_OP_OPR, TP_OPR_PROD);
+    /* the table starts two bytes after ldpi: bsub, gcall */
+    tp_switch_emit_instr(TP_OP_LDC, 2);
     tp_switch_emit_instr(TP_OP_OPR, TP_OPR_LDPI);
-
-    table_anchor = ind;
     tp_switch_emit_instr(TP_OP_OPR, TP_OPR_BSUB);
     tp_switch_emit_instr(TP_OP_OPR, TP_OPR_GCALL);
 
@@ -579,18 +606,13 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     miss_ind = gind();
     d = gjmp(d);
 
-    tp_switch_patch_fixed_slot(ldc_slot_off, TP_OP_LDC, table_off - table_anchor,
-                               TP_SWITCH_JUMP_SLOT_SIZE);
-    switch_slot_add(ldc_slot_off, TP_SWITCH_JUMP_SLOT_SIZE, TP_OP_LDC,
-                    table_off, table_anchor);
     for (i = 0; i < entries; ++i) {
         int target = targets[i] >= 0 ? targets[i] : miss_ind;
         tp_switch_patch_fixed_slot(entry_offs[i], TP_OP_J,
                                    target - (entry_offs[i] + TP_SWITCH_JUMP_SLOT_SIZE),
                                    TP_SWITCH_JUMP_SLOT_SIZE);
-        switch_slot_add(entry_offs[i], TP_SWITCH_JUMP_SLOT_SIZE, TP_OP_J,
-                        target, -1);
     }
+    swtab_add(scale_off, table_off, entries);
 
     tcc_free(entry_offs);
     tcc_free(targets);
@@ -826,15 +848,6 @@ struct jump_patch_meta {
     unsigned char patched;            /* 1 once gsym_addr patched it */
 };
 
-struct switch_slot_meta {
-    int instr_offset;                 /* fixed-width slot start */
-    int slot_size;                    /* slot width used by switch table */
-    int opcode;                       /* TP_OP_LDC or TP_OP_J */
-    int target_addr;                  /* jump target or table offset target */
-    int base_addr;                    /* base address for relative LDC, -1 for J */
-    struct switch_slot_meta *next;
-};
-
 static struct local_patch *local_patches = NULL;
 /* Tail of local_patches, so the pool can append in O(1). Entries must be
  * appended, not prepended: tp_drop_local_patches_from scans the leading run
@@ -846,7 +859,6 @@ static struct local_patch *local_patches_tail = NULL;
  * forwards, so a new placeholder nearly always goes on the end. */
 static struct jump_patch_meta *jump_patches;
 static int jump_patch_count, jump_patch_cap;
-static struct switch_slot_meta *switch_slots = NULL;
 
 static int func_prologue_ajw_offset = -1;  /* -1 = not set, >=0 = valid offset */
 
@@ -979,38 +991,19 @@ static void jump_patch_add(int instr_offset, int is_conditional)
     p->patched = 0;
 }
 
-static void switch_slot_add(int instr_offset, int slot_size, int opcode,
-                            int target_addr, int base_addr)
-{
-    struct switch_slot_meta *p = tcc_malloc(sizeof(*p));
-    p->instr_offset = instr_offset;
-    p->slot_size = slot_size;
-    p->opcode = opcode;
-    p->target_addr = target_addr;
-    p->base_addr = base_addr;
-    p->next = switch_slots;
-    switch_slots = p;
-}
-
 /* Reset per function */
 static void transputer_func_reset(void) {
     struct local_patch *p = local_patches;
-    struct switch_slot_meta *s = switch_slots;
 
     while(p) {
         struct local_patch *next = p->next;
         tcc_free(p);
         p = next;
     }
-    while (s) {
-        struct switch_slot_meta *next = s->next;
-        tcc_free(s);
-        s = next;
-    }
     local_patches = NULL;
     local_patches_tail = NULL;
     jump_patch_count = 0;
-    switch_slots = NULL;
+    swtab_count = 0;
     tp_hist_clear();
     tp_fpr_reg = -1;
     func_prologue_ajw_offset = -1;  /* Reset prologue offset */

@@ -527,6 +527,9 @@ struct switch_t {
     struct scope *scope;
     struct switch_t *prev;
     SValue sv;
+    /* `default: __builtin_unreachable();`: the selector is always a case,
+       so a jump table needs no range test */
+    int def_unreachable;
 };
 #endif
 
@@ -821,6 +824,9 @@ struct TCCState {
     /* A -mt option was given, so a link refuses objects compiled for a
        part with more than that one (TP_EF_* in their e_flags). */
     unsigned char tp_link_check;
+    /* -mjump-tables: dense switches dispatch through a table of jumps
+       (gen_switch_jump_table); -mno-jump-tables, the default, compares. */
+    unsigned char tp_jump_tables;
     /* TP_EF_* of what this output holds: the target of every function
        compiled or assembled here, and the e_flags of every object loaded.
        Written as the output's e_flags. */
@@ -1961,6 +1967,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
 /* Take `name` ("t800", "t9000tvx", ...) as the part to compile for;
    0 if it does not name one. */
 ST_FUNC int tp_select_target(TCCState *s1, const char *name);
+ST_FUNC int tp_select_option(TCCState *s1, const char *name);
 /* The -m option that selects the current part, less its "-m". */
 ST_FUNC const char *tp_target_name(TCCState *s1);
 ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,

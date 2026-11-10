@@ -2098,6 +2098,8 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
                (and vice versa) rather than the two ANDing together.  Naming
                a target also makes the link refuse objects compiled for a
                bigger part. */
+            if (tp_select_option(s, optarg))
+                break;
             if (tp_select_target(s, optarg)) {
                 s->tp_link_check = 1;
                 break;
