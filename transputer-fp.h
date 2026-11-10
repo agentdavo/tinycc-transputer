@@ -1109,6 +1109,9 @@ static int tp_fpu_load_early(SValue *sv, int is_db)
         v >= VT_CONST || tp_hist_n == 0 || tp_hist[0].end != ind ||
         tp_reg_live_on_vstack(v, sv))
         return 0;
+    /* a packed member is copied out by its bytes (tp_emit_float_addr) */
+    if (tp_word_unaligned(sv))
+        return 0;
     for (k = 0; k < tp_hist_n; k++) {
         if ((k > 0 && tp_hist[k].end != tp_hist[k - 1].off) ||
             tp_hist[k].off < func_start_ind)
@@ -1224,7 +1227,7 @@ static int tp_fpu_square_twin(SValue *sv, int is_db)
     int v = sv->r & VT_VALMASK;
     int m, i, k, id, idelta, ineed, fdelta;
 
-    if (tp_opf_volatile ||
+    if (tp_opf_volatile || tp_word_unaligned(sv) ||
         nocode_wanted || !(sv->r & VT_LVAL) || (sv->r & VT_SYM) ||
         v >= VT_CONST || tp_hist_n < 4 || tp_hist[0].end != ind ||
         tp_reg_live_on_vstack(v, sv) ||

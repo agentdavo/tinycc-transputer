@@ -112,14 +112,23 @@ native hardware timings or sixteen-node scaling measurements.
 The full c-testsuite and the full local suite were not rerun; the object
 comparison shows which of their programs change.
 
-## Found on the way, not fixed here
+## Found on the way, fixed afterwards
 
 At `-mt425`/`-mt414`, a packed double used as an arithmetic operand through a
 pointer (`p->d * 2`, `p` a `struct __attribute__((packed)) { char c; double
-d; } *`) is read with `ldnl 0`/`ldnl 1` at the odd address, which reads the
-containing words. Plain loads and stores of the member use bytes and are
-correct. The baseline has it too; the new fixture skips its packed case on
-soft-float parts until it is fixed.
+d; } *`) was read with `ldnl 0`/`ldnl 1` at the odd address, which reads the
+containing words. The baseline had it too. The cause was in call-argument
+staging, so it was wider than first recorded: any `long long` or `double`
+packed member reached through a pointer and passed to a call was wrong on
+every part, and on the FPU parts two operand shortcuts (`tp_fpu_load_early`,
+`tp_fpu_square_twin`) loaded a packed `float` or `double` with `fpldnl` at
+its odd address in comparisons, squares and products. All three now go
+through the byte copy that plain loads use. `test_packed_wide_arg.c` (21
+cases) fails with the previous compiler on all four parts and passes with the
+fix at both layouts; the packed case here runs on soft-float parts again. Of
+the local-test and c-testsuite objects, only that fixture's change (454
+identical at `-mt800`, 458 at `-mt9000`, 449 and 453 on the soft-float parts
+besides this file's own re-enabled case).
 
 ## Reproduction evidence
 

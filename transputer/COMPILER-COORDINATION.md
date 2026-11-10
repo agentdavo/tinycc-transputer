@@ -124,9 +124,13 @@ pair and two `stnl`s. Full box saves 134,896,513 decoded instructions and
 FPU opcode totals are unchanged. All four workload gates pass including full
 glass, plus 176 paired target/layout runs, 32 mixed ABI, eight VLA and 384
 generated-expression bit comparisons; soft-float objects are byte-identical.
-Open from that work: memory-to-memory double copies still move two words,
-and `-mt425`/`-mt414` read a packed double arithmetic operand with word
-loads (a baseline miscompile, recorded in the report).
+Open from that work: memory-to-memory double copies still move two words.
+The packed-operand miscompile it turned up is fixed: a `long long` or
+`double` packed member reached through a pointer and passed to a call (so
+every soft-float operation on one) was staged with `ldnl 0`/`ldnl 1`, and
+two FPU shortcuts loaded one with `fpldnlsn`/`fpldnldb` at its odd address.
+All three now copy the bytes; `test_packed_wide_arg.c` covers them, and of
+the local and c-testsuite objects only that fixture's change.
 
 **Source layout, 10 November 2026.** The back end was restructured with no
 change in generated code (objects for all six parts, linked images and the

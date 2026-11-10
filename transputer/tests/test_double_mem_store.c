@@ -88,15 +88,7 @@ void test_main(void)
     check("matrix",r.x==1+10+27+13 && r.y==2+12+30+14 && r.z==3+14+33+15);
     vd=1;
     check("volatile",volatile_dest(&vd,1,3)==15 && vd==15);
-#ifdef __SOFTFP__
-    /* -mt425/-mt414 miscompile arithmetic on a packed double through a
-     * pointer (found writing this test, 2026-11-10; not this rule, which
-     * never runs without an FPU) */
-    (void)packed_dest;pk.c=7;
-    check("packed",1);
-#else
     check("packed",packed_dest(&pk,3)==14 && pk.c==7);
-#endif
     for(i=0;i<24;i++)buf[i]=(char)(0x40+i);
     check("odd",odd(buf,1.5)==2.25 && buf[2]==0x42 && buf[11]==0x4b);
     in.w[0]=0;in.w[1]=0x80000000u;

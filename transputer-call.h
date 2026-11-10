@@ -167,25 +167,40 @@ static void tp_expand_scalar_call_words(struct tp_call_words *cw, SValue *arg, i
             loc = (loc - 8) & -4;
             spill_lo = loc + 4;
             spill_hi = loc;
-            if (v == VT_LLOCAL)
-                emit_local_op(TP_OP_LDL, arg->c.i);
-            else
-                Tp_LDL(v);
-            if (tp_t414()) {
-                /* no dup: load the pointer again for the high word */
-                Tp_LDNL(0);
-                emit_local_op(TP_OP_STL, spill_lo);
+            if (arg->r & VT_UNALIGNED) {
+                /* A packed member: ldnl would read the containing words.
+                 * Build both words from their bytes, as load() does. */
+                int t = tp_park_new(4);
+                if (v == VT_LLOCAL)
+                    tp_park_op(TP_OP_LDL, -1, arg->c.i);
+                else
+                    Tp_LDL(v);
+                tp_park_op(TP_OP_STL, -1, t);
+                tp_bytes_load(-1, t, 0);
+                tp_park_op(TP_OP_STL, -1, spill_lo);
+                tp_bytes_load(-1, t, 4);
+                tp_park_op(TP_OP_STL, -1, spill_hi);
+            } else {
                 if (v == VT_LLOCAL)
                     emit_local_op(TP_OP_LDL, arg->c.i);
                 else
                     Tp_LDL(v);
-            } else {
-                Tp_DUP();
-                Tp_LDNL(0);
-                emit_local_op(TP_OP_STL, spill_lo);
+                if (tp_t414()) {
+                    /* no dup: load the pointer again for the high word */
+                    Tp_LDNL(0);
+                    emit_local_op(TP_OP_STL, spill_lo);
+                    if (v == VT_LLOCAL)
+                        emit_local_op(TP_OP_LDL, arg->c.i);
+                    else
+                        Tp_LDL(v);
+                } else {
+                    Tp_DUP();
+                    Tp_LDNL(0);
+                    emit_local_op(TP_OP_STL, spill_lo);
+                }
+                Tp_LDNL(1);
+                emit_local_op(TP_OP_STL, spill_hi);
             }
-            Tp_LDNL(1);
-            emit_local_op(TP_OP_STL, spill_hi);
             lo.r = VT_LOCAL | VT_LVAL;
             lo.c.i = spill_lo;
             hi.r = VT_LOCAL | VT_LVAL;
