@@ -12964,6 +12964,81 @@ static int tp_stmt_double_store(struct tp_hist_ent *w, int *keep, int *mod,
     return 1;
 }
 
+static int tp_ent_is(const struct tp_hist_ent *h, int opc, int val)
+{
+    return h->kind == TP_HIST_INSTR && h->opc == opc && h->val == val;
+}
+
+/* The same assignment when the destination is in memory and its address
+ * waits in an integer register slot p:
+ *
+ *   ldlp x; fpstnldb; [ldl x+1; stl h;] ldl x; ldl p; stnl 0;
+ *   ldl p; ldc 4; bsub; stl p; ldl h; ldl p; stnl 0   ->   ldl p; fpstnldb
+ *
+ * The word copy must be the whole rest of the window, so nothing later in it
+ * reads the pair, h or the advanced p, and no vstack value may name them.
+ * The words go to the same two addresses the stnls wrote (stnl and fpstnldb
+ * both take a word-aligned address in A), each written once as before.
+ * TCC_TRANSPUTER_DBL_MEM_STORE=0 keeps the copy for an A/B run. */
+static int tp_stmt_double_store_mem(struct tp_hist_ent *w, int *keep, int *mod,
+                                    int n, int a, int b)
+{
+    static int off = -1;
+    int q[12], count = 0, i, x, hi, p, f;
+
+    if (off < 0) {
+        const char *e = getenv("TCC_TRANSPUTER_DBL_MEM_STORE");
+        off = e && *e == '0';
+    }
+    if (off || w[a].kind != TP_HIST_INSTR || w[a].opc != TP_OP_LDLP ||
+        !tp_ent_is(&w[b], TP_OP_OPR, TP_FPU_STNLDB))
+        return 0;
+    x = w[a].val;
+    if (x < TREG_FA || x > TREG_FC ||
+        tp_reg_live_on_vstack(x, NULL) || tp_reg_live_on_vstack(x + 1, NULL))
+        return 0;
+    for (i = tp_next_kept(keep, n, b); i < n; i = tp_next_kept(keep, n, i)) {
+        if (count == 12)
+            return 0;
+        q[count++] = i;
+    }
+    if (count != 10 && count != 12)
+        return 0;
+    f = count - 10;
+    hi = x + 1;
+    if (f) {
+        if (!tp_ent_is(&w[q[0]], TP_OP_LDL, hi) ||
+            w[q[1]].kind != TP_HIST_INSTR || w[q[1]].opc != TP_OP_STL)
+            return 0;
+        hi = w[q[1]].val;
+        if (hi < TREG_FA || hi > TREG_FC || hi == x || hi == x + 1 ||
+            tp_reg_live_on_vstack(hi, NULL))
+            return 0;
+    }
+    if (w[q[f + 1]].kind != TP_HIST_INSTR || w[q[f + 1]].opc != TP_OP_LDL)
+        return 0;
+    p = w[q[f + 1]].val;
+    if (p < 0 || p >= NB_REGS || !(reg_classes[p] & RC_INT) ||
+        (p >= TREG_FA && p <= TREG_FC + 1) || tp_reg_live_on_vstack(p, NULL))
+        return 0;
+    if (!tp_ent_is(&w[q[f]], TP_OP_LDL, x) ||
+        !tp_ent_is(&w[q[f + 2]], TP_OP_STNL, 0) ||
+        !tp_ent_is(&w[q[f + 3]], TP_OP_LDL, p) ||
+        !tp_ent_is(&w[q[f + 4]], TP_OP_LDC, 4) ||
+        !tp_ent_is(&w[q[f + 5]], TP_OP_OPR, TP_OPR_BSUB) ||
+        !tp_ent_is(&w[q[f + 6]], TP_OP_STL, p) ||
+        !tp_ent_is(&w[q[f + 7]], TP_OP_LDL, hi) ||
+        !tp_ent_is(&w[q[f + 8]], TP_OP_LDL, p) ||
+        !tp_ent_is(&w[q[f + 9]], TP_OP_STNL, 0))
+        return 0;
+    w[a].opc = TP_OP_LDL;
+    w[a].val = p;
+    mod[a] = 1;
+    for (i = 0; i < count; i++)
+        keep[q[i]] = 0;
+    return 1;
+}
+
 /* The current pc is a label that a jump emitted later may reach (a loop
  * head, a `continue' target, a case label: tccgen's gind()).  gsym_addr()
  * clears the window when it resolves a forward jump; a backward target is
@@ -13043,7 +13118,8 @@ ST_FUNC void tp_stmt_end(void)
                 changed = 1;
                 continue;
             }
-            if (tp_stmt_double_store(w, keep, mod, n, a, b)) {
+            if (tp_stmt_double_store(w, keep, mod, n, a, b) ||
+                tp_stmt_double_store_mem(w, keep, mod, n, a, b)) {
                 changed = 1;
                 continue;
             }

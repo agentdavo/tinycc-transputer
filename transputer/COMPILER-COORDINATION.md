@@ -114,6 +114,20 @@ paired target/layout runs, 32 mixed ABI, eight VLA and 384 generated-expression
 bit comparisons. Static checks confirm double adjacency and pinned arguments;
 soft-float fixture objects remain identical. The six worker chats stay closed.
 
+**10 November 2026.** A re-profile of the full box render found `main` at
+`6e2f6d81` instruction-identical to that candidate. The
+[double memory-store acceptance](tests/bench/double-memory-stores-2026-11-10.md)
+then extends the statement-end rule to destinations in memory: an FPU double
+result goes straight to the parked address instead of through a temporary
+pair and two `stnl`s. Full box saves 134,896,513 decoded instructions and
+242,441,560 modeled T800 cycles (4.76185%); the ELF shrinks 8,352 bytes and
+FPU opcode totals are unchanged. All four workload gates pass including full
+glass, plus 176 paired target/layout runs, 32 mixed ABI, eight VLA and 384
+generated-expression bit comparisons; soft-float objects are byte-identical.
+Open from that work: memory-to-memory double copies still move two words,
+and `-mt425`/`-mt414` read a packed double arithmetic operand with word
+loads (a baseline miscompile, recorded in the report).
+
 ## Closure checkpoint
 
 | Session | Saved result and validation | Remaining work / retained artifacts |
