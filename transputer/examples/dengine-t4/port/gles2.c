@@ -1356,7 +1356,7 @@ void glLinkProgram(GLuint pname)
                pname, p->vs->instruction_count, p->vfast.count, p->vpos.count, p->vpos_split ? ", split" : "",
                p->fs->instruction_count, p->ffast.count, p->varying_floats);
         {
-            static const char *names[] = {"mov", "add", "sub", "mul", "div", "max", "pow", "gt", "fract", "dot2", "dot3", "dot4",
+            static const char *names[] = {"mul", "add", "div", "sub", "mov", "fract", "max", "gt", "pow", "dot2", "dot3", "dot4",
                                           "cross", "norm2", "norm3", "norm4", "tex", "mat4"};
             int counts[18], k;
             memset(counts, 0, sizeof(counts));
@@ -1656,8 +1656,9 @@ static void sample2d(const sampler *t, float s, float tc, float *out)
         c = t->rgba + ((size_t)j1 * (size_t)t->w + (size_t)i0) * 4u;
         d = t->rgba + ((size_t)j1 * (size_t)t->w + (size_t)i1) * 4u;
         for (k = 0; k < 4; k++) {
-            float top = byte_to_float[a[k]] + (byte_to_float[b[k]] - byte_to_float[a[k]]) * fx;
-            float bottom = byte_to_float[c[k]] + (byte_to_float[d[k]] - byte_to_float[c[k]]) * fx;
+            float ta = byte_to_float[a[k]], tc2 = byte_to_float[c[k]];
+            float top = ta + (byte_to_float[b[k]] - ta) * fx;
+            float bottom = tc2 + (byte_to_float[d[k]] - tc2) * fx;
             out[k] = top + (bottom - top) * fy;
         }
     }
@@ -1777,7 +1778,10 @@ static void vm_exec(float (*reg)[4], const tg_vm_instruction *code, int count, i
  * normalize and texture2D stay whole. Every value is computed with the same
  * float operations in the same order as vm_exec, so results are identical;
  * the per-fragment loop loses the decoding, the width loops and the calls. */
-enum { F_MOV, F_ADD, F_SUB, F_MUL, F_DIV, F_MAX, F_POW, F_GT, F_FRACT,
+/* In order of use in dEngine's shaders: TinyCC compiles the switch in
+ * fast_exec to a chain of compares (its jump tables are off by default), so
+ * the first codes dispatch soonest. */
+enum { F_MUL, F_ADD, F_DIV, F_SUB, F_MOV, F_FRACT, F_MAX, F_GT, F_POW,
        F_DOT2, F_DOT3, F_DOT4, F_CROSS, F_NORM2, F_NORM3, F_NORM4, F_TEX, F_MAT4 };
 
 static fop *fast_emit(fast_code *fc, int op, float *d, float *a, float *b, int aux)
@@ -2100,6 +2104,7 @@ static struct {
     program *p;
     target t;
     const sampler *vtex[TG_VM_TEXTURES], *ftex[TG_VM_TEXTURES];
+    float *vary_dst[MAX_VARYING_FLOATS];   /* where each varying goes in the fragment registers */
     int nv, stride;
     int clip_x0, clip_y0, clip_x1, clip_y1;
     float vx, vy, vw, vh;
@@ -2348,7 +2353,7 @@ static void raster_triangle(const window_vertex *a0, const window_vertex *b0, co
             if (!depth_on || (depth_less ? zc < *depth : depth_pass(zc, *depth))) {
                 float w = 1.0f / iw, *out;
                 if (depth_on && gl.depth_mask) *depth = zc;
-                for (k = 0; k < nv; k++) p->fregs[p->vary_freg[k]][p->vary_comp[k]] = q[k] * w;
+                for (k = 0; k < nv; k++) *draw.vary_dst[k] = q[k] * w;
 #ifdef DE_GL_SLOW_VM
                 vm_exec(p->fregs, p->fs->code, p->fs->instruction_count, p->fs->entry_pc, draw.ftex);
 #else
@@ -2474,6 +2479,7 @@ static int begin_draw(GLenum mode, unsigned int vertices)
     if (!current_target(&draw.t)) return 0;
     if (mode < GL_TRIANGLES) return 0;   /* points and lines are not drawn */
     draw.p = p; draw.nv = p->varying_floats; draw.stride = 4 + draw.nv;
+    for (i = 0; i < draw.nv; i++) draw.vary_dst[i] = &p->fregs[p->vary_freg[i]][p->vary_comp[i]];
     for (i = 0; i < TG_VM_TEXTURES; i++) draw.vtex[i] = draw.ftex[i] = &black_texture_object.s;
     for (i = 0; i < p->uniform_count; i++) {
         const uniform_info *u = &p->uniforms[i];
