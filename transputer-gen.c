@@ -2346,6 +2346,283 @@ static void tp_store_fpu_result_to_slot(int slot, int bt) {
     fpureg_pop(1);
 }
 
+/* load(): the value of a local variable.  On the transputer LDL loads
+ * the word straight from the workspace; narrower values and packed
+ * ones are read by address. */
+static void tp_load_local(int r, SValue *sv, int size, int is_unsigned)
+{
+    int byte_off;
+
+    if (tp_debug_check() && sv->sym && (sv->sym->type.t & VT_STATIC)) {
+        fprintf(stderr, "[STATIC_LOCAL_DEBUG] Static variable accessed as LOCAL: %s type=0x%x r=0x%x c.i=%ld\n",
+                get_tok_str(sv->sym->v, NULL), sv->sym->type.t, sv->r, (long)sv->c.i);
+    }
+    /* VT_LVAL | VT_LOCAL: Load value from local workspace slot.
+     * On Transputer, LDL loads the WORD directly from workspace.
+     * This is different from other architectures where locals are
+     * byte-addressed in memory. No dereference (LB/LDNL) needed.
+     * Only sign/zero extension for smaller types. */
+    byte_off = sv->c.i;
+    if (size == 1) {
+        emit_local_addr(byte_off);
+        if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
+            Tp_LBX();            /* load byte extended */
+        } else {
+            Tp_LB();                    /* zero-extends */
+            if (!is_unsigned)
+                tp_sign_extend(8, 1);
+        }
+        Tp_STL(r);
+        return;
+    } else if (size == 2 && tp_t9000_half_ok(byte_off, sv->r)) {
+        /* T9000: one instruction instead of two byte loads,
+           a shift, an OR and the extension dance. */
+        emit_local_addr(byte_off);
+        if (is_unsigned) Tp_LS(); else Tp_LSX();
+        Tp_STL(r);
+        return;
+    } else if (size == 2) {
+        tp_load_local_half(byte_off, is_unsigned);
+        Tp_STL(r);
+        return;
+    } else if (byte_off & 3) {
+        /* a member of a packed local: LDL would round the offset
+         * down to its word (tp_word_unaligned) */
+        int t = tp_park_new(4);
+        emit_local_addr(byte_off);
+        tp_park_op(TP_OP_STL, -1, t);
+        tp_bytes_load(-1, t, 0);
+        Tp_STL(r);
+        if (size == 8) {
+            tp_bytes_load(-1, t, 4);
+            Tp_STL(r + 1);
+        }
+        return;
+    }
+    emit_local_op(TP_OP_LDL, byte_off);
+    if (size == 8) {
+        Tp_STL(r); /* Save Low */
+        emit_local_op(TP_OP_LDL, byte_off + 4);  /* Load high word */
+        Tp_STL(r+1);
+        return;
+    }
+    Tp_STL(r);
+}
+
+/* load(): the value at an address - a global's, a spilled pointer's or
+ * one in a register. */
+static void tp_load_through(int r, SValue *sv, int bt, int size, int is_unsigned)
+{
+    int fr = sv->r;
+    int v = sv->r & VT_VALMASK;
+
+    if (v == VT_CONST) {
+        if (sv->r & VT_SYM) {
+            /* Use R_TRANSPUTER_LDC_ABS for loading absolute data addresses.
+             * Eight nibbles (7 PFIX + LDC) cover a full 32-bit address. */
+            tp_emit_sym_reloc(sv, "load_lval", bt);
+            /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
+            if (sv->c.i)
+                Tp_ADC(sv->c.i);
+        } else {
+            Tp_LDC(sv->c.i);
+        }
+    } else if (v == VT_LLOCAL) {
+        /* VT_LLOCAL: lvalue address was saved to local slot sv->c.i.
+         * This happens when an lvalue pointer needed to be spilled
+         * to make room for other operations (e.g., RHS evaluation).
+         * Load the saved address from the local slot. */
+        emit_local_op(TP_OP_LDL, sv->c.i);
+    } else {
+        /* Some lvalue addresses survive control-flow in both a
+         * workspace "register" copy and a canonical spilled local
+         * slot (sv->c.i). The spilled slot is the stable source after
+         * compare/jump chains; prefer it when present. */
+        if ((fr & VT_LVAL) && sv->c.i < 0) {
+            emit_local_op(TP_OP_LDL, sv->c.i);
+        } else {
+            /* Address is in register v (workspace slot). The address
+             * was typically just computed and parked there, so try to
+             * cancel that store rather than reload it — that is what
+             * turns `ADC k; STL r; LDL r; LDNL 0` into `ADC k; LDNL 0`,
+             * which the ADC fold then collapses to `LDNL k/4`: the
+             * T9000 idiom where the displacement rides on the
+             * address-calculation stage instead of the ALU. */
+            tp_push_reg_or_cancel_stl(v, sv);
+        }
+    }
+
+    /* A word or two of a packed member: from its bytes, the address
+     * parked as the halfword path below parks it. */
+    if ((size == 4 || size == 8) && (sv->r & VT_UNALIGNED)) {
+        int t = tp_park_new(4);
+        tp_park_op(TP_OP_STL, -1, t);
+        tp_bytes_load(-1, t, 0);
+        Tp_STL(r);
+        if (size == 8) {
+            tp_bytes_load(-1, t, 4);
+            Tp_STL(r + 1);
+        }
+        return;
+    }
+
+    /* Memory access - dereference the address */
+    switch (size) {
+    case 1:
+        if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
+            Tp_LBX();
+            break;
+        }
+        Tp_LB();                    /* zero-extends */
+        if (!is_unsigned)
+            tp_sign_extend(8, 1);
+        break;
+    case 2:
+        if (tp_t9000_half_ptr_ok(sv->r,
+                                 (v == VT_CONST) ? (long long)sv->c.i : 0)) {
+            if (is_unsigned) Tp_LS(); else Tp_LSX();
+            break;
+        }
+        /* Addresses are byte-addressed. A 16-bit field can sit at an
+         * arbitrary byte offset within a word (for example the kernel's
+         * struct printf_spec.s16 precision at offset 6). Rebuild the
+         * halfword from two byte loads instead of using LDNL 0. */
+        tp_load_half_bytes(FRAME_SLOT_SCRATCH);
+
+        /* two zero-extended bytes: already 0..0xFFFF */
+        if (!is_unsigned)
+            tp_sign_extend(16, 1);
+        break;
+    case 4:
+        Tp_LDNL(0);
+        break;
+    case 8:
+        /* T800 DUP: duplicate address before first dereference so we
+         * don't need to reload it (which costs 1-9 bytes) for the
+         * high word.  Stack: AReg=addr → DUP → AReg=addr, BReg=addr.
+         * After LDNL 0: AReg=low, BReg=addr.  STL r saves low,
+         * shifts addr back to AReg.  LDNLP 1; LDNL 0 loads high. */
+        if (tp_t414()) {
+            /* no dup: park the address in the high word's slot */
+            Tp_STL(r + 1);
+            Tp_LDL(r + 1);
+            Tp_LDNL(0);
+            Tp_STL(r);
+            Tp_LDL(r + 1);
+            Tp_LDNL(1);
+            Tp_STL(r + 1);
+            return;
+        }
+        Tp_DUP();                     /* AReg=addr, BReg=addr */
+        Tp_LDNL(0);                  /* AReg=low, BReg=addr */
+        Tp_STL(r);                    /* save low; AReg←addr (slid from BReg) */
+        Tp_LDNL(1);                  /* LDNL 1: load high word directly at offset */
+        Tp_STL(r+1);
+        return;
+    }
+    Tp_STL(r);
+}
+
+/* load(): not an lvalue - a constant, an address, a comparison or jump
+ * to turn into 0/1, or another register. */
+static void tp_load_value(int r, SValue *sv, int bt, int size)
+{
+    int v = sv->r & VT_VALMASK;
+
+    if (v == VT_CONST) {
+        if (size == 8 && !(sv->r & VT_SYM)) {
+            uint64_t bits;
+            if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+                union { double d; uint64_t u; } u;
+                u.d = sv->c.d;
+                bits = u.u;
+            } else {
+                bits = sv->c.i;
+            }
+            Tp_LDC((uint32_t)bits);
+            Tp_STL(r);
+            Tp_LDC((uint32_t)(bits >> 32));
+            Tp_STL(r + 1);
+            return;
+        }
+        if (sv->r & VT_SYM) {
+            /* Load absolute symbol value into Areg. Reserve full-width
+             * prefix space so the linker can patch large addresses. */
+            tp_emit_sym_reloc(sv, "load_imm", bt);
+            /* Add byte offset from symbol (e.g. &arr[1] has c.i=1) */
+            if (sv->c.i)
+                Tp_ADC(sv->c.i);
+        } else {
+            if (bt == VT_FLOAT) {
+                union { float f; uint32_t u; } bits;
+                bits.f = sv->c.f;
+                tp_ldc_pooled(bits.u);
+            } else {
+                tp_ldc_pooled(sv->c.i);
+            }
+        }
+        Tp_STL(r);
+    } else if (v == VT_LOCAL) {
+        /* VT_LOCAL without VT_LVAL is the ADDRESS of a local object
+         * (e.g. result of '&local'), not the local's stored value. */
+        if (tp_load_debug) {
+            fprintf(stderr, "[LOAD_VT_LOCAL_ADDR] offset=%ld (sv->c.i=%ld, sym->c=%d) func=%s r=%d sym=%p\n",
+                    (long)sv->c.i, (long)sv->c.i,
+                    sv->sym ? sv->sym->c : -999,
+                    funcname ? funcname : "<unknown>", r, sv->sym);
+        }
+        emit_local_addr(sv->c.i);
+        Tp_STL(r);
+    } else if (v == VT_LLOCAL) {
+        /* Address spilled in a local slot - load pointer value. */
+        emit_local_op(TP_OP_LDL, sv->c.i);
+        Tp_STL(r);
+    } else if (v == VT_CMP) {
+        /* VT_CMP means a prior comparison left a result in AReg.
+         * Some ops (GT, EQC) produce strict 0/1. Others (DIFF for
+         * TOK_NE) may produce arbitrary nonzero values.
+         * The cmp_op field tells us the comparison semantics:
+         *   cmp_op & 1 == 1 (odd, e.g. TOK_NE=0x95): non-zero=true
+         *   cmp_op & 1 == 0 (even, e.g. TOK_EQ=0x94): zero=true
+         * When materializing as a value, normalize to 0/1 with
+         * double EQC 0: nonzero→0→1, zero→1→0. */
+        if (sv->cmp_op >= 2 && !(sv->cmp_op & 1)) {
+            /* Even op (e.g. TOK_EQ): invert the 0/1 value.
+             * EQC 0: AReg = (AReg == 0) ? 1 : 0 */
+            emit_instr(TP_OP_EQC, 0);
+        } else {
+            /* Odd op (e.g. TOK_NE): normalize arbitrary nonzero to 1.
+             * Double EQC 0: nonzero→0→1, zero→1→0. */
+            emit_instr(TP_OP_EQC, 0);
+            emit_instr(TP_OP_EQC, 0);
+        }
+        Tp_STL(r);
+    } else if (v == VT_JMP || v == VT_JMPI) {
+        /* Convert pending jump-encoded boolean into 0/1 in register slot.
+         * Mirrors other backends: default value, skip, patch alt value. */
+        int t = v & 1;
+        int j;
+        Tp_LDC(t);
+        Tp_STL(r);
+        j = gjmp(0);
+        gsym(sv->c.i);
+        Tp_LDC(t ^ 1);
+        Tp_STL(r);
+        gsym(j);
+    } else if (v != r) {
+        Tp_LDL(v);
+        Tp_STL(r);
+        if (size == 8) {
+            /* Use r2 for the high-word source when available.
+             * After lbuild(), r2 may differ from v+1 (e.g. r=11, r2=9).
+             * Falling back to v+1 only when r2 is not a valid register. */
+            int hi_src = (sv->r2 < VT_CONST) ? sv->r2 : v + 1;
+            Tp_LDL(hi_src);
+            Tp_STL(r + 1);
+        }
+    }
+}
+
 ST_FUNC void load(int r, SValue *sv) {
     int fr = sv->r;
     int v = fr & VT_VALMASK;
@@ -2353,7 +2630,6 @@ ST_FUNC void load(int r, SValue *sv) {
     int size = get_primitive_type_size(bt);
     int is_unsigned = (sv->type.t & VT_UNSIGNED) != 0 || bt == VT_BF16 || bt == VT_F16
                       || bt == VT_FLOAT16;
-    int byte_off;
 
     static int load_counter = 0;
 
@@ -2371,265 +2647,12 @@ ST_FUNC void load(int r, SValue *sv) {
      * high word gv() splits off a 64-bit value, carries their bits.  Turning
      * such a "symbol" into a relocation crashed the compiler (`x && 2LL`) or
      * relocated a constant against whatever Sym the stale pointer hit. */
-    if (fr & VT_LVAL) {
-        if (v == VT_LOCAL) {
-            if (tp_debug_check() && sv->sym && (sv->sym->type.t & VT_STATIC)) {
-                fprintf(stderr, "[STATIC_LOCAL_DEBUG] Static variable accessed as LOCAL: %s type=0x%x r=0x%x c.i=%ld\n",
-                        get_tok_str(sv->sym->v, NULL), sv->sym->type.t, sv->r, (long)sv->c.i);
-            }
-            /* VT_LVAL | VT_LOCAL: Load value from local workspace slot.
-             * On Transputer, LDL loads the WORD directly from workspace.
-             * This is different from other architectures where locals are
-             * byte-addressed in memory. No dereference (LB/LDNL) needed.
-             * Only sign/zero extension for smaller types. */
-            byte_off = sv->c.i;
-            if (size == 1) {
-                emit_local_addr(byte_off);
-                if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
-                    Tp_LBX();            /* load byte extended */
-                } else {
-                    Tp_LB();                    /* zero-extends */
-                    if (!is_unsigned)
-                        tp_sign_extend(8, 1);
-                }
-                Tp_STL(r);
-                return;
-            } else if (size == 2 && tp_t9000_half_ok(byte_off, sv->r)) {
-                /* T9000: one instruction instead of two byte loads,
-                   a shift, an OR and the extension dance. */
-                emit_local_addr(byte_off);
-                if (is_unsigned) Tp_LS(); else Tp_LSX();
-                Tp_STL(r);
-                return;
-            } else if (size == 2) {
-                tp_load_local_half(byte_off, is_unsigned);
-                Tp_STL(r);
-                return;
-            } else if (byte_off & 3) {
-                /* a member of a packed local: LDL would round the offset
-                 * down to its word (tp_word_unaligned) */
-                int t = tp_park_new(4);
-                emit_local_addr(byte_off);
-                tp_park_op(TP_OP_STL, -1, t);
-                tp_bytes_load(-1, t, 0);
-                Tp_STL(r);
-                if (size == 8) {
-                    tp_bytes_load(-1, t, 4);
-                    Tp_STL(r + 1);
-                }
-                return;
-            }
-            emit_local_op(TP_OP_LDL, byte_off);
-            if (size == 8) {
-                Tp_STL(r); /* Save Low */
-                emit_local_op(TP_OP_LDL, byte_off + 4);  /* Load high word */
-                Tp_STL(r+1);
-                return;
-            }
-            Tp_STL(r);
-        } else {
-            /* VT_CONST or register: We have an ADDRESS that needs dereferencing */
-            if (v == VT_CONST) {
-                if (sv->r & VT_SYM) {
-                    /* Use R_TRANSPUTER_LDC_ABS for loading absolute data addresses.
-                     * Eight nibbles (7 PFIX + LDC) cover a full 32-bit address. */
-                    tp_emit_sym_reloc(sv, "load_lval", bt);
-                    /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
-                    if (sv->c.i)
-                        Tp_ADC(sv->c.i);
-                } else {
-                    Tp_LDC(sv->c.i);
-                }
-            } else if (v == VT_LLOCAL) {
-                /* VT_LLOCAL: lvalue address was saved to local slot sv->c.i.
-                 * This happens when an lvalue pointer needed to be spilled
-                 * to make room for other operations (e.g., RHS evaluation).
-                 * Load the saved address from the local slot. */
-                emit_local_op(TP_OP_LDL, sv->c.i);
-            } else {
-                /* Some lvalue addresses survive control-flow in both a
-                 * workspace "register" copy and a canonical spilled local
-                 * slot (sv->c.i). The spilled slot is the stable source after
-                 * compare/jump chains; prefer it when present. */
-                if ((fr & VT_LVAL) && sv->c.i < 0) {
-                    emit_local_op(TP_OP_LDL, sv->c.i);
-                } else {
-                    /* Address is in register v (workspace slot). The address
-                     * was typically just computed and parked there, so try to
-                     * cancel that store rather than reload it — that is what
-                     * turns `ADC k; STL r; LDL r; LDNL 0` into `ADC k; LDNL 0`,
-                     * which the ADC fold then collapses to `LDNL k/4`: the
-                     * T9000 idiom where the displacement rides on the
-                     * address-calculation stage instead of the ALU. */
-                    tp_push_reg_or_cancel_stl(v, sv);
-                }
-            }
-
-            /* A word or two of a packed member: from its bytes, the address
-             * parked as the halfword path below parks it. */
-            if ((size == 4 || size == 8) && (sv->r & VT_UNALIGNED)) {
-                int t = tp_park_new(4);
-                tp_park_op(TP_OP_STL, -1, t);
-                tp_bytes_load(-1, t, 0);
-                Tp_STL(r);
-                if (size == 8) {
-                    tp_bytes_load(-1, t, 4);
-                    Tp_STL(r + 1);
-                }
-                return;
-            }
-
-            /* Memory access - dereference the address */
-            switch (size) {
-            case 1:
-                if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
-                    Tp_LBX();
-                    break;
-                }
-                Tp_LB();                    /* zero-extends */
-                if (!is_unsigned)
-                    tp_sign_extend(8, 1);
-                break;
-            case 2:
-                if (tp_t9000_half_ptr_ok(sv->r,
-                                         (v == VT_CONST) ? (long long)sv->c.i : 0)) {
-                    if (is_unsigned) Tp_LS(); else Tp_LSX();
-                    break;
-                }
-                /* Addresses are byte-addressed. A 16-bit field can sit at an
-                 * arbitrary byte offset within a word (for example the kernel's
-                 * struct printf_spec.s16 precision at offset 6). Rebuild the
-                 * halfword from two byte loads instead of using LDNL 0. */
-                tp_load_half_bytes(FRAME_SLOT_SCRATCH);
-
-                /* two zero-extended bytes: already 0..0xFFFF */
-                if (!is_unsigned)
-                    tp_sign_extend(16, 1);
-                break;
-            case 4:
-                Tp_LDNL(0);
-                break;
-            case 8:
-                /* T800 DUP: duplicate address before first dereference so we
-                 * don't need to reload it (which costs 1-9 bytes) for the
-                 * high word.  Stack: AReg=addr → DUP → AReg=addr, BReg=addr.
-                 * After LDNL 0: AReg=low, BReg=addr.  STL r saves low,
-                 * shifts addr back to AReg.  LDNLP 1; LDNL 0 loads high. */
-                if (tp_t414()) {
-                    /* no dup: park the address in the high word's slot */
-                    Tp_STL(r + 1);
-                    Tp_LDL(r + 1);
-                    Tp_LDNL(0);
-                    Tp_STL(r);
-                    Tp_LDL(r + 1);
-                    Tp_LDNL(1);
-                    Tp_STL(r + 1);
-                    return;
-                }
-                Tp_DUP();                     /* AReg=addr, BReg=addr */
-                Tp_LDNL(0);                  /* AReg=low, BReg=addr */
-                Tp_STL(r);                    /* save low; AReg←addr (slid from BReg) */
-                Tp_LDNL(1);                  /* LDNL 1: load high word directly at offset */
-                Tp_STL(r+1);
-                return;
-            }
-            Tp_STL(r);
-        }
-    } else {
-        /* Immediate / Register value */
-        if (v == VT_CONST) {
-            if (size == 8 && !(sv->r & VT_SYM)) {
-                uint64_t bits;
-                if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-                    union { double d; uint64_t u; } u;
-                    u.d = sv->c.d;
-                    bits = u.u;
-                } else {
-                    bits = sv->c.i;
-                }
-                Tp_LDC((uint32_t)bits);
-                Tp_STL(r);
-                Tp_LDC((uint32_t)(bits >> 32));
-                Tp_STL(r + 1);
-                return;
-            }
-            if (sv->r & VT_SYM) {
-                /* Load absolute symbol value into Areg. Reserve full-width
-                 * prefix space so the linker can patch large addresses. */
-                tp_emit_sym_reloc(sv, "load_imm", bt);
-                /* Add byte offset from symbol (e.g. &arr[1] has c.i=1) */
-                if (sv->c.i)
-                    Tp_ADC(sv->c.i);
-            } else {
-                if (bt == VT_FLOAT) {
-                    union { float f; uint32_t u; } bits;
-                    bits.f = sv->c.f;
-                    tp_ldc_pooled(bits.u);
-                } else {
-                    tp_ldc_pooled(sv->c.i);
-                }
-            }
-            Tp_STL(r);
-        } else if (v == VT_LOCAL) {
-            /* VT_LOCAL without VT_LVAL is the ADDRESS of a local object
-             * (e.g. result of '&local'), not the local's stored value. */
-            if (tp_load_debug) {
-                fprintf(stderr, "[LOAD_VT_LOCAL_ADDR] offset=%ld (sv->c.i=%ld, sym->c=%d) func=%s r=%d sym=%p\n",
-                        (long)sv->c.i, (long)sv->c.i,
-                        sv->sym ? sv->sym->c : -999,
-                        funcname ? funcname : "<unknown>", r, sv->sym);
-            }
-            emit_local_addr(sv->c.i);
-            Tp_STL(r);
-        } else if (v == VT_LLOCAL) {
-            /* Address spilled in a local slot - load pointer value. */
-            emit_local_op(TP_OP_LDL, sv->c.i);
-            Tp_STL(r);
-        } else if (v == VT_CMP) {
-            /* VT_CMP means a prior comparison left a result in AReg.
-             * Some ops (GT, EQC) produce strict 0/1. Others (DIFF for
-             * TOK_NE) may produce arbitrary nonzero values.
-             * The cmp_op field tells us the comparison semantics:
-             *   cmp_op & 1 == 1 (odd, e.g. TOK_NE=0x95): non-zero=true
-             *   cmp_op & 1 == 0 (even, e.g. TOK_EQ=0x94): zero=true
-             * When materializing as a value, normalize to 0/1 with
-             * double EQC 0: nonzero→0→1, zero→1→0. */
-            if (sv->cmp_op >= 2 && !(sv->cmp_op & 1)) {
-                /* Even op (e.g. TOK_EQ): invert the 0/1 value.
-                 * EQC 0: AReg = (AReg == 0) ? 1 : 0 */
-                emit_instr(TP_OP_EQC, 0);
-            } else {
-                /* Odd op (e.g. TOK_NE): normalize arbitrary nonzero to 1.
-                 * Double EQC 0: nonzero→0→1, zero→1→0. */
-                emit_instr(TP_OP_EQC, 0);
-                emit_instr(TP_OP_EQC, 0);
-            }
-            Tp_STL(r);
-        } else if (v == VT_JMP || v == VT_JMPI) {
-            /* Convert pending jump-encoded boolean into 0/1 in register slot.
-             * Mirrors other backends: default value, skip, patch alt value. */
-            int t = v & 1;
-            int j;
-            Tp_LDC(t);
-            Tp_STL(r);
-            j = gjmp(0);
-            gsym(sv->c.i);
-            Tp_LDC(t ^ 1);
-            Tp_STL(r);
-            gsym(j);
-        } else if (v != r) {
-            Tp_LDL(v);
-            Tp_STL(r);
-            if (size == 8) {
-                /* Use r2 for the high-word source when available.
-                 * After lbuild(), r2 may differ from v+1 (e.g. r=11, r2=9).
-                 * Falling back to v+1 only when r2 is not a valid register. */
-                int hi_src = (sv->r2 < VT_CONST) ? sv->r2 : v + 1;
-                Tp_LDL(hi_src);
-                Tp_STL(r + 1);
-            }
-        }
-    }
+    if (!(fr & VT_LVAL))
+        tp_load_value(r, sv, bt, size);
+    else if (v == VT_LOCAL)
+        tp_load_local(r, sv, size, is_unsigned);
+    else
+        tp_load_through(r, sv, bt, size, is_unsigned);
 }
 
 /* ---- store-side address displacement ------------------------------------
@@ -2895,30 +2918,13 @@ static void gen_store_addr(SValue *v, int bt, int vr, int is_lval)
     }
 }
 
-ST_FUNC void store(int r, SValue *v) {
-    int bt = v->type.t & VT_BTYPE;
-    int vr = v->r & VT_VALMASK;
-    int is_lval = (v->r & VT_LVAL) != 0;
-    int size = get_primitive_type_size(bt);
-    int value_in_areg = 0;
-
-    if (tp_store_debug) {
-        fprintf(stderr, "[STORE] r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld sym=%p r_flags=0x%x\n",
-                r, vr, is_lval, size, bt, (long)v->c.i,
-                (v->r & VT_SYM) ? (void*)v->sym : NULL, v->r);
-    }
-    if (tp_trace_func_active() && size <= 2) {
-        fprintf(stderr,
-                "[tcc] store_trace func=%s r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld depth=%d flags=0x%x\n",
-                funcname ? funcname : "<unknown>",
-                r, vr, is_lval, size, bt, (long)v->c.i, abcreg_stack_depth, v->r);
-    }
-
-    /* A word of a packed member, or of a local at a misaligned offset
-     * (tp_word_unaligned): four byte stores.  Like the paths below this
-     * writes the one word in r - a long long's second word comes in a second
-     * call at +4 - except a value still on the FPU stack, written whole as
-     * the FPU path below writes it. */
+/* A word of a packed member, or of a local at a misaligned offset
+ * (tp_word_unaligned): four byte stores.  Like the paths below this
+ * writes the one word in r - a long long's second word comes in a second
+ * call at +4 - except a value still on the FPU stack, written whole as
+ * the FPU path below writes it. */
+static int tp_store_unaligned(int r, SValue *v, int bt, int vr, int is_lval, int size)
+{
     if (is_lval && (size == 4 || size == 8) && tp_word_unaligned(v)) {
         int t = tp_park_new(12);            /* address t+8, value t, t+4 */
         int vslot = r, voff = 0, two = 0;
@@ -2945,10 +2951,14 @@ ST_FUNC void store(int r, SValue *v) {
         if (two)
             tp_bytes_store(-1, t + 8, 4, -1, voff + 4);
         abcreg_stack_depth = 0;
-        return;
+        return 1;
     }
+    return 0;
+}
 
-    /* Float registers are stack-like; write through to memory explicitly. */
+/* Float registers are stack-like; write through to memory explicitly. */
+static int tp_store_fpu(int r, SValue *v, int bt, int vr, int is_lval)
+{
     if ((r == TREG_FA || r == TREG_FB || r == TREG_FC) && tp_is_float_bt(bt)) {
         int is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
         if (r == TREG_FA && fpureg_stack_depth > 0) {
@@ -2956,7 +2966,7 @@ ST_FUNC void store(int r, SValue *v) {
             emit_instr(TP_OP_OPR, is_db ? TP_FPU_STNLDB : TP_FPU_STNLSN);
             fpureg_pop(1);
             abcreg_stack_depth = 0;
-            return;
+            return 1;
         }
         if (is_db) {
             /* Fallback: value already materialized in workspace slot(s).
@@ -2984,45 +2994,33 @@ ST_FUNC void store(int r, SValue *v) {
             gen_store_addr(v, bt, vr, is_lval);
             Tp_STNL(0);
             abcreg_stack_depth = 0;
-            return;
+            return 1;
         }
         /* float32 in a workspace slot: fall through to the generic
          * word-store path below — a float reg is a workspace slot like any
          * other, and that path pushes the value first (no REV) and can fold
          * an ADC into the STNL displacement. */
     }
+    return 0;
+}
 
-    /* Check if value is on hardware evaluation stack.
-     * TREG_A/B/C are explicit eval-stack registers. In practice, gv()
-     * often leaves the current single-word RHS in AReg even when the
-     * associated pseudo-register slot has not been synchronized yet.
-     * Narrow non-local stores are especially sensitive to reloading a
-     * stale workspace slot after control-flow-heavy RHS evaluation. */
-    if (r == TREG_A || r == TREG_B || r == TREG_C) {
-        value_in_areg = 1;
-    }
-
-    if ((v->r & VT_VALMASK) == VT_CONST && v->sym && !(v->r & VT_SYM)) {
-        /* Ensure symbol constants reserve full LDC placeholder space. */
-        v->r |= VT_SYM;
-        vr = v->r & VT_VALMASK;
-    }
-
-    /*
-     * Local scalar lvalues live in workspace words. Storing them through
-     * LDLP+SB/halfword sequences can corrupt temporaries and upper bytes:
-     * SB only writes 1 byte, leaving upper bytes as garbage. Later LDL
-     * loads the full 32-bit word including garbage, corrupting values
-     * passed as function arguments.
-     * Store directly with STL for ALL local scalars (byte, short, int).
-     * AReg already contains the properly promoted int value.
-     */
+/*
+ * Local scalar lvalues live in workspace words. Storing them through
+ * LDLP+SB/halfword sequences can corrupt temporaries and upper bytes:
+ * SB only writes 1 byte, leaving upper bytes as garbage. Later LDL
+ * loads the full 32-bit word including garbage, corrupting values
+ * passed as function arguments.
+ * Store directly with STL for ALL local scalars (byte, short, int).
+ * AReg already contains the properly promoted int value.
+ */
+static int tp_store_local(int r, SValue *v, int vr, int is_lval, int size, int value_in_areg)
+{
     if (is_lval && vr == VT_LOCAL && size == 4 && ((v->c.i & 3) == 0)) {
         if (!value_in_areg)
             Tp_LDL(r);
         emit_local_op(TP_OP_STL, v->c.i);
         abcreg_pop(1);
-        return;
+        return 1;
     }
     /* 64-bit local stores: only store the one word in register r.
      * The caller (save_reg_upstack, vstore) handles the second word
@@ -3036,15 +3034,19 @@ ST_FUNC void store(int r, SValue *v) {
             emit_local_op(TP_OP_STL, v->c.i);        /* store word */
         }
         abcreg_stack_depth = 0;
-        return;
+        return 1;
     }
+    return 0;
+}
 
-    /* Word store, value still in a workspace slot: STNL wants AReg=address,
-     * BReg=value. Pushing the value *before* the address produces exactly that
-     * order; emitting the address first forces a REV to swap them, which cost
-     * 47.5k instructions across the kernel. Every gen_store_addr path is a
-     * single push (optionally followed by a unary ADC), so a value parked in
-     * BReg is left undisturbed. */
+/* Word store, value still in a workspace slot: STNL wants AReg=address,
+ * BReg=value. Pushing the value *before* the address produces exactly that
+ * order; emitting the address first forces a REV to swap them, which cost
+ * 47.5k instructions across the kernel. Every gen_store_addr path is a
+ * single push (optionally followed by a unary ADC), so a value parked in
+ * BReg is left undisturbed. */
+static int tp_store_value_first(int r, SValue *v, int bt, int vr, int is_lval, int size, int value_in_areg)
+{
     if (size == 4 && !value_in_areg) {
         /* First try to swap the address computation past the value so the
          * field offset can ride on the STNL displacement instead of an ADC. */
@@ -3052,11 +3054,11 @@ ST_FUNC void store(int r, SValue *v) {
         if (swap_off < 0)
             swap_off = tp_knob(TPK_TP_NO_STORE_SWAP) ? 1 : 0;
         if (!swap_off && tp_store_swap_addr_value(r, v, vr, is_lval))
-            return;
+            return 1;
         Tp_LDL(r);
         gen_store_addr(v, bt, vr, is_lval);
         Tp_STNL(0);
-        return;
+        return 1;
     }
 
     /* sb and ss want AReg = address, BReg = value.  When the value is still
@@ -3085,10 +3087,14 @@ ST_FUNC void store(int r, SValue *v) {
             Tp_SB();
         else
             Tp_SS();
-        return;
+        return 1;
     }
+    return 0;
+}
 
-    /* Generate Destination Address - pushes address onto stack */
+/* Generate Destination Address - pushes address onto stack */
+static void tp_store_addr_first(int r, SValue *v, int bt, int vr, int is_lval, int size, int value_in_areg)
+{
     gen_store_addr(v, bt, vr, is_lval);
 
     /* Store logic */
@@ -3192,6 +3198,53 @@ ST_FUNC void store(int r, SValue *v) {
         }
         break;
     }
+}
+
+/* Store the word in register r to the lvalue v.  A two-word value comes
+ * as two calls.  Each case below returns 1 if the store was its own. */
+ST_FUNC void store(int r, SValue *v) {
+    int bt = v->type.t & VT_BTYPE;
+    int vr = v->r & VT_VALMASK;
+    int is_lval = (v->r & VT_LVAL) != 0;
+    int size = get_primitive_type_size(bt);
+    int value_in_areg = 0;
+
+    if (tp_store_debug) {
+        fprintf(stderr, "[STORE] r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld sym=%p r_flags=0x%x\n",
+                r, vr, is_lval, size, bt, (long)v->c.i,
+                (v->r & VT_SYM) ? (void*)v->sym : NULL, v->r);
+    }
+    if (tp_trace_func_active() && size <= 2) {
+        fprintf(stderr,
+                "[tcc] store_trace func=%s r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld depth=%d flags=0x%x\n",
+                funcname ? funcname : "<unknown>",
+                r, vr, is_lval, size, bt, (long)v->c.i, abcreg_stack_depth, v->r);
+    }
+
+    if (tp_store_unaligned(r, v, bt, vr, is_lval, size) ||
+        tp_store_fpu(r, v, bt, vr, is_lval))
+        return;
+
+    /* Check if value is on hardware evaluation stack.
+     * TREG_A/B/C are explicit eval-stack registers. In practice, gv()
+     * often leaves the current single-word RHS in AReg even when the
+     * associated pseudo-register slot has not been synchronized yet.
+     * Narrow non-local stores are especially sensitive to reloading a
+     * stale workspace slot after control-flow-heavy RHS evaluation. */
+    if (r == TREG_A || r == TREG_B || r == TREG_C) {
+        value_in_areg = 1;
+    }
+
+    if ((v->r & VT_VALMASK) == VT_CONST && v->sym && !(v->r & VT_SYM)) {
+        /* Ensure symbol constants reserve full LDC placeholder space. */
+        v->r |= VT_SYM;
+        vr = v->r & VT_VALMASK;
+    }
+
+    if (tp_store_local(r, v, vr, is_lval, size, value_in_areg) ||
+        tp_store_value_first(r, v, bt, vr, is_lval, size, value_in_areg))
+        return;
+    tp_store_addr_first(r, v, bt, vr, is_lval, size, value_in_areg);
 }
 
 /* NOTE: greloc() is defined in tccgen.c (generic implementation) */
