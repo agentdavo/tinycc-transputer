@@ -2626,86 +2626,6 @@ static void gen_opl(int op)
 #endif
             save_regs(4);
         }
-#ifdef TCC_TARGET_TRANSPUTER
-        /* Transputer-specific 64-bit comparison.
-         *
-         * The generic algorithm (below in #else) relies on CPU flags
-         * persisting across conditional jumps.  On transputer, CJ consumes
-         * AReg, destroying the comparison result.  The "non-equal test"
-         * (vpushi(0) + vset_VT_CMP(TOK_NE)) therefore tests a constant 0
-         * instead of the actual comparison flags.
-         *
-         * Fix: save copies of the H1/H2 SValues (which still live in
-         * workspace after save_regs), and re-push them for an explicit
-         * NE test after the widened comparison's CJ.
-         *
-         * Algorithm (for LT, similar for GT/LE/GE/unsigned variants):
-         *   a = CJ when H1 LE H2 is FALSE → H1 > H2 → overall FALSE
-         *   b = CJ when H1 NE H2 is TRUE  → H1 < H2 → overall TRUE
-         *   fall-through: H1 == H2 → compare L1 ULT L2
-         */
-        {
-            /* compare high */
-            op1 = op;
-            if (op1 == TOK_LT)
-                op1 = TOK_LE;
-            else if (op1 == TOK_GT)
-                op1 = TOK_GE;
-            else if (op1 == TOK_ULT)
-                op1 = TOK_ULE;
-            else if (op1 == TOK_UGT)
-                op1 = TOK_UGE;
-            a = 0;
-            b = 0;
-
-            if (op != TOK_NE && op != TOK_EQ) {
-                /* The widened compare consumes H1/H2, and the explicit NE
-                 * test after its CJ needs them again (on x86 the flags
-                 * persist; on transputer CJ destroys them).
-                 *
-                 * The first version stashed the two SValues in locals and
-                 * re-pushed them for the NE test.  That is invisible to the
-                 * back end: its emit-time STL cancellation decides a spill
-                 * is dead by scanning the *vstack*, so the workspace slot
-                 * the saved copies named had its store deleted, and the NE
-                 * test compared uninitialised memory.  Kernel-visible as
-                 * every `loff_t < 0` guard flipping at random - /init's
-                 * exec failed in generic_file_read_iter with -EINVAL.
-                 *
-                 * Duplicating the operands *on the vstack* keeps them live
-                 * in the only place the back end looks. */
-                vpushv(&vtop[-1]);          /* H1 copy */
-                vpushv(&vtop[-1]);          /* H2 copy */
-                gen_op(op1);                /* consumes the copies */
-                a = gvtst(1, 0);
-                gen_op(TOK_NE);             /* consumes the originals */
-                b = gvtst(0, 0);
-            } else {
-                gen_op(op1);
-                if (op == TOK_NE)
-                    b = gvtst(0, 0);
-                else
-                    a = gvtst(1, 0);
-            }
-            /* compare low. Always unsigned */
-            op1 = op;
-            if (op1 == TOK_LT)
-                op1 = TOK_ULT;
-            else if (op1 == TOK_LE)
-                op1 = TOK_ULE;
-            else if (op1 == TOK_GT)
-                op1 = TOK_UGT;
-            else if (op1 == TOK_GE)
-                op1 = TOK_UGE;
-            gen_op(op1);
-#if 0//def TCC_TARGET_I386
-            if (op == TOK_NE) { gsym(b); break; }
-            if (op == TOK_EQ) { gsym(a); break; }
-#endif
-            gvtst_set(1, a);
-            gvtst_set(0, b);
-        }
-#else
         /* compare high */
         op1 = op;
         /* when values are equal, we need to compare low words. since
@@ -2720,6 +2640,20 @@ static void gen_opl(int op)
             op1 = TOK_UGE;
         a = 0;
         b = 0;
+#ifdef TCC_TARGET_TRANSPUTER
+        /* A relational test needs the high words twice: for the widened
+           compare here and for the "not equal" test after its jump, which
+           other targets take from flags the jump left alone.  cj consumes
+           what it tests, so the high words are compared again - and they
+           are duplicated on the vstack, the only place the back end looks
+           when it decides a spilled word is dead.  (Copies kept in locals
+           had their stores cancelled, and every `loff_t < 0` in the kernel
+           compared uninitialised memory.) */
+        if (op != TOK_NE && op != TOK_EQ) {
+            vpushv(&vtop[-1]);          /* H1 copy */
+            vpushv(&vtop[-1]);          /* H2 copy */
+        }
+#endif
         gen_op(op1);
         if (op == TOK_NE) {
             b = gvtst(0, 0);
@@ -2727,8 +2661,12 @@ static void gen_opl(int op)
             a = gvtst(1, 0);
             if (op != TOK_EQ) {
                 /* generate non equal test */
+#ifdef TCC_TARGET_TRANSPUTER
+                gen_op(TOK_NE);             /* on the original high words */
+#else
                 vpushi(0);
                 vset_VT_CMP(TOK_NE);
+#endif
                 b = gvtst(0, 0);
             }
         }
@@ -2749,7 +2687,6 @@ static void gen_opl(int op)
 #endif
         gvtst_set(1, a);
         gvtst_set(0, b);
-#endif /* TCC_TARGET_TRANSPUTER */
         break;
     }
 }
