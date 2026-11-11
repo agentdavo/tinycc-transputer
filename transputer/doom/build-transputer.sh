@@ -12,6 +12,9 @@
 #   - uClibc-ng must be built (cd transputer/uClibc-ng && make)
 #   - transputer-elf2flt must be built (for bFLT conversion)
 #
+# SPINE=1 builds for the SPINE-chip display layout (see below), as
+# fbwm/build-fbwm.sh does.
+#
 # CPU=t805 (or t800, t425, t414) builds for that part into build-tp-$CPU
 # and links its libtcc1 (the soft-float helpers on the T425/T414).  The
 # default is the T9000, into build-tp.  uClibc-ng's lib/libc.a is built
@@ -55,6 +58,13 @@ if [ "$CPU" != t414 ]; then
 fi
 CFLAGS="$CFLAGS -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0"
 CFLAGS="$CFLAGS -DNORMALUNIX -DTRANSPUTER"
+# SPINE=1: the SPINE-chip display addresses (frame buffer 0x81000000), for
+# a CONFIG_TRANSPUTER_SPINE_CHIP kernel, which tpos_defconfig is.  Without
+# it Doom draws at the T4 layout's 0x81e00000, which that kernel hands out
+# as ordinary RAM: the first screen clear then lands on Doom's own heap.
+if [ "${SPINE:-0}" = "1" ]; then
+    CFLAGS="$CFLAGS -DTPOS_SPINE_CHIP"
+fi
 CFLAGS="$CFLAGS -include $DOOM_SRC/doom_tp_config.h"
 CFLAGS="$CFLAGS -nostdinc"
 CFLAGS="$CFLAGS -I$ROOT_DIR/include/transputer -I$ROOT_DIR/include"
