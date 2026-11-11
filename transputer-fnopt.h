@@ -2185,6 +2185,257 @@ done:
     return s.removed;
 }
 
+static int tpg_ldlp_extent(const struct tp_relax_insn *c, int *lo);
+
+/* What the phases of tp_slot_remap() share.  F is the frame's words, R the
+ * reserved region's, P the pinned low slots (slot 0 and the outgoing stack
+ * arguments). */
+struct tpsm_work {
+    struct tp_relax_insn *ins;
+    int n;
+    int F, R, P;
+    char *cut;                  /* cut[s]: a unit starts at slot s */
+    int pin_top;                /* an LDLP of the frame top pins the last unit */
+    int *unit, *ustart, *usize, *uweight, *uorder, *unew;
+    int nu;
+    int lo, hi;                 /* the movable slots are [lo, hi) */
+    int stats;
+};
+
+/* No GAJW, and no AJW but the prologue's and an epilogue's. */
+static int tpsm_shape_ok(struct tpsm_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    int first, i, j;
+
+    for (first = 0; first < n && ins[first].opcode == -1; first++)
+        ;
+    for (i = 0; i < n; i++) {
+        if (ins[i].opcode == TP_ENC_OPR && ins[i].operand == TP_OPR_GAJW)
+            return 0;
+        if (ins[i].opcode == TP_ENC_AJW && i != first && !ins[i].icall) {
+            for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+                ;
+            if (!(j < n && ins[j].opcode == TP_ENC_OPR &&
+                  ins[j].operand == TP_OPR_RET))
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* cut[s]: a unit starts at slot s.  Every reserved slot is its own unit;
+ * locals are cut at each recorded `loc` that falls on a word boundary. */
+static int tpsm_cuts(struct tpsm_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    const int F = g->F;
+    const int R = g->R;
+    const int P = g->P;
+    char *cut;
+    int pin_top = 0;
+    int i, j, s;
+
+    cut = g->cut = tcc_mallocz(F + 1);
+    for (s = 0; s <= R; s++)
+        cut[s] = 1;
+    cut[F] = 1;
+    for (i = 0; i < tp_loc_marks_count; i++) {
+        int m = tp_loc_marks[i];
+        if (m <= 0 && !(m & 3) && F + m / 4 > R && F + m / 4 < F)
+            cut[F + m / 4] = 1;
+    }
+
+    /* Merge what LDLP ties together. */
+    for (i = 0; i < n; i++) {
+        int t, last, recognised, bias = 0, extent = -1;
+        if (ins[i].opcode != TP_ENC_LDLP)
+            continue;
+        if (tp_relax_byte_read(ins, n, i))
+            continue;                       /* reads its own word in place */
+        s = ins[i].operand;
+        for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+            ;
+        recognised = j < n && (ins[j].opcode == TP_ENC_LDNL ||
+                               ins[j].opcode == TP_ENC_STNL);
+        if (j < n)
+            extent = tpg_ldlp_extent(&ins[j], &bias);
+        /* A known double access ties both words together, including when
+         * its first word is pinned outgoing storage.  Unknown pseudo-
+         * register escapes retain the conservative path below. */
+        if (extent == 2)
+            recognised = 1;
+        if (recognised) {
+            int64_t begin = (int64_t)s + bias;
+            int64_t end = begin + extent - 1;
+            if (begin < INT32_MIN || end > INT32_MAX)
+                return 0;
+            t = begin;
+            last = end;
+            if ((s < 0 || s >= F) != (t < 0 || t >= F) ||
+                (s < 0 || s >= F) != (last < 0 || last >= F)) {
+                if (s < P && t < P && last < P)
+                    continue;               /* staging, which stays put */
+                return 0;                  /* reaches across the frame edge */
+            }
+            if (s >= 0 && s < F && (t != s || last != s)) {
+                int a = s < t ? s : t, b = s > last ? s : last, k;
+                for (k = a + 1; k <= b; k++)
+                    cut[k] = 0;
+            }
+        } else if (s >= 0 && s < R) {
+            if (s >= P)
+                return 0;                  /* a pseudo-register escapes */
+        } else if (s > R && s < F) {
+            cut[s] = 0;                     /* maybe one past the unit below */
+        } else if (s == F) {
+            pin_top = 1;
+        }
+    }
+    g->pin_top = pin_top;
+    return 1;
+}
+
+/* Units, their weights, and the pinned ends: [0, lo) holds slot 0 and the
+ * staging words, [hi, F) the unit an LDLP of the frame top points past. */
+static void tpsm_units(struct tpsm_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    const int F = g->F;
+    const int P = g->P;
+    char *cut = g->cut;
+    const int pin_top = g->pin_top;
+    int *unit, *ustart, *usize, *uweight, *uorder, *unew;
+    int nu = 0, lo, hi;
+    int i, s;
+
+    unit = g->unit = tcc_malloc(F * sizeof(int));
+    ustart = g->ustart = tcc_malloc((F + 1) * sizeof(int));
+    usize = g->usize = tcc_malloc((F + 1) * sizeof(int));
+    uweight = g->uweight = tcc_mallocz((F + 1) * sizeof(int));
+    uorder = g->uorder = tcc_malloc((F + 1) * sizeof(int));
+    unew = g->unew = tcc_malloc((F + 1) * sizeof(int));
+    for (s = 0; s < F; s++) {
+        if (cut[s]) {
+            ustart[nu] = s;
+            usize[nu++] = 0;
+        }
+        unit[s] = nu - 1;
+        usize[nu - 1]++;
+    }
+    lo = ustart[unit[P - 1]] + usize[unit[P - 1]];
+    hi = pin_top ? ustart[unit[F - 1]] : F;
+    for (i = 0; i < n; i++) {
+        int opc = ins[i].opcode;
+        if ((opc == TP_ENC_LDL || opc == TP_ENC_STL || opc == TP_ENC_LDLP) &&
+            ins[i].operand >= 0 && ins[i].operand < F)
+            uweight[unit[ins[i].operand]]++;
+    }
+    g->nu = nu;
+    g->lo = lo;
+    g->hi = hi;
+}
+
+/* Lay the movable units out from lo, densest first; insertion sort keeps
+ * equal densities in frame order. */
+static void tpsm_layout(struct tpsm_work *g)
+{
+    const int F = g->F;
+    int *unit = g->unit;
+    int *ustart = g->ustart;
+    int *usize = g->usize;
+    int *uweight = g->uweight;
+    int *uorder = g->uorder;
+    int *unew = g->unew;
+    const int nu = g->nu;
+    const int lo = g->lo;
+    const int hi = g->hi;
+    int pos;
+
+    {
+        int m = 0, u, k;
+        for (u = unit[lo < F ? lo : F - 1]; u < nu && ustart[u] < hi; u++) {
+            if (ustart[u] < lo)
+                continue;
+            for (k = m; k > 0; k--) {
+                int v = uorder[k - 1];
+                if ((long long)uweight[v] * usize[u] >=
+                    (long long)uweight[u] * usize[v])
+                    break;
+                uorder[k] = v;
+            }
+            uorder[k] = u;
+            m++;
+        }
+        for (pos = lo, k = 0; k < m; k++) {
+            unew[uorder[k]] = pos;
+            pos += usize[uorder[k]];
+        }
+    }
+}
+
+/* Is the function smaller with the new numbering? */
+static int tpsm_gain(struct tpsm_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    int *unit = g->unit;
+    int *ustart = g->ustart;
+    int *unew = g->unew;
+    const int lo = g->lo;
+    const int hi = g->hi;
+    const int stats = g->stats;
+    int old_bytes = 0, new_bytes = 0;
+    int i, s;
+
+    for (i = 0; i < n; i++) {
+        int opc = ins[i].opcode, u;
+        if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
+            continue;
+        s = ins[i].operand;
+        if (s < lo || s >= hi)
+            continue;
+        u = unit[s];
+        old_bytes += tp_encode_len(opc, s);
+        new_bytes += tp_encode_len(opc, s - ustart[u] + unew[u]);
+    }
+    if (stats && old_bytes)
+        fprintf(stderr, "[SLOTMAP] %s: %d -> %d bytes%s\n",
+                funcname ? funcname : "?", old_bytes, new_bytes,
+                new_bytes < old_bytes ? "" : " (kept)");
+    if (new_bytes >= old_bytes)
+        return 0;
+    return 1;
+}
+
+/* Rewrite every access to a moved slot. */
+static void tpsm_apply(struct tpsm_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    int *unit = g->unit;
+    int *ustart = g->ustart;
+    int *unew = g->unew;
+    const int lo = g->lo;
+    const int hi = g->hi;
+    int i, s;
+
+    for (i = 0; i < n; i++) {
+        int opc = ins[i].opcode, u;
+        if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
+            continue;
+        s = ins[i].operand;
+        if (s < lo || s >= hi)
+            continue;
+        u = unit[s];
+        ins[i].operand = s - ustart[u] + unew[u];
+        ins[i].new_len = tp_encode_len(opc, ins[i].operand);
+    }
+}
+
 /*
  * Workspace slot layout.
  *
@@ -2222,17 +2473,13 @@ done:
  * Returns 1 if it rewrote anything; new_len then holds each rewritten
  * instruction's width, which may have grown.
  */
-static int tpg_ldlp_extent(const struct tp_relax_insn *c, int *lo);
-
 static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
 {
     static int off = -1, stats = -1;
     int F = func_frame_words - top, R = func_frame_reserved;
     int P = func_max_stack_words > 1 ? func_max_stack_words : 1;
-    int pin_top = 0, nu = 0, lo, hi, first, i, j, s, pos;
-    int old_bytes = 0, new_bytes = 0;
-    char *cut;
-    int *unit, *ustart, *usize, *uweight, *uorder, *unew;
+    struct tpsm_work g;
+    int ok;
 
     if (off < 0) {
         off = tp_knob(TPK_TP_NO_SLOTMAP) ? 1 : 0;
@@ -2242,168 +2489,25 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
         F <= P + 1 || F > 4096 || R > F)
         return 0;
 
-    for (first = 0; first < n && ins[first].opcode == -1; first++)
-        ;
-    for (i = 0; i < n; i++) {
-        if (ins[i].opcode == TP_ENC_OPR && ins[i].operand == TP_OPR_GAJW)
-            return 0;
-        if (ins[i].opcode == TP_ENC_AJW && i != first && !ins[i].icall) {
-            for (j = i + 1; j < n && ins[j].opcode == -1; j++)
-                ;
-            if (!(j < n && ins[j].opcode == TP_ENC_OPR &&
-                  ins[j].operand == TP_OPR_RET))
-                return 0;
-        }
+    memset(&g, 0, sizeof g);
+    g.ins = ins;
+    g.n = n;
+    g.F = F;
+    g.R = R;
+    g.P = P;
+    g.stats = stats;
+    ok = tpsm_shape_ok(&g) && tpsm_cuts(&g);
+    if (ok) {
+        tpsm_units(&g);
+        tpsm_layout(&g);
+        ok = tpsm_gain(&g);
     }
-
-    /* cut[s]: a unit starts at slot s.  Every reserved slot is its own unit;
-     * locals are cut at each recorded `loc` that falls on a word boundary. */
-    cut = tcc_mallocz(F + 1);
-    for (s = 0; s <= R; s++)
-        cut[s] = 1;
-    cut[F] = 1;
-    for (i = 0; i < tp_loc_marks_count; i++) {
-        int m = tp_loc_marks[i];
-        if (m <= 0 && !(m & 3) && F + m / 4 > R && F + m / 4 < F)
-            cut[F + m / 4] = 1;
-    }
-
-    /* Merge what LDLP ties together. */
-    for (i = 0; i < n; i++) {
-        int t, last, recognised, bias = 0, extent = -1;
-        if (ins[i].opcode != TP_ENC_LDLP)
-            continue;
-        if (tp_relax_byte_read(ins, n, i))
-            continue;                       /* reads its own word in place */
-        s = ins[i].operand;
-        for (j = i + 1; j < n && ins[j].opcode == -1; j++)
-            ;
-        recognised = j < n && (ins[j].opcode == TP_ENC_LDNL ||
-                               ins[j].opcode == TP_ENC_STNL);
-        if (j < n)
-            extent = tpg_ldlp_extent(&ins[j], &bias);
-        /* A known double access ties both words together, including when
-         * its first word is pinned outgoing storage.  Unknown pseudo-
-         * register escapes retain the conservative path below. */
-        if (extent == 2)
-            recognised = 1;
-        if (recognised) {
-            int64_t begin = (int64_t)s + bias;
-            int64_t end = begin + extent - 1;
-            if (begin < INT32_MIN || end > INT32_MAX)
-                goto bail;
-            t = begin;
-            last = end;
-            if ((s < 0 || s >= F) != (t < 0 || t >= F) ||
-                (s < 0 || s >= F) != (last < 0 || last >= F)) {
-                if (s < P && t < P && last < P)
-                    continue;               /* staging, which stays put */
-                goto bail;                  /* reaches across the frame edge */
-            }
-            if (s >= 0 && s < F && (t != s || last != s)) {
-                int a = s < t ? s : t, b = s > last ? s : last, k;
-                for (k = a + 1; k <= b; k++)
-                    cut[k] = 0;
-            }
-        } else if (s >= 0 && s < R) {
-            if (s >= P)
-                goto bail;                  /* a pseudo-register escapes */
-        } else if (s > R && s < F) {
-            cut[s] = 0;                     /* maybe one past the unit below */
-        } else if (s == F) {
-            pin_top = 1;
-        }
-    }
-
-    /* Units, their weights, and the pinned ends: [0, lo) holds slot 0 and the
-     * staging words, [hi, F) the unit an LDLP of the frame top points past. */
-    unit = tcc_malloc(F * sizeof(int));
-    ustart = tcc_malloc((F + 1) * sizeof(int));
-    usize = tcc_malloc((F + 1) * sizeof(int));
-    uweight = tcc_mallocz((F + 1) * sizeof(int));
-    uorder = tcc_malloc((F + 1) * sizeof(int));
-    unew = tcc_malloc((F + 1) * sizeof(int));
-    for (s = 0; s < F; s++) {
-        if (cut[s]) {
-            ustart[nu] = s;
-            usize[nu++] = 0;
-        }
-        unit[s] = nu - 1;
-        usize[nu - 1]++;
-    }
-    lo = ustart[unit[P - 1]] + usize[unit[P - 1]];
-    hi = pin_top ? ustart[unit[F - 1]] : F;
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode;
-        if ((opc == TP_ENC_LDL || opc == TP_ENC_STL || opc == TP_ENC_LDLP) &&
-            ins[i].operand >= 0 && ins[i].operand < F)
-            uweight[unit[ins[i].operand]]++;
-    }
-
-    /* Lay the movable units out from lo, densest first; insertion sort keeps
-     * equal densities in frame order. */
-    {
-        int m = 0, u, k;
-        for (u = unit[lo < F ? lo : F - 1]; u < nu && ustart[u] < hi; u++) {
-            if (ustart[u] < lo)
-                continue;
-            for (k = m; k > 0; k--) {
-                int v = uorder[k - 1];
-                if ((long long)uweight[v] * usize[u] >=
-                    (long long)uweight[u] * usize[v])
-                    break;
-                uorder[k] = v;
-            }
-            uorder[k] = u;
-            m++;
-        }
-        for (pos = lo, k = 0; k < m; k++) {
-            unew[uorder[k]] = pos;
-            pos += usize[uorder[k]];
-        }
-    }
-
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode, u;
-        if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
-            continue;
-        s = ins[i].operand;
-        if (s < lo || s >= hi)
-            continue;
-        u = unit[s];
-        old_bytes += tp_encode_len(opc, s);
-        new_bytes += tp_encode_len(opc, s - ustart[u] + unew[u]);
-    }
-    if (stats && old_bytes)
-        fprintf(stderr, "[SLOTMAP] %s: %d -> %d bytes%s\n",
-                funcname ? funcname : "?", old_bytes, new_bytes,
-                new_bytes < old_bytes ? "" : " (kept)");
-    if (new_bytes >= old_bytes)
-        goto bail;
-
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode, u;
-        if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
-            continue;
-        s = ins[i].operand;
-        if (s < lo || s >= hi)
-            continue;
-        u = unit[s];
-        ins[i].operand = s - ustart[u] + unew[u];
-        ins[i].new_len = tp_encode_len(opc, ins[i].operand);
-    }
-    tcc_free(unit); tcc_free(ustart); tcc_free(usize);
-    tcc_free(uweight); tcc_free(uorder); tcc_free(unew);
-    tcc_free(cut);
-    return 1;
-
-bail:
-    if (nu) {
-        tcc_free(unit); tcc_free(ustart); tcc_free(usize);
-        tcc_free(uweight); tcc_free(uorder); tcc_free(unew);
-    }
-    tcc_free(cut);
-    return 0;
+    if (ok)
+        tpsm_apply(&g);
+    tcc_free(g.unit); tcc_free(g.ustart); tcc_free(g.usize);
+    tcc_free(g.uweight); tcc_free(g.uorder); tcc_free(g.unew);
+    tcc_free(g.cut);
+    return ok;
 }
 
 /*
