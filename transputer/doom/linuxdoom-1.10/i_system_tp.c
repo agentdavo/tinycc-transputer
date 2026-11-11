@@ -40,8 +40,19 @@ ticcmd_t *I_BaseTiccmd(void)
 
 byte *I_ZoneBase(int *size)
 {
+    byte *p;
+    int mb;
+
     *size = mb_used * 1024 * 1024;
-    return (byte *)malloc(*size);
+    p = (byte *)malloc(*size);
+    /* The kernel hands out one contiguous block, and a 32 MiB machine
+     * rarely has 6 MiB in one piece: step down.  A little under each
+     * megabyte, so that malloc's header still fits the block. */
+    for (mb = mb_used - 1; !p && mb >= 3; mb--) {
+        *size = mb * 1024 * 1024 - 0x10000;
+        p = (byte *)malloc(*size);
+    }
+    return p;
 }
 
 
