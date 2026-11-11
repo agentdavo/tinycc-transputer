@@ -2519,32 +2519,29 @@ static int tpg_use_cmp(const void *a, const void *b)
     return 0;
 }
 
-/* Returns 1 if it rewrote anything; *pins may then have moved and *pn
- * grown, and tidx is rebuilt. */
-static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
-                          int size)
-{
-    static int off = -1, stats = -1;
-    Section *sec = cur_text_section;
-    struct tp_relax_insn *ins = *pins;
-    int n = *pn, F = func_frame_words;
-    int base = func_start_ind;
-    int first, i, j, k, w = 0, nu = 0, nb = 0, nrel, at;
-    int *u, *lp;
+/* What the phases of tp_gaddr_cache() share. */
+struct tpg_work {
+    struct tp_relax_insn *ins;
+    int n;
+    int *tidx, size;
+    int F;                      /* frame words before the new ones */
+    int first;                  /* the prologue's ajw */
+    int *u, nu;                 /* the uses, TPG_U ints each */
     int pick[TPG_MAX], plen[TPG_MAX], key[TPG_MAX];
-    ElfW_Rel *rel;
+    int w;                      /* words chosen */
+    int stats;
+};
 
-    tpg.n = 0;
-    if (off < 0) {
-        const char *e = tp_knob(TPK_TCC_TRANSPUTER_GADDR);
-        off = (e && *e == '0') ? 1 : 0;
-        stats = tp_knob(TPK_TP_GADDR_STATS) ? 1 : 0;
-    }
-    if (off || func_uses_inline_asm || !sec->reloc || F <= 0)
-        return 0;
+/* The frame's shape: `ajw -F` first, `ajw F; ret` to leave, and every
+ * other access to a frame word an LDL, STL or LDLP. */
+static int tpg_frame_ok(struct tpg_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    const int F = g->F;
+    int first;
+    int i, j;
 
-    /* The frame's shape: `ajw -F` first, `ajw F; ret` to leave, and every
-     * other access to a frame word an LDL, STL or LDLP. */
     for (first = 0; first < n && ins[first].opcode == -1; first++)
         ;
     if (first + 1 >= n || ins[first].opcode != TP_ENC_AJW ||
@@ -2576,17 +2573,33 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
         if (opc == TP_ENC_LDLP && tpg_ldlp_above(ins, n, i, F) < 0)
             return 0;
     }
+    g->first = first;
+    return 1;
+}
 
-    /* The uses.  A symbol's: an LDC_ABS relocation on an untouched
-     * placeholder, seven PFIX 0 and `ldc 0`, which the pinning step decoded
-     * as eight records.  A constant's: an `ldc` of six bytes or more, a
-     * float's bits or a wide mask, but not an `ldc; ldpi` offset, which
-     * moves with the code. */
+/* The uses.  A symbol's: an LDC_ABS relocation on an untouched
+ * placeholder, seven PFIX 0 and `ldc 0`, which the pinning step decoded
+ * as eight records.  A constant's: an `ldc` of six bytes or more, a
+ * float's bits or a wide mask, but not an `ldc; ldpi` offset, which
+ * moves with the code. */
+static int tpg_uses(struct tpg_work *g)
+{
+    Section *sec = cur_text_section;
+    struct tp_relax_insn *ins = g->ins;
+    int *tidx = g->tidx;
+    const int n = g->n;
+    const int size = g->size;
+    const int base = func_start_ind;
+    int *u;
+    int nu = 0;
+    int i, j, k, nrel;
+    ElfW_Rel *rel;
+
     rel = (ElfW_Rel *)sec->reloc->data;
     nrel = sec->reloc->data_offset / sizeof(*rel);
     if (nrel < func_start_nrel)
         return 0;
-    u = tcc_malloc(sizeof(int) * TPG_U * (nrel - func_start_nrel + n));
+    u = g->u = tcc_malloc(sizeof(int) * TPG_U * (nrel - func_start_nrel + n));
     for (i = func_start_nrel; i < nrel; i++) {
         int ro = (int)rel[i].r_offset - base;
         if (ELFW(R_TYPE)(rel[i].r_info) != R_TRANSPUTER_LDC_ABS ||
@@ -2622,12 +2635,23 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
         u[TPG_U * nu + 4] = 1;
         nu++;
     }
-    if (nu < 1) {
-        tcc_free(u);
+    if (nu < 1)
         return 0;
-    }
+    g->nu = nu;
+    return 1;
+}
 
-    /* A use under a backward branch is in a loop. */
+/* A use under a backward branch is in a loop. */
+static void tpg_loops(struct tpg_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    int *u = g->u;
+    const int n = g->n;
+    const int nu = g->nu;
+    int *lp;
+    int nb = 0;
+    int i, j;
+
     lp = tcc_malloc(sizeof(int) * 2 * n);
     for (i = 0; i < n; i++)
         if (ins[i].is_branch && ins[i].target_old <= ins[i].old_off) {
@@ -2644,8 +2668,18 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
             }
     }
     tcc_free(lp);
+}
 
-    /* The ones worth a word, heaviest first. */
+/* The ones worth a word, heaviest first. */
+static int tpg_pick(struct tpg_work *g)
+{
+    int *u = g->u;
+    int *pick = g->pick;
+    int *plen = g->plen;
+    const int nu = g->nu;
+    int w = 0;
+    int i, j, k;
+
     qsort(u, nu, sizeof(int) * TPG_U, tpg_use_cmp);
     for (;;) {
         int best = -1, bestlen = 0, bestwt = 2;
@@ -2675,12 +2709,21 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
         pick[w] = best;
         plen[w++] = bestlen;
     }
-    if (!w) {
-        tcc_free(u);
+    if (!w)
         return 0;
-    }
+    g->w = w;
+    return 1;
+}
 
-    /* Make room: the new words are F .. F+w-1. */
+/* Make room: the new words are F .. F+w-1. */
+static void tpg_room(struct tpg_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    const int F = g->F;
+    const int w = g->w;
+    int i;
+
     for (i = 0; i < n; i++) {
         int opc = ins[i].opcode;
         if ((opc == TP_ENC_LDL || opc == TP_ENC_STL) && ins[i].operand >= F)
@@ -2694,8 +2737,21 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
         if (tp_encode_len(opc, ins[i].operand) > ins[i].new_len)
             ins[i].new_len = tp_encode_len(opc, ins[i].operand);
     }
+}
 
-    /* Every use becomes `ldl word`; a placeholder's PFIX 0 go. */
+/* Every use becomes `ldl word`; a placeholder's PFIX 0 go. */
+static void tpg_rewrite(struct tpg_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    int *u = g->u;
+    int *pick = g->pick;
+    int *plen = g->plen;
+    int *key = g->key;
+    const int F = g->F;
+    const int w = g->w;
+    const int stats = g->stats;
+    int i, j, k;
+
     tpg.ndrop = 0;
     for (j = 0; j < w; j++) {
         int sym = u[TPG_U * pick[j]] == 0;
@@ -2741,14 +2797,26 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
             }
         }
     }
-    tcc_free(u);
+}
 
-    /* After the prologue, `ldc; stl word` for each: a symbol's a
-     * placeholder the linker fills as it did the first use's, a constant's
-     * the constant.  They come before the instruction they are inserted in
-     * front of and share its old offset, so a branch to that instruction
-     * still lands on it. */
-    ins = tcc_realloc(ins, sizeof(*ins) * (n + 2 * w + 1));
+/* After the prologue, `ldc; stl word` for each: a symbol's a
+ * placeholder the linker fills as it did the first use's, a constant's
+ * the constant.  They come before the instruction they are inserted in
+ * front of and share its old offset, so a branch to that instruction
+ * still lands on it. */
+static void tpg_insert(struct tpg_work *g)
+{
+    int *tidx = g->tidx;
+    int *key = g->key;
+    const int size = g->size;
+    const int F = g->F;
+    const int first = g->first;
+    const int w = g->w;
+    struct tp_relax_insn *ins = g->ins;
+    int n = g->n;
+    int i, j, at;
+
+    ins = g->ins = tcc_realloc(ins, sizeof(*ins) * (n + 2 * w + 1));
     memmove(ins + first + 1 + 2 * w, ins + first + 1,
             sizeof(*ins) * (n - first - 1));
     at = ins[first + 1 + 2 * w].old_off;
@@ -2777,12 +2845,52 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
     for (i = 0; i < n; i++)
         if (!ins[i].synth)
             tidx[ins[i].old_off] = i;
+    g->n = n;
+}
 
-    func_frame_words = F + w;
-    tpg.n = w;
-    *pins = ins;
-    *pn = n;
-    return 1;
+/* Returns 1 if it rewrote anything; *pins may then have moved and *pn
+ * grown, and tidx is rebuilt. */
+static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
+                          int size)
+{
+    static int off = -1, stats = -1;
+    Section *sec = cur_text_section;
+    struct tpg_work g;
+    int F = func_frame_words;
+    int ok;
+
+    tpg.n = 0;
+    if (off < 0) {
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_GADDR);
+        off = (e && *e == '0') ? 1 : 0;
+        stats = tp_knob(TPK_TP_GADDR_STATS) ? 1 : 0;
+    }
+    if (off || func_uses_inline_asm || !sec->reloc || F <= 0)
+        return 0;
+
+    g.ins = *pins;
+    g.n = *pn;
+    g.tidx = tidx;
+    g.size = size;
+    g.F = F;
+    g.u = NULL;
+    g.stats = stats;
+    ok = tpg_frame_ok(&g) && tpg_uses(&g);
+    if (ok) {
+        tpg_loops(&g);
+        ok = tpg_pick(&g);
+    }
+    if (ok) {
+        tpg_room(&g);
+        tpg_rewrite(&g);
+        tpg_insert(&g);
+        func_frame_words = F + g.w;
+        tpg.n = g.w;
+        *pins = g.ins;
+        *pn = g.n;
+    }
+    tcc_free(g.u);
+    return ok;
 }
 
 /* Once the rewrite is in place: each kept symbol's relocation moves to its
