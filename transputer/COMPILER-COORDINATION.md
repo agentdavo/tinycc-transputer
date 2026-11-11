@@ -132,6 +132,23 @@ two FPU shortcuts loaded one with `fpldnlsn`/`fpldnldb` at its odd address.
 All three now copy the bytes; `test_packed_wide_arg.c` covers them, and of
 the local and c-testsuite objects only that fixture's change.
 
+**11 November 2026.** The wide-constant lane turned into something else.
+Lowering the address cache to two uses was measured and dropped (0.115% on
+the box render, three routines slower). The hot shading routines cached
+nothing because any function with a call through a pointer was refused by
+the cache, the scheduler and the slot remap: the call's tail addressed
+slots after its `ajw -4`. The
+[indirect-call acceptance](tests/bench/indirect-call-postpass-2026-11-11.md)
+stores the return address at `Wptr[-4]` before the AJW and pins the tail
+(`ldc 5; ldpi; stl -4; ajw -4; gcall`), so those functions go through all
+three. Full box saves 59,073,121 modeled T800 cycles (1.219%) against
+`00e15657`; Doom's segloop and masked phases gain 2.7% and 4.1%. All
+workload gates, c-testsuite at four parts, the local suite at three, 150
+difftest seeds and a linux-7 boot to the desktop pass. The full suites were
+also run on `ff6a90ba` and are clean. Open and larger: the scheduler still
+declines 126 POV functions for "ldlp-escape", a double load or store
+through a register pair.
+
 **Source layout, 10 November 2026.** The back end was restructured with no
 change in generated code (objects for all six parts, linked images and the
 Doom/fbwm corpus byte-identical at every step). `transputer-gen.c` now

@@ -695,19 +695,17 @@ static void tp_emit_call_target(int call_word_count, int indirect_fn_slot,
             Tp_STNL(-3);
         }
 
+        /* The callee's frame is the four words under Wptr: the return
+         * address goes to Wptr[-4] before the AJW, so nothing between the
+         * AJW and the gcall names a workspace word and every slot number
+         * in the function keeps one meaning (tp_relax_icalls_find).  The
+         * return address is five bytes past the ldpi: stl -4, ajw -4 and
+         * gcall, each of one fixed width. */
+        Tp_LDL(indirect_fn_slot);
+        emit_instr(TP_OP_LDC, TP_ICALL_TAIL_BYTES);
+        Tp_OPR(TP_OPR_LDPI);
+        emit_instr(TP_OP_STL, -4);
         emit_instr(TP_OP_AJW, -4);
-
-        {
-            uint8_t enc_buf[8];
-            int fn_slot_shifted = indirect_fn_slot + 4;
-            int ldl_len = tp_encode_instr(enc_buf, TP_OP_LDL, fn_slot_shifted);
-            int skip = 1 + ldl_len + 1;
-            emit_instr(TP_OP_LDC, skip);
-            Tp_OPR(TP_OPR_LDPI);
-            Tp_STL(0);
-        }
-
-        Tp_LDL(indirect_fn_slot + 4);
         Tp_OPR(TP_OPR_GCALL);
 
         if (callarg_debug) {

@@ -57,7 +57,12 @@ struct tp_relax_insn {
     int tab;          /* switch jump table t: t + 1 on its entries (each a J
                          and the padding before it), -(t + 1) on the six
                          instructions of its dispatch */
+    int icall;        /* the tail of an indirect call: `ldc 5; ldpi; stl -4;
+                         ajw -4; gcall` (tp_relax_icalls_find) */
 };
+
+/* Bytes of `stl -4; ajw -4; gcall`, which that tail's ldpi skips. */
+#define TP_ICALL_TAIL_BYTES 5
 
 /* Give the entries of each jump table one width: that of the widest. */
 static int tp_swtab_level(struct tp_relax_insn *ins, int n)
@@ -694,8 +699,9 @@ static int tps_annotate(struct tps *s)
             for (j = i + 1; j < n; j++)
                 if (ins[j].opcode != -1)
                     break;
-            if (i != first && !(j < n && ins[j].opcode == TP_ENC_OPR &&
-                                ins[j].operand == TP_OPR_RET)) {
+            if (i != first && !ins[i].icall &&
+                !(j < n && ins[j].opcode == TP_ENC_OPR &&
+                  ins[j].operand == TP_OPR_RET)) {
                 tps_bail("ajw-midfunction");
                 return 0;
             }
@@ -2162,7 +2168,7 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
     for (i = 0; i < n; i++) {
         if (ins[i].opcode == TP_ENC_OPR && ins[i].operand == TP_OPR_GAJW)
             return 0;
-        if (ins[i].opcode == TP_ENC_AJW && i != first) {
+        if (ins[i].opcode == TP_ENC_AJW && i != first && !ins[i].icall) {
             for (j = i + 1; j < n && ins[j].opcode == -1; j++)
                 ;
             if (!(j < n && ins[j].opcode == TP_ENC_OPR &&
@@ -2476,6 +2482,8 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
                                   ins[i].operand == TP_OPR_ENDP ||
                                   ins[i].operand == TP_OPR_RUNP))
             return 0;
+        if (ins[i].icall)
+            continue;           /* names no frame word; Wptr comes back */
         if (ins[i].pinned && (opc == TP_ENC_LDL || opc == TP_ENC_STL ||
                               opc == TP_ENC_LDLP || opc == TP_ENC_AJW))
             return 0;
@@ -2600,7 +2608,7 @@ static int tp_gaddr_cache(struct tp_relax_insn **pins, int *pn, int *tidx,
             ins[i].operand += w;
         else if (opc == TP_ENC_LDLP && tpg_ldlp_above(ins, n, i, F) > 0)
             ins[i].operand += w;
-        else if (opc == TP_ENC_AJW)
+        else if (opc == TP_ENC_AJW && !ins[i].icall)
             ins[i].operand += ins[i].operand < 0 ? -w : w;
         else
             continue;
@@ -2770,6 +2778,7 @@ static const char *tp_relax_decode(struct tp_relax *r)
             ins[n].ext = 0;
             ins[n].synth = 0;
             ins[n].tab = 0;
+            ins[n].icall = 0;
             n++;
             p++;
             continue;
@@ -2790,6 +2799,7 @@ static const char *tp_relax_decode(struct tp_relax *r)
         ins[n].ext = 0;
         ins[n].synth = 0;
         ins[n].tab = 0;
+        ins[n].icall = 0;
         n++;
         p += len;
     }
@@ -2911,6 +2921,44 @@ static const char *tp_relax_tables_find(struct tp_relax *r)
         }
         if (!ok) {
             return "switch-table";
+        }
+    }
+    return NULL;
+}
+
+/* 2''. Indirect calls.  gfunc_call ends one with
+ *     ldc 5; ldpi; stl -4; ajw -4; gcall
+ * which stores the return address in the callee's frame, moves Wptr onto
+ * it and jumps; the callee's ret moves Wptr back.  No instruction between
+ * the AJW and the gcall names a workspace word, so a slot number means the
+ * same before and after the call, and the passes below treat the pair as
+ * the call it is.  The five are pinned: the `ldc 5` counts their bytes. */
+static const char *tp_relax_icalls_find(struct tp_relax *r)
+{
+    static const int shape[5][2] = {
+        { TP_ENC_LDC, TP_ICALL_TAIL_BYTES }, { TP_ENC_OPR, TP_OPR_LDPI },
+        { TP_ENC_STL, -4 }, { TP_ENC_AJW, -4 }, { TP_ENC_OPR, TP_OPR_GCALL } };
+    struct tp_relax_insn *ins = r->ins;
+    const int n = r->n;
+    int i, e, bytes;
+
+    for (i = 0; i + 5 <= n; i++) {
+        if (ins[i + 3].opcode != TP_ENC_AJW || ins[i + 3].operand != -4)
+            continue;
+        for (e = 0, bytes = 0; e < 5; e++) {
+            if (ins[i + e].opcode != shape[e][0] ||
+                ins[i + e].operand != shape[e][1] || ins[i + e].pinned ||
+                ins[i + e].tab)
+                break;
+            if (e >= 2)
+                bytes += ins[i + e].old_len;
+        }
+        if (e < 5 || bytes != TP_ICALL_TAIL_BYTES ||
+            ins[i + 1].old_off + ins[i + 1].old_len != ins[i + 2].old_off)
+            continue;       /* some other AJW: the passes refuse it */
+        for (e = 0; e < 5; e++) {
+            ins[i + e].pinned = 1;
+            ins[i + e].icall = 1;
         }
     }
     return NULL;
@@ -3387,7 +3435,8 @@ static int tp_relax_function(void)
     r.ins = tcc_malloc(sizeof(*r.ins) * (size + 1));
 
     if ((why = tp_relax_decode(&r)) || (why = tp_relax_pin(&r)) ||
-        (why = tp_relax_tables_find(&r)) || (why = tp_relax_wide(&r)))
+        (why = tp_relax_tables_find(&r)) ||
+        (why = tp_relax_icalls_find(&r)) || (why = tp_relax_wide(&r)))
         goto bail;
 
     /* 2a'. Keep the addresses of busy globals in frame words of their own.
