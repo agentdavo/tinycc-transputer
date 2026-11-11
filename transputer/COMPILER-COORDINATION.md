@@ -145,9 +145,17 @@ three. Full box saves 59,073,121 modeled T800 cycles (1.219%) against
 `00e15657`; Doom's segloop and masked phases gain 2.7% and 4.1%. All
 workload gates, c-testsuite at four parts, the local suite at three, 150
 difftest seeds and a linux-7 boot to the desktop pass. The full suites were
-also run on `ff6a90ba` and are clean. Open and larger: the scheduler still
-declines 126 POV functions for "ldlp-escape", a double load or store
-through a register pair.
+also run on `ff6a90ba` and are clean.
+
+The scheduler's "ldlp-escape" refusal of a double load or store through a
+register pair, which declined 126 POV functions, went the same day
+([acceptance](tests/bench/sched-double-access-2026-11-11.md)): the access
+is recorded as a read of both words, and S4/S5 stop at it. Full box saves a
+further 57,739,465 modeled cycles (1.206%) against `27efe07e`, no routine
+slower; soft-float objects are byte-identical; the same gates, suites, 150
+more difftest seeds and a kernel boot pass. The box render is 7.1% below
+`6e2f6d81`. Open: the pre-scan still gives up the local range when a local
+double feeds an FP access.
 
 **Source layout, 10 November 2026.** The back end was restructured with no
 change in generated code (objects for all six parts, linked images and the

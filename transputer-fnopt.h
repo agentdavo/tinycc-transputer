@@ -567,6 +567,19 @@ struct tps {
     int removed;            /* instructions removed so far */
 };
 
+/* TP_SCHED_DBL=0: an `ldlp r; fpldnldb` (or fpstnldb, or an integer
+ * conversion's word) on a pseudo-register declines the function, as every
+ * one did until 2026-11-11.  For an A/B run. */
+static int tps_dbl_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = tp_knob(TPK_TP_SCHED_DBL);
+        on = !(e && *e == '0');
+    }
+    return on;
+}
+
 /* Pre-scan: does any LDLP hand out the address of a frame word in a shape
  * this pass cannot follow?  The recognised form is LDLP immediately
  * followed by STNL or LDNL, which is the back end staging an outgoing call
@@ -671,6 +684,30 @@ static int tps_annotate(struct tps *s)
                  ins[j].operand == TP_FPU_LDNLADDSN ||
                  ins[j].operand == TP_FPU_LDNLMULSN ||
                  ins[j].operand == TP_FPU_STNLSN)) {
+                indirect = 1;
+                if (opd >= 0 && opd < nslot)
+                    an[i].use = opd;
+            }
+            /* A double-length access reaches this word and the next, and the
+             * integer conversions one word.  Stores count as reads here
+             * too, so the pair is live wherever one of these can see it
+             * and no rule drops or carries a word across the access. */
+            if (!func_uses_inline_asm && j < n && ins[j].opcode == TP_ENC_OPR &&
+                (ins[j].operand == TP_FPU_LDNLDB ||
+                 ins[j].operand == TP_FPU_LDNLADDDB ||
+                 ins[j].operand == TP_FPU_LDNLMULDB ||
+                 ins[j].operand == TP_FPU_STNLDB) && tps_dbl_on()) {
+                indirect = 1;
+                if (opd >= 0 && opd < nslot)
+                    an[i].uses |= 1u << opd;
+                if (opd + 1 >= 0 && opd + 1 < nslot)
+                    an[i].uses |= 1u << (opd + 1);
+            }
+            if (!func_uses_inline_asm && j < n && ins[j].opcode == TP_ENC_OPR &&
+                (ins[j].operand == TP_OPR_FPI32TOR32 ||
+                 ins[j].operand == TP_OPR_FPI32TOR64 ||
+                 ins[j].operand == TP_OPR_FPB32TOR64 ||
+                 ins[j].operand == TP_OPR_FPSTNLI32) && tps_dbl_on()) {
                 indirect = 1;
                 if (opd >= 0 && opd < nslot)
                     an[i].use = opd;
@@ -1360,7 +1397,7 @@ static int tps_s4_s5(struct tps *s, int i, int a, int i1, int *next)
                     an[b].depth++;
             break;
         }
-        if (an[j].use == a || an[j].def == a)
+        if (an[j].use == a || an[j].def == a || (an[j].uses & (1u << a)))
             break;
         if (an[j].reads > r)
             break;             /* would consume the carried value */
