@@ -348,48 +348,37 @@ static void tp_stage_push(SValue *sv, int spill_lo, int spill_hi,
     tp_staging_push = 0;
 }
 
-/* Materialise the call words.  Returns the slot holding an indirect target
- * (-1 for a direct call).  *abc_slot is -1 when the register words are left
- * in A/B/C, else the first of the three slots holding them. */
-static int tp_stage_call_words(struct tp_call_words *cw, int nb_args,
-                               int callarg_debug, int *abc_slot)
+/* The fast way to stage a call: the first three ABI words go to A/B/C, and the hardware
+ * evaluation stack is exactly three deep, so when every one of them is a
+ * pure push they can simply be pushed in reverse ABI order and left where
+ * they land.  No spill, no reload.
+ *
+ * The slow path below exists because evaluating argument n generally needs
+ * the whole evaluation stack and would destroy arguments 0..n-1, so each
+ * one is written out to a workspace word (`stl s`) and read back
+ * (`ldl s`) once they are all in place.  That is two extra instructions
+ * and one extra stage-5 write per argument - and over a kernel corpus most
+ * arguments are a local, a constant or a value already sitting in a
+ * workspace slot, none of which need the stack at all.
+ *
+ * Reordering the pushes is sound precisely because they are pure: no push
+ * can observe or disturb another, so left-to-right and right-to-left
+ * produce the same three values.  (The arguments were fully evaluated by
+ * the front end long before this point; all that happens here is
+ * materialisation.)
+ *
+ * Restricted to calls with no stacked arguments: with stack_words > 0 the
+ * outgoing area is written before the register words are materialised, and
+ * keeping that order avoids reasoning about whether a stacked argument's
+ * store can alias a later argument's load. */
+static int tp_stage_pure_words(struct tp_call_words *cw, int nb_args,
+                               int callarg_debug, int *fn_slot)
 {
-    int i, arg_index;
+    int i;
     int reg_words = cw->count > 3 ? 3 : cw->count;
     int stack_words = cw->count > 3 ? (cw->count - 3) : 0;
-    int spill_base = stack_words;
-    int call_setup_words;
     int indirect_fn_slot = -1;
-    SValue *fn_sv;
-    int is_direct;
-    int *parked = NULL;
-    int park_base, nparked = 0, park_fn = 0, late_impure = 0;
 
-    *abc_slot = -1;
-
-    /* Fast path: the first three ABI words go to A/B/C, and the hardware
-     * evaluation stack is exactly three deep, so when every one of them is a
-     * pure push they can simply be pushed in reverse ABI order and left where
-     * they land.  No spill, no reload.
-     *
-     * The slow path below exists because evaluating argument n generally needs
-     * the whole evaluation stack and would destroy arguments 0..n-1, so each
-     * one is written out to a workspace word (`stl s`) and read back
-     * (`ldl s`) once they are all in place.  That is two extra instructions
-     * and one extra stage-5 write per argument - and over a kernel corpus most
-     * arguments are a local, a constant or a value already sitting in a
-     * workspace slot, none of which need the stack at all.
-     *
-     * Reordering the pushes is sound precisely because they are pure: no push
-     * can observe or disturb another, so left-to-right and right-to-left
-     * produce the same three values.  (The arguments were fully evaluated by
-     * the front end long before this point; all that happens here is
-     * materialisation.)
-     *
-     * Restricted to calls with no stacked arguments: with stack_words > 0 the
-     * outgoing area is written before the register words are materialised, and
-     * keeping that order avoids reasoning about whether a stacked argument's
-     * store can alias a later argument's load. */
     if (stack_words == 0 && reg_words > 0 && !tp_no_callopt()) {
         int all_pure = 1;
         for (i = 0; i < reg_words; i++) {
@@ -422,9 +411,34 @@ static int tp_stage_call_words(struct tp_call_words *cw, int nb_args,
                 }
                 tp_stage_push(&cw->words[i], 0, 0, 0, 0, indirect_fn_slot);
             }
-            return indirect_fn_slot;
+            *fn_slot = indirect_fn_slot;
+            return 1;
         }
     }
+    return 0;
+}
+
+/* Materialise the call words.  Returns the slot holding an indirect target
+ * (-1 for a direct call).  *abc_slot is -1 when the register words are left
+ * in A/B/C, else the first of the three slots holding them. */
+static int tp_stage_call_words(struct tp_call_words *cw, int nb_args,
+                               int callarg_debug, int *abc_slot)
+{
+    int i, arg_index;
+    int reg_words = cw->count > 3 ? 3 : cw->count;
+    int stack_words = cw->count > 3 ? (cw->count - 3) : 0;
+    int spill_base = stack_words;
+    int call_setup_words;
+    int indirect_fn_slot = -1;
+    SValue *fn_sv;
+    int is_direct;
+    int *parked = NULL;
+    int park_base, nparked = 0, park_fn = 0, late_impure = 0;
+
+    *abc_slot = -1;
+
+    if (tp_stage_pure_words(cw, nb_args, callarg_debug, &indirect_fn_slot))
+        return indirect_fn_slot;
 
     fn_sv = &vtop[-nb_args];
     is_direct = (fn_sv->r & VT_SYM) && !(fn_sv->r & VT_LVAL);
