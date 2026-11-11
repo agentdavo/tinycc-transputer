@@ -580,6 +580,40 @@ static int tps_dbl_on(void)
     return on;
 }
 
+/* TP_SCHED_DBL=1: FP accesses to pseudo-registers are followed, but one to
+ * a local still gives up the local range, as until later on 2026-11-11. */
+static int tps_localfp_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = tp_knob(TPK_TP_SCHED_DBL);
+        on = !(e && (*e == '0' || *e == '1'));
+    }
+    return on;
+}
+
+/* Words an FP instruction reaches from the address in A, for the forms
+ * tps_annotate records as reads of those words; 0 for anything else. */
+static int tps_fp_extent(const struct tp_relax_insn *c)
+{
+    if (c->opcode != TP_ENC_OPR)
+        return 0;
+    switch (c->operand) {
+    case TP_FPU_LDNLSN: case TP_FPU_LDNLADDSN: case TP_FPU_LDNLMULSN:
+    case TP_FPU_STNLSN:
+        return 1;
+    case TP_OPR_FPI32TOR32: case TP_OPR_FPI32TOR64:
+    case TP_OPR_FPB32TOR64: case TP_OPR_FPSTNLI32:
+    case TP_FPU_LDNLDB: case TP_FPU_LDNLADDDB: case TP_FPU_LDNLMULDB:
+    case TP_FPU_STNLDB:
+        return tps_dbl_on() ? (c->operand == TP_FPU_LDNLDB ||
+                               c->operand == TP_FPU_LDNLADDDB ||
+                               c->operand == TP_FPU_LDNLMULDB ||
+                               c->operand == TP_FPU_STNLDB ? 2 : 1) : 0;
+    }
+    return 0;
+}
+
 /* Pre-scan: does any LDLP hand out the address of a frame word in a shape
  * this pass cannot follow?  The recognised form is LDLP immediately
  * followed by STNL or LDNL, which is the back end staging an outgoing call
@@ -613,6 +647,14 @@ static void tps_prescan(struct tps *s)
                 continue;                   /* recognised staging form */
             if (tp_relax_byte_read(ins, n, i))
                 continue;                   /* a byte of the word, read */
+            /* An FP access to the word, or to it and the next: annotated
+             * as a read of those words, so the local range stays.  Copy
+             * propagation does not follow these readers, so it stays off. */
+            if (!func_uses_inline_asm && j < n && tps_fp_extent(&ins[j]) &&
+                tps_localfp_on()) {
+                s->frame_private = 0;
+                continue;
+            }
             /* Nothing may hold the address of *any* workspace word for copy
              * propagation to re-materialise a value from a slot the def/use
              * annotations do not cover - an incoming argument, mainly. */

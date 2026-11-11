@@ -3,7 +3,9 @@
  * pseudo-register pair (`ldlp r; fpldnldb`, `fpstnldb`) or convert through
  * one of its words (`fpi32tor64`, `fpstnli32`): both words of the pair are
  * read by the access, so no store to either is dropped or carried past it.
- * Expected: Swords-then-load:P store-then-words:P negate:P abs-bits:P int-convert:P unsigned-convert:P wide-convert:P to-int:P mixed-carry:P compare:P select:P call-between:P stacked:P loop:P copy:P union-return:P float-double:P index:P pending-int:P struct:P \nSCHED-DOUBLE PASS\nH
+ * The same holds for locals: an FP access to one no longer gives up the
+ * whole local range.
+ * Expected: Swords-then-load:P store-then-words:P negate:P abs-bits:P int-convert:P unsigned-convert:P wide-convert:P to-int:P mixed-carry:P compare:P select:P call-between:P stacked:P loop:P copy:P union-return:P float-double:P index:P pending-int:P struct:P local-int:P local-words:P local-float:P local-copy:P local-loop:P local-branch:P \nSCHED-DOUBLE PASS\nH
  */
 #define UART (*(volatile unsigned *)0x10000000u)
 typedef union { double d; unsigned w[2]; long long ll; } bits;
@@ -46,6 +48,19 @@ static int pending_int(int a, double x, int b, double y, int c)
 static double structs(rec *r, const rec *q)
 { r->v = q->v * q->n + r->tag; r->n = (int)(r->v / 2) + q->tag; return r->v + r->n; }
 
+static double local_int(int a, int b)
+{ int i = a * b; int j = i + a; double d = i; d = d * 2 + j; i = (int)d; return d + i + j; }
+static unsigned local_words(double a, double b)
+{ bits x; double t = a + b; x.d = t * 2; x.w[0] += 1; t = x.d - t; return x.w[1] ^ (unsigned)(int)t; }
+static float local_float(float a, int n)
+{ float f = a * n; int k = (int)f; float g = k; f = f - g; return f + g * 2 + k; }
+static double local_copy(double a, double b)
+{ double p = a, q = b, r; r = p; p = q; q = r; r = p * 2 + q; p = r - q; return p + q * 4 + r * 8; }
+static double local_loop(int n, double step)
+{ double x = 0, y = 1; int i, k = 0; for (i = 0; i < n; i++) { x = x + step; y = y * x; k += (int)y; } return x + y + k; }
+static double local_branch(double a, int c)
+{ double t; int k; if (c > 1) { t = a * a; k = 1; } else if (c) { t = a + 1; k = 2; } else { t = -a; k = 3; } return t * k + c; }
+
 void test_main(void)
 {
     bits b, c;
@@ -87,5 +102,13 @@ void test_main(void)
           pending_int(1, 2, 3, 4.5, 4) == 100 + 90 + 3 - 4000 + 2 + 7);
     r.tag = 2; r.v = 0; r.n = 0; q.tag = 5; q.v = 1.5; q.n = 4;
     check("struct", structs(&r, &q) == 8 + 9 && r.v == 8 && r.n == 9 && q.v == 1.5);
+    check("local-int", local_int(3, 4) == 39 + 39 + 15);
+    c.d = 11; c.w[0] += 1; c.d = c.d - 5.5;
+    b.d = 11;
+    check("local-words", local_words(2.5, 3) == (b.w[1] ^ (unsigned)(int)c.d));
+    check("local-float", local_float(1.25f, 3) == 0.75f + 6 + 3);
+    check("local-copy", local_copy(3, 5) == 10 + 12 + 104);
+    check("local-loop", local_loop(3, 0.5) == 1.5 + 0.75 + 0);
+    check("local-branch", local_branch(3, 2) == 11 && local_branch(3, 1) == 9 && local_branch(3, 0) == -9);
     put(good ? "\nSCHED-DOUBLE PASS\n" : "\nSCHED-DOUBLE FAIL\n");
 }

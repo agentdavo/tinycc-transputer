@@ -154,8 +154,11 @@ is recorded as a read of both words, and S4/S5 stop at it. Full box saves a
 further 57,739,465 modeled cycles (1.206%) against `27efe07e`, no routine
 slower; soft-float objects are byte-identical; the same gates, suites, 150
 more difftest seeds and a kernel boot pass. The box render is 7.1% below
-`6e2f6d81`. Open: the pre-scan still gives up the local range when a local
-double feeds an FP access.
+`6e2f6d81`. A second step keeps the local range when a local feeds an FP
+access of known extent: 17,911,541 more cycles (0.379%) against `692f20a6`,
+same gates. Copy propagation in those functions was measured and dropped
+(more cycles). Open: only an escaped object's own words should leave the
+range.
 
 **Source layout, 10 November 2026.** The back end was restructured with no
 change in generated code (objects for all six parts, linked images and the

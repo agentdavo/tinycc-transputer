@@ -41,7 +41,7 @@
     K(TP_NO_SCHED, "set: no evaluation-stack scheduling") \
     K(TP_SCHED_MASK, "mask: the scheduler rules to apply (default 0x3f7f)") \
     K(TP_SCHED_BISECT, "lo-hi: rule S11 only in functions whose name hashes into the range") \
-    K(TP_SCHED_DBL, "0: decline functions with a double access to a pseudo-register pair") \
+    K(TP_SCHED_DBL, "0: decline functions with a double access to a register pair; 1: follow those, not FP accesses to locals") \
     K(TP_NO_SLOTMAP, "set: no renumbering of workspace slots") \
     K(TCC_TRANSPUTER_GADDR, "0...: no cache of global addresses in frame words") \
     /* code generation: counts and traces */ \

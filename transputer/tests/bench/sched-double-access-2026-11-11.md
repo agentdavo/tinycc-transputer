@@ -102,13 +102,52 @@ to 4,729,581,591 modeled cycles, 7.1%.
 * **Kernel:** linux-7 and userspace rebuilt with the candidate boot to
   `DESKTOP_LOOP`.
 
+## Second step: locals
+
+The pre-scan gave up the whole local range (`nslot = nreg`) when any local's
+address fed an FP access, which is how every float or double local is read.
+Such an access reaches one or two known words and the address goes nowhere
+else, so `tps_prescan` now passes over it (`tps_fp_extent`) and the
+annotation records the read as it does for a register pair. An address that
+does go elsewhere (`&v` to a callee, an indexed load) still gives the range
+up. `TP_SCHED_DBL=1` keeps the first step alone.
+
+Baseline `main` at `692f20a6`:
+
+| Complete generic POV box | Baseline | Candidate |
+| --- | ---: | ---: |
+| Decoded instructions | 1,393,460,486 | 1,385,332,032 |
+| Modeled T800 cycles | 4,729,581,591 | 4,711,670,050 |
+| Linked ELF bytes | 328,876 | 327,724 |
+
+**17,911,541 fewer modeled cycles (0.379%)**, no routine slower: `Trace`
+13.5 M, `__ieee754_pow` 2.3 M, `Determine_Surface_Colour` 1.4 M, `do_light`
+0.7 M. The gain is small because most POV routines pass a local vector's
+address to a callee, a real escape.
+
+Measured and dropped: leaving `frame_private` set as well, so copy
+propagation runs in these functions (with a guard for FP readers and
+writers of the copied words). It removed 2.7 M more instructions but cost
+2.2 M cycles, the redirected loads reading parameter slots that need a
+prefix byte.
+
+Validation of this step: the fixture gained six local cases (26 in all) and
+passes with both compilers on four CPUs at two layouts, 64 runs with the
+retained fixtures; soft-float objects byte-identical, 43 and 40 objects
+change at `-mt800` and `-mt9000`; c-testsuite 244/244 at four parts; local
+suite 265, 249 and 249, no failures; difftest seeds 23001-23150 clean;
+mixed ABI, VLA return, generated expressions, Doom (cycle-identical),
+CoreMark, raytracer and the three POV scenes pass; linux-7 and userspace
+boot to `DESKTOP_LOOP`.
+
 ## Next
 
-The pre-scan still abandons the local range when a local double's address
-feeds an FP access, which is nearly every POV function, so only the fifteen
-register slots are reasoned about there. A known-extent access to a local is
-no more of an escape than one to a register pair; admitting it is the same
-lane's next step.
+What still gives up the local range is an address that really is handed
+out. `tps_word_escapes` already answers that per word for S11; using it in
+the pre-scan, so that only the escaped object's words leave the range, is
+the remaining step. Global-address entry loads on short loops
+(`All_Object_Intersections`) and a use-site cache for two-use addresses are
+open from the indirect-call report.
 
 Scripts, compilers, profiles and logs are in
 `logs/compiler-coordination/wide-consts/`.
