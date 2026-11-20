@@ -952,6 +952,13 @@ the occam compiler does, and what new codegen should be held to:
   entry K), gets its own copy of the way to the dispatch, its tests of d
   decided and the dispatch a `j` to case K (core_state_transition, −3.2%
   at -mt9000).  `TCC_TRANSPUTER_SWITCH_THREAD=0`; `test_switch_thread.c`.
+- The scheduler runs once more after tp_hoist and tp_strength_reduce,
+  which leave round trips of their own (`TCC_TRANSPUTER_RESCHED=0`).
+- `-mstrict-aliasing` (off by default: TinyCC has no type-based alias
+  analysis and Linux relies on that): a loop's `*p op= v` whose other
+  reads are all halfword is kept in a frame word, stored once on the way
+  out (`tp_accum_promote`, `TCC_TRANSPUTER_ACCUM=1/0`).  Not sound for a
+  short read of a union whose int the loop writes.  `test_accum_promote.c`.
 - Jump tables are on by default since 2026-11-10 (`-mno-jump-tables` or
   `T4_SWITCH_JT=0` for the compare chain; linux-7 boots with 101 of them,
   boot cycles unchanged).  A dense switch - more than six

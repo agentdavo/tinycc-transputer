@@ -84,6 +84,10 @@ ST_FUNC int tp_select_option(TCCState *s1, const char *name)
         s1->tp_crc_idiom = on;
         return 1;
     }
+    if (!strcmp(name + (on ? 0 : 3), "strict-aliasing")) {
+        s1->tp_strict_alias = on;
+        return 1;
+    }
     return 0;
 }
 

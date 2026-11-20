@@ -830,6 +830,10 @@ struct TCCState {
     /* -mcrc-idiom: a bit-serial reflected CRC loop becomes crcbyte
        (tps_crc_lower); off by default, -mno-crc-idiom. */
     unsigned char tp_crc_idiom;
+    /* -mstrict-aliasing: the program keeps C's aliasing rules, so a loop's
+       accumulator may live in a frame word (tp_accum_promote); off by
+       default (Linux needs it off), -mno-strict-aliasing. */
+    unsigned char tp_strict_alias;
     /* TP_EF_* of what this output holds: the target of every function
        compiled or assembled here, and the e_flags of every object loaded.
        Written as the output's e_flags. */

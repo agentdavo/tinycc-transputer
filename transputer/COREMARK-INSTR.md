@@ -768,6 +768,35 @@ machine with shared cases, a default and one computed state (5 ways),
 and one whose state's address is passed to a callee (none), each over
 400 random inputs against the same machine with a volatile state.
 
+**Row 4, the other matrix loops: scheduled once more**
+(`TCC_TRANSPUTER_RESCHED`).  matrix_add_const and matrix_mul_const keep
+round trips like `ldl p; stl t; ldl t; ldl t` that the scheduler removes
+elsewhere: the hoisting and the strength reduction create them after it
+has run.  The scheduler now runs again after those two passes when they
+changed anything.  `-mt9000` 802,765 → 800,893, `-mt800` 1,255,247 →
+1,249,307; Dhrystone 1335 → 1331 and 1579 → 1575.
+
+**Row 2, matrix_mul_matrix(_bitextract) and matrix_mul_vect: the
+accumulator in a frame word, under `-mstrict-aliasing`**
+(`tp_accum_promote`, `TCC_TRANSPUTER_ACCUM=1/0`).  The k loop's `<v>; ldl
+a; ldnl 0; bsub; ldl a; stnl 0` becomes `<v>; ldl t; bsub; stl t`, with t
+loaded before the loop and stored back on its way out (only on the
+fall-through out of the bottom test: the zero-trip jump past the loop
+skips both).  That delays the stores, which is right only if nothing in
+the loop reads C[i] another way - and TinyCC has no type-based alias
+analysis (Linux depends on there being none).  So it is opt-in: with
+`-mstrict-aliasing` the program promises C's rules, the loop's other
+reads are all halfword (`ls`/`lsx`, short lvalues: MATDAT), and a short
+cannot read the int.  Byte reads (char may alias anything), word reads,
+calls, other stores, a moving pointer or a second way out: the loop is
+left.  The one case C allows that this does not: reading a short member
+of a union through which the int is written, in the same loop.
+`-mt9000` 800,893 → 792,685 (−1.0%, three loops); `-mt800` unchanged
+(its halfword reads are not `ls`).  `test_accum_promote.c`: the matrix
+products for N = 0..8 against index sums, and a char reader that really
+overlaps the accumulator, a call, an int reader that is the accumulator
+and a moving pointer, none of which is promoted.
+
 ## Step 3: instructions the compiler would use
 
 Measured on the final `-mt9000` image: how many instructions per iteration

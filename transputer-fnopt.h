@@ -6307,6 +6307,7 @@ static int tp_thread_flags(struct tp_relax *r)
 
 struct tpt_add {
     int at, n;
+    int ft;                     /* fall-through only: jumps to ins[at] skip it */
     struct tp_relax_insn rec[TPT_MAXC + 1];
 };
 
@@ -6333,7 +6334,7 @@ static void tpt_insert(struct tp_relax *r, struct tpt_add *add, int nadd)
                 out[s] = add[k].rec[q];
                 out[s].old_off = ins[i].old_off;
                 out[s].synth = 1;
-                if (first < 0)
+                if (first < 0 && !add[k].ft)
                     first = s;
                 s++;
             }
@@ -6664,6 +6665,7 @@ static int tp_switch_thread(struct tp_relax *r, int top)
             K = val[p];
             a.at = p;
             a.n = 0;
+            a.ft = 0;
             e = tpt_trace(&x, tg, K, &a, &gain, 0, 0);
             if (!gain || e == -1)
                 continue;
@@ -8817,6 +8819,236 @@ static void tp_hoist(struct tp_relax *r, int top)
     tcc_free(head);
 }
 
+/* ---- a loop's accumulator in a frame word (-mstrict-aliasing) ----
+ *
+ * `C[i] += A[i][k] * B[k][j]` over k reads and writes C[i] through memory
+ * on every pass: `<v>; ldl a; ldnl m; bsub; ldl a; stnl m`.  Keeping it in
+ * a new frame word t instead - `ldl a; ldnl m; stl t` before the loop,
+ * `<v>; ldl t; bsub; stl t` in it, `ldl t; ldl a; stnl m` after it - saves
+ * two instructions a pass, but delays the stores until the loop ends.
+ * That is only right if nothing in the loop reads that word another way,
+ * which TinyCC cannot tell: it has no type-based alias analysis, and the
+ * Linux kernel depends on there being none.  So this is opt-in:
+ * -mstrict-aliasing says the program keeps C's aliasing rules (an object
+ * is read only through its own type or a character type), and then the
+ * loop's other reads, all 16-bit (`ls`/`lsx`: short lvalues), cannot see
+ * the int word.  Byte reads (`lb`, `lbx`) may alias anything and word
+ * reads may be the same int: a loop with any of them is left.  One caveat
+ * C itself allows and this does not: reading a short member of a union
+ * through which the int is written, in the same loop.
+ *
+ * The loop: entered only by falling into its head, left only by falling
+ * out of its bottom test, the load in its straight code from the head (so
+ * it runs on every entry, and its word is valid when hoisted), a stores
+ * nothing else, calls nothing, names no volatile, and the pointer word a
+ * stays the same.  TCC_TRANSPUTER_ACCUM=1/0 overrides the flag. */
+static int tp_accum_promote(struct tp_relax *r, int top)
+{
+    static int env = -2;
+    struct tp_relax_insn *ins = r->ins;
+    const int n = r->n;
+    const int F = func_frame_words;
+    struct tpg_work g;
+    char *head;
+    int i, k, nl = 0, *lh, *lb, done = 0;
+    struct { int la, ll, pa, s, h, b, x, a, m, ok, ej; } c[8];
+
+    (void)top;
+    if (env == -2) {
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_ACCUM);
+        env = !e || !*e ? -1 : *e != '0';
+    }
+    if (!(env >= 0 ? env : tcc_state->tp_strict_alias) ||
+        func_uses_inline_asm || func_has_volatile || F <= 0 || F > 200 ||
+        n <= 0)
+        return 0;
+    memset(&g, 0, sizeof g);
+    g.ins = ins;
+    g.n = n;
+    g.tidx = r->tidx;
+    g.size = r->size;
+    g.F = F;
+    if (!tpg_frame_ok(&g))
+        return 0;
+    head = tcc_mallocz(n + 1);
+    lh = tcc_malloc(sizeof(int) * (n + 1));
+    lb = tcc_malloc(sizeof(int) * (n + 1));
+    for (i = 0; i < n; i++) {
+        if (ins[i].tab)
+            head[i] = 1;
+        if (ins[i].is_branch && (k = tpf_target(r, i)) >= 0) {
+            head[k] = 1;
+            if (k <= i) {
+                lh[nl] = k;
+                lb[nl++] = i;
+            }
+        }
+    }
+    for (i = 0; i < nl && done < 8; i++) {
+        int h = lh[i], b = lb[i], q, x, la = -1, ll = -1, pa = -1, s = -1;
+        int a = -1, m = 0, ok = 1, straight = 1, h0 = h, ej;
+        if (ins[b].opcode != TP_ENC_CJ)
+            continue;           /* left by falling out of a bottom test */
+        for (x = b + 1; x < n && ins[x].opcode == -1; x++)
+            ;
+        if (x >= n)
+            continue;
+        /* the padding in front of the head: the load goes before it */
+        while (h0 > 0 && ins[h0 - 1].opcode == -1 && !ins[h0 - 1].pinned)
+            h0--;
+        /* or the way in is one `j` to the head straight in front of it
+         * (tp_hoist's entry): then the load goes before that */
+        ej = tpf_prev(ins, h0);
+        if (ej >= 0 && !(ins[ej].opcode == TP_ENC_J && ins[ej].is_branch &&
+                         !head[ej] && !ins[ej].pinned &&
+                         tpf_target(r, ej) == h))
+            ej = -1;
+        /* no way in but the back edges, no way out but past b */
+        for (q = 0; q < n && ok; q++) {
+            int t;
+            if (!ins[q].is_branch || (t = tpf_target(r, q)) < 0)
+                continue;
+            if (q >= h && q <= b) {
+                if (t < h || t > b)
+                    ok = 0;
+            } else if (t >= h0 && t <= b && q != ej) {
+                ok = 0;
+            }
+        }
+        if (!ok)
+            continue;
+        for (q = h; q <= b && ok; q++) {
+            int o = ins[q].opcode, d = ins[q].operand, dl, rd;
+            if (o == -1)
+                continue;
+            if (ins[q].pinned || ins[q].tab || ins[q].icall ||
+                ins[q].workspace_extent)
+                ok = 0;
+            else if (q > h && head[q])
+                straight = 0;
+            if (o == TP_ENC_J || o == TP_ENC_CJ)
+                straight = 0;
+            if (o == TP_ENC_CALL || o == TP_ENC_AJW || o == TP_ENC_LDLP)
+                ok = 0;
+            else if (o == TP_ENC_LDNL || o == TP_ENC_STNL) {
+                int p = tpf_prev(ins, q);
+                if (p < 0 || ins[p].opcode != TP_ENC_LDL || p < h)
+                    ok = 0;
+                else if (o == TP_ENC_LDNL && la < 0 && straight) {
+                    la = p;
+                    ll = q;
+                    a = ins[p].operand;
+                    m = d;
+                } else if (o == TP_ENC_STNL && s < 0 && la >= 0 &&
+                           ins[p].operand == a && d == m) {
+                    pa = p;
+                    s = q;
+                } else {
+                    ok = 0;     /* another word read or written */
+                }
+            } else if (o == TP_ENC_OPR) {
+                switch (d) {
+                case TP_OPR_LS: case TP_OPR_LSX:
+                case TP_OPR_ADD: case TP_OPR_SUB: case TP_OPR_MUL:
+                case TP_OPR_SUM: case TP_OPR_DIFF: case TP_OPR_PROD:
+                case TP_OPR_AND: case TP_OPR_OR: case TP_OPR_XOR:
+                case TP_OPR_SHL: case TP_OPR_SHR: case TP_OPR_GT:
+                case TP_OPR_GTU: case TP_OPR_WSUB: case TP_OPR_BSUB:
+                case TP_OPR_WSUBDB: case TP_OPR_SSUB: case TP_OPR_NOT:
+                case TP_OPR_XSWORD: case TP_OPR_XBWORD: case TP_OPR_XWORD:
+                case TP_OPR_MINT: case TP_OPR_DUP: case TP_OPR_REV:
+                    break;
+                default:
+                    ok = 0;     /* byte reads, FP, moves, anything else */
+                }
+            } else if (!tps_effect(o, d, &dl, &rd)) {
+                ok = 0;
+            }
+        }
+        if (!ok || la < 0 || s < 0 || a < 0 || a >= F)
+            continue;
+        for (q = h; q <= b; q++)
+            if ((ins[q].opcode == TP_ENC_STL || ins[q].opcode == TP_ENC_LDLP) &&
+                ins[q].operand == a)
+                break;
+        if (q <= b)
+            continue;           /* the pointer changes in the loop */
+        /* the loop's own entry: its `j`, or the code before falls in */
+        if (ej < 0) {
+            int p = tpf_prev(ins, h);
+            if (p < 0 || ins[p].opcode == TP_ENC_J ||
+                (ins[p].opcode == TP_ENC_OPR &&
+                 (ins[p].operand == TP_OPR_RET || ins[p].operand == TP_OPR_GCALL)))
+                continue;
+        }
+        /* not a loop already chosen, nor one around it */
+        for (q = 0; q < done; q++)
+            if (!(b < c[q].h || h > c[q].b))
+                break;
+        if (q < done)
+            continue;
+        c[done].la = la; c[done].ll = ll; c[done].pa = pa; c[done].s = s;
+        c[done].h = h; c[done].b = b; c[done].x = x; c[done].a = a;
+        c[done].m = m;
+        c[done].ej = ej;
+        done++;
+    }
+    tcc_free(lh);
+    tcc_free(lb);
+    tcc_free(head);
+    if (!done)
+        return 0;
+    /* new words on top of the locals, as tp_hoist's */
+    g.w = done;
+    tpg_room(&g);
+    {
+        struct tpt_add *add = tcc_malloc(sizeof(*add) * 2 * done);
+        int na = 0, j;
+        for (j = 0; j < done; j++) {
+            int t = F + j, a = c[j].a, m = c[j].m;
+            /* before the head (falling in only), after the bottom test */
+            add[na].at = c[j].ej >= 0 ? c[j].ej : c[j].h;
+            add[na].ft = 1;
+            add[na].n = 0;
+            tpt_rec(&add[na].rec[add[na].n++], TP_ENC_LDL, a);
+            tpt_rec(&add[na].rec[add[na].n++], TP_ENC_LDNL, m);
+            tpt_rec(&add[na].rec[add[na].n++], TP_ENC_STL, t);
+            /* a jump may name the padding in front of the head: go before
+             * it (none comes from outside, checked); in front of the entry
+             * `j` stay after its padding, which jumps may name */
+            while (c[j].ej < 0 && add[na].at > 0 &&
+                   ins[add[na].at - 1].opcode == -1 &&
+                   !ins[add[na].at - 1].pinned)
+                add[na].at--;
+            na++;
+            add[na].at = c[j].x;
+            add[na].ft = 1;
+            add[na].n = 0;
+            tpt_rec(&add[na].rec[add[na].n++], TP_ENC_LDL, t);
+            tpt_rec(&add[na].rec[add[na].n++], TP_ENC_LDL, a);
+            tpt_rec(&add[na].rec[add[na].n++], TP_ENC_STNL, m);
+            while (add[na].at > c[j].b + 1 && ins[add[na].at - 1].opcode == -1 &&
+                   !ins[add[na].at - 1].pinned)
+                add[na].at--;
+            na++;
+            /* in the loop: the load reads t, the store writes it */
+            tpn_put(&ins[c[j].la], TP_ENC_LDL, t);
+            ins[c[j].la].dup_load = 0;
+            tpn_put(&ins[c[j].ll], -1, 0);
+            tpn_put(&ins[c[j].pa], -1, 0);
+            tpn_put(&ins[c[j].s], TP_ENC_STL, t);
+        }
+        func_frame_words = F + done;
+        tp_hoist_w += done;
+        if (tp_knob(TPK_TP_NARROW_STATS))
+            fprintf(stderr, "[ACCUM] %s: %d loops\n",
+                    funcname ? funcname : "?", done);
+        tpt_insert(r, add, na);
+        tcc_free(add);
+    }
+    return 1;
+}
+
 /* 1. Linear decode. */
 static const char *tp_relax_decode(struct tp_relax *r)
 {
@@ -9571,6 +9803,9 @@ static int tp_relax_function(void)
         int sr = tp_strength_reduce(&r, tpg.n);
         static int resched_off = -1;
         if (sr)
+            r.grown = 1;
+        /* -mstrict-aliasing: a loop's `*p op= v` kept in a frame word */
+        if (tp_accum_promote(&r, tpg.n + tp_hoist_w))
             r.grown = 1;
         /* the round trips the hoisting and the strength reduction leave
          * (`ldl p; stl t; ldl t; ldl t` for p[i] += c), scheduled away */
