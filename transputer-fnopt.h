@@ -4902,8 +4902,16 @@ static struct tpn_val tpn_range_before(const struct tp_relax_insn *ins,
     none.lo = none.hi = 0;
     for (k = at - 1, q = 0; k >= 0 && q < 40; k--) {
         int opc = ins[k].opcode;
-        if (opc == -1)
+        /* A jump may land on the padding in front of an instruction:
+         * that is a join as much as a label on the instruction itself
+         * (difftest seed 42149: a `j` to the padding before `ldl x;
+         * ldl y; diff` let the window run on into the fall-through
+         * path's `ldc -1; stl y`, and a u16 cast's mask went). */
+        if (opc == -1) {
+            if (head[k])
+                break;
             continue;
+        }
         q++;
         if (ins[k].pinned || ins[k].tab || ins[k].icall ||
             opc == TP_ENC_J || opc == TP_ENC_CJ || opc == TP_ENC_CALL ||

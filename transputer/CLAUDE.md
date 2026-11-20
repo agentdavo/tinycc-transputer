@@ -1016,6 +1016,13 @@ the occam compiler does, and what new codegen should be held to:
   `mint; xor` (which pops x) for address code, so `m[0] = -(a + b)`
   stored a + b - dEngine's gluLookAt came out with its translation's sign
   flipped (2026-11-09, `tp_addr_effect`, `test_fp_neg_store.c`).
+- The same holds scanning backwards: a window that steps over padding
+  without asking whether a jump lands on it runs on into the other path.
+  `tpn_range_before` did (CoreMark round 1, fixed 2026-11-20): a `?:`
+  whose join was a `j` to the padding before `ldl x; ldl y; diff` gave y
+  the fall-through arm's constant alone, and a later range rule dropped a
+  u16 cast's `ldc 65535; and` (difftest seeds 42149 and 43018, c-testsuite
+  09119/09120; earlier gates' seed ranges had missed it).
 - `CValue.i` is a `uint64_t`, so `sv->c.i < 0` is never true: the
   "canonical spilled copy" branches in `load()` and `tp_emit_float_addr`
   never run, and a register lvalue is always loaded from its register.
