@@ -1039,6 +1039,13 @@ the occam compiler does, and what new codegen should be held to:
   the fall-through arm's constant alone, and a later range rule dropped a
   u16 cast's `ldc 65535; and` (difftest seeds 42149 and 43018, c-testsuite
   09119/09120; earlier gates' seed ranges had missed it).
+- Never call `get_reg()` (or anything that can spill) with operands
+  already pushed on the evaluation stack: a spill is code too, and its
+  `ldl r; ldlp home; ss` pushes two more words.  `tp_opi_push_direct`'s
+  local/const cases did (fixed 2026-11-20, older than the CoreMark
+  work): `p0 & 3` lost p0 to a halfword argument's spill when every
+  register was taken (difftest seed 48076, c-testsuite 09121).  Take the
+  result register first.
 - `CValue.i` is a `uint64_t`, so `sv->c.i < 0` is never true: the
   "canonical spilled copy" branches in `load()` and `tp_emit_float_addr`
   never run, and a register lvalue is always loaded from its register.

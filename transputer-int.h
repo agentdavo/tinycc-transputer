@@ -1190,10 +1190,18 @@ static int tp_opi_push_direct(struct tp_opi *o)
     second_folded = o->adc_const_opt || o->eqc_const_opt ||
                     o->mul_const_opt || o->shl_add_opt || o->sar_const_opt;
 
+    /* CASES 1-3 take the result's register before pushing anything:
+     * get_reg() may have to spill a live register, and its spill code
+     * (`ldl r; ldlp home; ss` for a short) would run on top of the two
+     * operands already on the stack and push the first out of CReg
+     * (difftest seed 48076: `p0 & 3` lost p0 to a halfword argument's
+     * spill, c-testsuite 09121).  CASES 4-8 reuse an operand's register
+     * and never call it. */
     if (!exclude && first_local && second_local) {
         /* CASE 1: local op local → LDL a; LDL b */
         int off1 = vtop[-1].c.i;
         int off2 = vtop[0].c.i;
+        int dest = get_reg(RC_INT);
         abcreg_stack_depth = 0;
         if (off1 == off2 && !tp_t414()) {
             emit_local_op(TP_OP_LDL, off1);
@@ -1202,22 +1210,24 @@ static int tp_opi_push_direct(struct tp_opi *o)
             emit_local_op(TP_OP_LDL, off1);
             emit_local_op(TP_OP_LDL, off2);
         }
-        vtop[-1].r = get_reg(RC_INT);
+        vtop[-1].r = dest;
         return 1;
     }
 
     if (!exclude && first_local && second_const) {
         /* CASE 2: local op const → LDL a; LDC const */
+        int dest = get_reg(RC_INT);
         abcreg_stack_depth = 0;
         emit_local_op(TP_OP_LDL, vtop[-1].c.i);
         if (!second_folded)
             tp_ldc_pooled((int)vtop[0].c.i);
-        vtop[-1].r = get_reg(RC_INT);
+        vtop[-1].r = dest;
         return 1;
     }
 
     if (!exclude && first_const && second_local) {
         /* CASE 3: const op local → LDC const; LDL b */
+        int dest = get_reg(RC_INT);
         abcreg_stack_depth = 0;
         if ((o->op == '*' || o->op == TOK_A_MUL) &&
             tp_mul_const_strength((long)vtop[-1].c.i, &o->mul_const_val)) {
@@ -1227,7 +1237,7 @@ static int tp_opi_push_direct(struct tp_opi *o)
             tp_ldc_pooled((int)vtop[-1].c.i);
             emit_local_op(TP_OP_LDL, vtop[0].c.i);
         }
-        vtop[-1].r = get_reg(RC_INT);
+        vtop[-1].r = dest;
         return 1;
     }
 
