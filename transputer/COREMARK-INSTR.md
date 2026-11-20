@@ -739,6 +739,35 @@ instruction fewer, not done.  `test_hoist_load.c`: the hoisted search,
 and a store, a call, a volatile and a loop with no earlier read, none of
 which hoists.
 
+**Row 3, core_state_transition: the switch threaded on its state**
+(`TCC_TRANSPUTER_SWITCH_THREAD`).  Each case ends `[ldc K; stl state;]
+... j <loop top>`, and the loop top increments the cursor, loads the
+next character, tests `state != INVALID` and dispatches through the
+table again (`ldl state; ldc 2; ldpi; wsub; gcall` and the entry's
+`j`): on every way back the state is a known constant.
+`tp_switch_thread` (after the late scheduler) finds the dispatch's
+selector word d (table entry i runs exactly when d holds i), works out
+d's value before every instruction (a forward analysis: one constant,
+or varying; entry i sets it to i), and gives each `j` that knows d its
+own copy of the way to the dispatch: `ldl d; [eqc c;] cj` and the
+bounds check `ldc N; ldl d; gt(u); cj` are decided, `j`s followed, the
+dispatch becomes `j case`, and a `cj` on something else keeps its
+target (or the case, when that leads straight to the dispatch).  A loop
+test whose taken side is the way on is inverted (`eqc 0; cj
+<fall-through>`), only with the tested value alone on the stack.  The
+copy ends with a `j` back into the original code at anything it will
+not copy (a call, a store to d, an `ldlp`).  d must be a frame word no
+pointer reaches and no callee writes, and the function must name no
+volatile.  The compare chain (`-mno-jump-tables`) was measured first and
+is worse: 858,717 an iteration.
+
+12 ways back threaded in core_state_transition: `-mt9000` 829,629 →
+802,765 (−3.2%), `-mt800` 1,276,263 → 1,255,247 (−1.6%), CRCs
+unchanged.  `test_switch_thread.c`: CoreMark's lexer (10 ways), a
+machine with shared cases, a default and one computed state (5 ways),
+and one whose state's address is passed to a callee (none), each over
+400 random inputs against the same machine with a volatile state.
+
 ## Step 3: instructions the compiler would use
 
 Measured on the final `-mt9000` image: how many instructions per iteration

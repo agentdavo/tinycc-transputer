@@ -947,6 +947,11 @@ the occam compiler does, and what new codegen should be held to:
   lbx|ls|lsx`) out of a loop that stores and calls nothing, when the same
   word was read on the straight way in (`tph_twin`: no read the program
   never made).  `TCC_TRANSPUTER_HOIST_LOAD=0`; `test_hoist_load.c`.
+- `tp_switch_thread`: a `j` back to a loop's switch, with the selector
+  word a known constant there (`ldc K; stl d`, or untouched since table
+  entry K), gets its own copy of the way to the dispatch, its tests of d
+  decided and the dispatch a `j` to case K (core_state_transition, −3.2%
+  at -mt9000).  `TCC_TRANSPUTER_SWITCH_THREAD=0`; `test_switch_thread.c`.
 - Jump tables are on by default since 2026-11-10 (`-mno-jump-tables` or
   `T4_SWITCH_JT=0` for the compare chain; linux-7 boots with 101 of them,
   boot cycles unchanged).  A dense switch - more than six

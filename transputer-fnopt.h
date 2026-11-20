@@ -6276,6 +6276,432 @@ static int tp_thread_flags(struct tp_relax *r)
  * bytes.  TCC_TRANSPUTER_TAIL_DUP=0 turns it off. */
 #define TPT_MAXB 6
 
+/* ---- a switch in a loop, threaded on its known selector ----
+ *
+ * A state machine `for (...) switch (state) { case A: ... state = B; ... }`
+ * goes back to the loop top after each case, tests the state again
+ * (`state != INVALID`) and dispatches through the table again, although on
+ * every such way back the state is a known constant: set by `ldc K; stl
+ * state`, or untouched since the case was entered by table entry K.  This
+ * gives each such `j` its own copy of the way to the dispatch, with the
+ * tests of the state decided and the dispatch replaced by a jump to case
+ * K: core_state_transition's 9 instructions a character (a test, the
+ * table's ldl/ldc/ldpi/wsub/gcall and the entry's j).
+ *
+ * The selector is the word the dispatch loads (`ldl d; ...; gcall`, the
+ * scheduler having propagated the switch's copy): table entry i runs
+ * exactly when d holds i.  A forward analysis gives d's value at every
+ * instruction (unknown, one constant, or varying); d must be a frame word
+ * no pointer reaches and no callee writes.  The copy starts at the `j`'s
+ * target and follows the code: `ldl d; [eqc c;] cj X` is decided and not
+ * copied, a `j` is followed, the dispatch becomes `j case`, anything else
+ * is copied as it is (a `cj` on something else keeps its target, or the
+ * case if it leads straight to the dispatch), and the copy ends with a
+ * `j` back into the original code at the first instruction it will not
+ * copy (a call, a store to d, ...).  The `j` itself is left behind the
+ * copy, unreachable; a jump to it runs the copy.  Nothing is live on the
+ * stack at a `j`, so the copy starts as the original does.
+ * TCC_TRANSPUTER_SWITCH_THREAD=0 turns it off. */
+#define TPT_MAXC 40             /* instructions in one copy */
+#define TPT_MAXN 48             /* copies a function */
+
+struct tpt_add {
+    int at, n;
+    struct tp_relax_insn rec[TPT_MAXC + 1];
+};
+
+static void tpt_insert(struct tp_relax *r, struct tpt_add *add, int nadd)
+{
+    struct tp_relax_insn *ins = r->ins, *out;
+    const int n = r->n;
+    int i, k, s, total = n + 1;
+
+    for (i = 1; i < nadd; i++)
+        for (k = i; k > 0 && add[k].at < add[k - 1].at; k--) {
+            struct tpt_add t = add[k];
+            add[k] = add[k - 1];
+            add[k - 1] = t;
+        }
+    for (i = 0; i < nadd; i++)
+        total += add[i].n;
+    out = tcc_malloc(sizeof(*out) * total);
+    for (i = 0, k = 0, s = 0; i < n; i++) {
+        int first = -1;
+        for (; k < nadd && add[k].at == i; k++) {
+            int q;
+            for (q = 0; q < add[k].n; q++) {
+                out[s] = add[k].rec[q];
+                out[s].old_off = ins[i].old_off;
+                out[s].synth = 1;
+                if (first < 0)
+                    first = s;
+                s++;
+            }
+        }
+        out[s] = ins[i];
+        if (first >= 0 && !ins[i].synth && !ins[i].pinned) {
+            /* the copy takes ins[i]'s place: a jump to it runs the copy */
+            out[first].synth = 0;
+            out[first].old_len = ins[i].old_len;
+            out[s].synth = 1;
+        }
+        s++;
+    }
+    tcc_free(ins);
+    r->ins = out;
+    r->n = s;
+    for (i = 0; i <= r->size; i++)
+        r->tidx[i] = -1;
+    for (i = 0; i < r->n; i++)
+        if (!out[i].synth)
+            r->tidx[out[i].old_off] = i;
+}
+
+struct tpt_ctx {
+    struct tp_relax *r;
+    int d, disp, ntab;          /* selector, dispatch's first record */
+    int *entry;                 /* entry i's case: a record index */
+};
+
+static void tpt_rec(struct tp_relax_insn *c, int opc, int opd)
+{
+    memset(c, 0, sizeof(*c));
+    c->opcode = opc;
+    c->operand = opd;
+    c->new_len = tp_encode_len(opc, opd);
+}
+
+/* Follow the code from pc with d == K; emit into a (NULL: only resolve).
+ * Returns the record where a plain copy would stop (the jump target to
+ * end with), or -1 for nothing usable; *gain counts decisions. */
+static int tpt_trace(struct tpt_ctx *x, int pc, int K, struct tpt_add *a,
+                     int *gain, int depth, int lvl);
+
+/* Would a copy from pc, with depth values on the stack, reach the case? */
+static int tpt_reaches(struct tpt_ctx *x, int pc, int K, int depth, int lvl)
+{
+    struct tpt_add s;
+    int g = 0;
+    if (lvl > 2)
+        return 0;
+    s.at = 0;
+    s.n = 0;
+    return tpt_trace(x, pc, K, &s, &g, depth, lvl + 1) <= -2;
+}
+
+static int tpt_trace(struct tpt_ctx *x, int pc, int K, struct tpt_add *a,
+                     int *gain, int depth, int lvl)
+{
+    struct tp_relax_insn *ins = x->r->ins;
+    const int n = x->r->n;
+    int steps = 0;
+
+    while (pc >= 0 && pc < n && steps++ < 96) {
+        int o = ins[pc].opcode, dd = ins[pc].operand, q, q2, tg;
+        if (o == -1) {
+            pc++;
+            continue;
+        }
+        if (ins[pc].tab > 0 || ins[pc].pinned || ins[pc].icall)
+            return pc;
+        if (pc == x->disp) {
+            if (K < 0 || K >= x->ntab || x->entry[K] < 0)
+                return pc;
+            (*gain)++;
+            return -2 - x->entry[K];        /* end: j to the case */
+        }
+        if (ins[pc].tab < 0)
+            return pc;                      /* inside another dispatch */
+        /* the bounds check, ldc N; ldl d; gt|gtu; cj X: decided too */
+        if (o == TP_ENC_LDC && !ins[pc].pinned &&
+            (q = tpn_next(ins, n, pc)) < n && ins[q].opcode == TP_ENC_LDL &&
+            ins[q].operand == x->d && (q2 = tpn_next(ins, n, q)) < n &&
+            ins[q2].opcode == TP_ENC_OPR && (ins[q2].operand == TP_OPR_GT ||
+                                             ins[q2].operand == TP_OPR_GTU)) {
+            int q3 = tpn_next(ins, n, q2), v;
+            if (q3 < n && ins[q3].opcode == TP_ENC_CJ && ins[q3].is_branch &&
+                !ins[q3].pinned && (tg = tpf_target(x->r, q3)) >= 0) {
+                if (ins[q2].operand == TP_OPR_GT)
+                    v = dd > K;
+                else
+                    v = (unsigned int)dd > (unsigned int)K;
+                (*gain)++;
+                pc = v == 0 ? tg : q3 + 1;
+                continue;
+            }
+        }
+        if (o == TP_ENC_LDL && dd == x->d) {
+            /* ldl d; [eqc c;] cj X: decided */
+            q = tpn_next(ins, n, pc);
+            if (q < n && ins[q].opcode == TP_ENC_EQC && !ins[q].pinned) {
+                q2 = tpn_next(ins, n, q);
+                if (q2 < n && ins[q2].opcode == TP_ENC_CJ &&
+                    ins[q2].is_branch && !ins[q2].pinned &&
+                    (tg = tpf_target(x->r, q2)) >= 0) {
+                    int v = K == ins[q].operand;
+                    (*gain)++;
+                    pc = v == 0 ? tg : q2 + 1;
+                    continue;
+                }
+            } else if (q < n && ins[q].opcode == TP_ENC_CJ &&
+                       ins[q].is_branch && !ins[q].pinned &&
+                       (tg = tpf_target(x->r, q)) >= 0) {
+                (*gain)++;
+                pc = K == 0 ? tg : q + 1;
+                continue;
+            }
+        }
+        if (o == TP_ENC_J) {
+            if (!ins[pc].is_branch || (tg = tpf_target(x->r, pc)) < 0)
+                return pc;
+            pc = tg;
+            continue;
+        }
+        if (o == TP_ENC_CALL || o == TP_ENC_AJW || o == TP_ENC_LDLP ||
+            ((o == TP_ENC_STL || o == TP_ENC_LDLP) && dd == x->d) ||
+            (o == TP_ENC_OPR && (dd == TP_OPR_RET || dd == TP_OPR_GCALL ||
+                                 dd == TP_OPR_GAJW)) ||
+            ins[pc].workspace_extent)
+            return pc;
+        if (!a) {
+            return pc;              /* resolving: real code from here */
+        }
+        if (a->n >= TPT_MAXC - 1)
+            return -1;
+        if (o == TP_ENC_CJ) {
+            int t2, g2 = 0, e, ft = pc + 1;
+            if (!ins[pc].is_branch || (t2 = tpf_target(x->r, pc)) < 0)
+                return -1;
+            /* A loop's own test continues on its taken side: when only
+             * that way reaches the case, test the other way round,
+             * `eqc 0; cj <fall-through>`, and copy on along the taken
+             * side.  Only with the tested value alone on the stack: the
+             * fall-through then gets a spare 0 where it had nothing. */
+            e = tpt_trace(x, t2, K, NULL, &g2, depth, lvl);
+            if (e > -2 && depth == 1 && !ins[ft].synth &&
+                !tpt_reaches(x, ft, K, 0, lvl) &&
+                tpt_reaches(x, t2, K, 0, lvl)) {
+                if (a->n >= TPT_MAXC - 2)
+                    return -1;
+                tpt_rec(&a->rec[a->n++], TP_ENC_EQC, 0);
+                tpt_rec(&a->rec[a->n], TP_ENC_CJ, 0);
+                a->rec[a->n].is_branch = 1;
+                a->rec[a->n].target_old = ins[ft].old_off;
+                a->n++;
+                pc = t2;
+                depth = 0;
+                continue;
+            }
+            if (e <= -2) {
+                t2 = -2 - e;        /* straight to the case */
+                *gain += g2;
+            } else if (e >= 0 && g2) {
+                t2 = e;             /* past the decided tests */
+                *gain += g2;
+            }
+            if (ins[t2].synth)
+                return -1;
+            a->rec[a->n] = ins[pc];
+            a->rec[a->n].target_old = ins[t2].old_off;
+            a->rec[a->n].dup_load = 0;
+            a->n++;
+            pc++;
+            depth = depth > 0 ? depth - 1 : -1;
+            continue;
+        }
+        {
+            int dl, rd;
+            if (depth >= 0 && tps_effect(o, dd, &dl, &rd) && rd <= depth)
+                depth += dl;
+            else
+                depth = -1;
+            if (depth > 3)
+                depth = 3;
+        }
+        a->rec[a->n] = ins[pc];
+        a->rec[a->n].is_branch = 0;
+        a->rec[a->n].dup_load = 0;
+        a->n++;
+        pc++;
+    }
+    return -1;
+}
+
+static int tp_switch_thread(struct tp_relax *r, int top)
+{
+    static int off = -1;
+    struct tp_relax_insn *ins = r->ins;
+    const int n = r->n;
+    const int F = func_frame_words;
+    struct tpt_add *add = NULL;
+    int nadd = 0, t;
+
+    if (tpk_off(TPK_TCC_TRANSPUTER_SWITCH_THREAD, &off, 1) ||
+        func_uses_inline_asm || func_has_volatile || n <= 0 || F <= 0)
+        return 0;
+    for (t = 1; t <= swtab_count && nadd < TPT_MAXN; t++) {
+        struct tpt_ctx x;
+        int i, d0 = -1, g = -1, ne = 0, *val, *st, *work, nw = 0, p;
+        for (i = 0; i < n; i++) {
+            if (ins[i].tab == -t && ins[i].opcode != -1) {
+                if (d0 < 0)
+                    d0 = i;
+                if (ins[i].opcode == TP_ENC_OPR &&
+                    ins[i].operand == TP_OPR_GCALL)
+                    g = i;
+            }
+            if (ins[i].tab == t && ins[i].opcode == TP_ENC_J)
+                ne++;
+        }
+        /* the dispatch's own records start after the index load */
+        if (d0 >= 0)
+            d0 = tpf_prev(ins, d0);
+        if (d0 < 0 || g < 0 || ins[d0].opcode != TP_ENC_LDL ||
+            ins[d0].pinned || !ne)
+            continue;
+        x.r = r;
+        x.d = ins[d0].operand;
+        x.disp = d0;
+        x.ntab = ne;
+        if (x.d < 0 || x.d >= F || x.d < func_max_outgoing_words ||
+            tps_word_escapes(ins, n, x.d, top))
+            continue;
+        {
+            int bad = 0;
+            for (i = 0; i < n; i++)
+                if (ins[i].opcode == TP_ENC_LDLP &&
+                    (ins[i].operand == x.d || ins[i].operand == x.d - 1))
+                    bad = 1;
+            if (bad)
+                continue;
+        }
+        x.entry = tcc_malloc(sizeof(int) * ne);
+        for (i = 0, ne = 0; i < n; i++)
+            if (ins[i].tab == t && ins[i].opcode == TP_ENC_J)
+                x.entry[ne++] = ins[i].is_branch ? tpf_target(r, i) : -1;
+        /* d's value before each record: 0 not yet, 1 const val, 2 varying */
+        val = tcc_mallocz(sizeof(int) * (n + 1));
+        st = tcc_mallocz(sizeof(int) * (n + 1));
+        work = tcc_malloc(sizeof(int) * (4 * n + 8));
+        for (i = 0; i < n && ins[i].opcode == -1; i++)
+            ;
+        if (i < n) {
+            st[i] = 2;
+            work[nw++] = i;
+        }
+        while (nw) {
+            int k = work[--nw], os, ov, s2[64], v2[64], ns = 0, j, e;
+            int o = ins[k].opcode, dd = ins[k].operand;
+            os = st[k];
+            ov = val[k];
+            /* transfer */
+            if (o == TP_ENC_STL && dd == x.d) {
+                int pq = tpf_prev(ins, k);
+                if (pq >= 0 && ins[pq].opcode == TP_ENC_LDC &&
+                    !ins[pq].pinned) {
+                    os = 1;
+                    ov = ins[pq].operand;
+                } else {
+                    os = 2;
+                }
+            }
+            /* successors */
+            if (k == g) {
+                for (i = 0, e = 0; i < n && ns < 64; i++)
+                    if (ins[i].tab == t && ins[i].opcode == TP_ENC_J) {
+                        s2[ns] = i;
+                        v2[ns++] = e++;     /* entry e: d == e */
+                    }
+            } else if (o == TP_ENC_J) {
+                /* an entry's value was set on the way in, from the gcall */
+                if (ins[k].is_branch && (j = tpf_target(r, k)) >= 0) {
+                    s2[ns] = j;
+                    v2[ns++] = -1;
+                }
+            } else if (o == TP_ENC_CJ) {
+                if (ins[k].is_branch && (j = tpf_target(r, k)) >= 0) {
+                    s2[ns] = j;
+                    v2[ns++] = -1;
+                }
+                if (k + 1 < n) {
+                    s2[ns] = k + 1;
+                    v2[ns++] = -1;
+                }
+            } else if (o == TP_ENC_OPR && dd == TP_OPR_RET) {
+                ;
+            } else if (k + 1 < n) {
+                s2[ns] = k + 1;
+                v2[ns++] = -1;
+            }
+            for (j = 0; j < ns; j++) {
+                int sv = v2[j] >= 0 ? 1 : os, vv = v2[j] >= 0 ? v2[j] : ov;
+                int q = s2[j], ns2, nv2;
+                if (st[q] == 0) {
+                    ns2 = sv;
+                    nv2 = vv;
+                } else if (st[q] == 1 && sv == 1 && val[q] == vv) {
+                    continue;
+                } else if (st[q] == 2) {
+                    continue;
+                } else {
+                    ns2 = 2;
+                    nv2 = 0;
+                }
+                st[q] = ns2;
+                val[q] = nv2;
+                if (nw < 4 * n + 8)
+                    work[nw++] = q;
+            }
+        }
+        /* the ways back: a j with d known */
+        for (p = 0; p < n && nadd < TPT_MAXN; p++) {
+            struct tpt_add a;
+            int tg, e, gain = 0, K;
+            if (ins[p].opcode != TP_ENC_J || !ins[p].is_branch ||
+                ins[p].tab || ins[p].pinned || ins[p].synth ||
+                st[p] != 1 || (tg = tpf_target(r, p)) < 0)
+                continue;
+            K = val[p];
+            a.at = p;
+            a.n = 0;
+            e = tpt_trace(&x, tg, K, &a, &gain, 0, 0);
+            if (!gain || e == -1)
+                continue;
+            if (e <= -2) {
+                int c = -2 - e;
+                if (ins[c].synth)
+                    continue;
+                tpt_rec(&a.rec[a.n], TP_ENC_J, 0);
+                a.rec[a.n].is_branch = 1;
+                a.rec[a.n].target_old = ins[c].old_off;
+                a.n++;
+            } else {
+                if (ins[e].synth)
+                    continue;
+                tpt_rec(&a.rec[a.n], TP_ENC_J, 0);
+                a.rec[a.n].is_branch = 1;
+                a.rec[a.n].target_old = ins[e].old_off;
+                a.n++;
+            }
+            if (!add)
+                add = tcc_malloc(sizeof(*add) * TPT_MAXN);
+            add[nadd++] = a;
+        }
+        tcc_free(val);
+        tcc_free(st);
+        tcc_free(work);
+        tcc_free(x.entry);
+    }
+    if (!nadd)
+        return 0;
+    if (tp_knob(TPK_TP_NARROW_STATS))
+        fprintf(stderr, "[SWTHREAD] %s: %d ways back threaded\n",
+                funcname ? funcname : "?", nadd);
+    tpt_insert(r, add, nadd);
+    tcc_free(add);
+    return 1;
+}
+
 static int tp_tail_dup(struct tp_relax *r)
 {
     static int off = -1;
@@ -9126,6 +9552,9 @@ static int tp_relax_function(void)
         if (late)
             tp_sched_function(r.ins, r.n, size, tpg.n);
     }
+    /* a state machine's way back to its switch, threaded on the state */
+    if (tp_switch_thread(&r, tpg.n))
+        r.grown = 1;
     if (tp_loop_cse(&r))
         r.grown = 1;
 
