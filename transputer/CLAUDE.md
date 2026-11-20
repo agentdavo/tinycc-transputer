@@ -943,6 +943,10 @@ the occam compiler does, and what new codegen should be held to:
   comparing the result with the CRC map, not by its spelling
   (`COREMARK-INSTR.md`, "-mcrc-idiom").  Not on the T414.
   `test_crc_idiom.c`; the local runner now takes a `Flags:` header line.
+- tp_hoist also moves a loop-invariant load (`ldl b; [adc k;] ldnl|lb|
+  lbx|ls|lsx`) out of a loop that stores and calls nothing, when the same
+  word was read on the straight way in (`tph_twin`: no read the program
+  never made).  `TCC_TRANSPUTER_HOIST_LOAD=0`; `test_hoist_load.c`.
 - Jump tables are on by default since 2026-11-10 (`-mno-jump-tables` or
   `T4_SWITCH_JT=0` for the compare chain; linux-7 boots with 101 of them,
   boot cycles unchanged).  A dense switch - more than six

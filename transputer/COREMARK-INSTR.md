@@ -715,6 +715,30 @@ crcu8 becomes `ldl data; ldc 255; and; ldl crc; ldc 65535; and; xor;
 bitrevword; ldc gen; rev; ldc 0; crcbyte; bitrevword` (the masks are the
 code's own: the parameters' high bits must not reach the result).
 
+## The hot-loop rows (20 November 2026)
+
+MODERNISE's opt4b hot-loop census named four more rows.  Baseline for
+them is `fa1b0975` (F1, the range-window fix, `-mcrc-idiom` off):
+835,065 instructions an iteration at `-mt9000`, 1,276,255 at `-mt800`.
+
+**Row 1, core_list_find: a loop-invariant load hoisted**
+(`TCC_TRANSPUTER_HOIST_LOAD`).  After F1 a node of the idx loop is 15
+instructions; 3 of them, `ldl 12; adc 2; lsx`, read `info->idx` again on
+every trip.  tp_hoist now also moves runs that read memory (`ldnl`,
+`lb`/`lbx`/`ls`/`lsx`, and the `adc` that forms the address) when the
+loop stores nothing, calls nothing and the function names no volatile -
+and only where the same word was already read on the straight way into
+the loop (`tph_twin`): a hoisted read happens even when the loop runs no
+times, and a read the program never made could trap under T9000 memory
+protection.  core_list_find tests `info->idx >= 0` just before the loop,
+so the idx loop qualifies; the data16 loop is entered by a `cj` from
+outside and keeps its load.  −5,436 an iteration at `-mt9000` (835,065 →
+829,629), 0 at `-mt800`.  The branch-sense half of the row (`diff; eqc
+0; cj` → `diff; cj`) moves the `eqc 0` to the null test instead: no
+instruction fewer, not done.  `test_hoist_load.c`: the hoisted search,
+and a store, a call, a volatile and a loop with no earlier read, none of
+which hoists.
+
 ## Step 3: instructions the compiler would use
 
 Measured on the final `-mt9000` image: how many instructions per iteration

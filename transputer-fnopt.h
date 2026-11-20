@@ -7914,7 +7914,7 @@ static int tp_hoist_w;          /* words tp_hoist put on top of the locals */
 
 /* Does c compute without side effects or traps?  *rd and *dl get its
  * stack effect. */
-static int tph_pure(const struct tp_relax_insn *c, int *rd, int *dl)
+static int tph_pure(const struct tp_relax_insn *c, int *rd, int *dl, int mem)
 {
     if (c->pinned || c->synth || c->tab || c->icall)
         return 0;
@@ -7923,8 +7923,12 @@ static int tph_pure(const struct tp_relax_insn *c, int *rd, int *dl)
         *rd = 0; *dl = 1; return 1;
     case TP_ENC_LDNLP:
         *rd = 1; *dl = 0; return 1;
+    case TP_ENC_LDNL: case TP_ENC_ADC:      /* only with a twin (tph_twin) */
+        *rd = 1; *dl = 0; return mem;
     case TP_ENC_OPR:
         switch (c->operand) {
+        case TP_OPR_LB: case TP_OPR_LBX: case TP_OPR_LS: case TP_OPR_LSX:
+            *rd = 1; *dl = 0; return mem;
         case TP_OPR_PROD: case TP_OPR_BSUB: case TP_OPR_WSUB:
         case TP_OPR_WSUBDB: case TP_OPR_SSUB: case TP_OPR_SUM:
         case TP_OPR_DIFF: case TP_OPR_AND: case TP_OPR_OR: case TP_OPR_XOR:
@@ -7957,6 +7961,73 @@ static int tph_may_store(const struct tp_relax_insn *c)
 struct tph_seq {
     int start, end, word;       /* records [start, end], its new word */
 };
+
+/* A run that reads memory, `ldl b; [adc k;] ldnl m | lb | lbx | ls | lsx`,
+ * may be hoisted only where its word has been read already: the hoisted
+ * read happens even when the loop runs no times, and a read the program
+ * never made could trap under T9000 memory protection.  So the straight
+ * code before `at` (no label on the way back, padding included, and no
+ * write of b) must read the same word through b.  Its adc ran on the same
+ * value then too, so it cannot trap here either.  core_list_find's
+ * `info->idx`, tested just before the loop that compares with it.
+ * TCC_TRANSPUTER_HOIST_LOAD=0 turns this off. */
+static int tph_load_form(const struct tp_relax_insn *ins, int lo, int hi,
+                         int *b, int *word)
+{
+    int q = lo, off = 0, o;
+    while (q <= hi && ins[q].opcode == -1) q++;
+    if (q > hi || ins[q].opcode != TP_ENC_LDL)
+        return 0;
+    *b = ins[q].operand;
+    for (q++; q <= hi && ins[q].opcode == -1; q++)
+        ;
+    if (q <= hi && ins[q].opcode == TP_ENC_ADC) {
+        off = ins[q].operand;
+        for (q++; q <= hi && ins[q].opcode == -1; q++)
+            ;
+    }
+    if (q > hi)
+        return 0;
+    o = ins[q].opcode;
+    if (o == TP_ENC_LDNL)
+        off += 4 * ins[q].operand;
+    else if (!(o == TP_ENC_OPR && (ins[q].operand == TP_OPR_LB ||
+                                   ins[q].operand == TP_OPR_LBX ||
+                                   ins[q].operand == TP_OPR_LS ||
+                                   ins[q].operand == TP_OPR_LSX)))
+        return 0;
+    for (q++; q <= hi && ins[q].opcode == -1; q++)
+        ;
+    if (q <= hi)
+        return 0;               /* more after the load: not this form */
+    *word = off >= 0 ? off / 4 : -((3 - off) / 4);
+    return 1;
+}
+
+static int tph_twin(const struct tp_relax_insn *ins, const char *head,
+                    int s, int e, int at)
+{
+    int b, w, q, steps = 0;
+    if (!tph_load_form(ins, s, e, &b, &w))
+        return 0;
+    for (q = at - 1; q >= 0 && steps < 80; q--, steps++) {
+        int o = ins[q].opcode, k, b2, w2;
+        if (head[q + 1] && q + 1 < at)
+            return 0;           /* another way in after q */
+        if ((o == TP_ENC_STL || o == TP_ENC_LDLP) && ins[q].operand == b)
+            return 0;
+        if (o == TP_ENC_LDL && ins[q].operand == b) {
+            /* the load q starts, up to three records on */
+            for (k = q; k < at && k <= q + 6; k++)
+                if (k > q && head[k])
+                    break;
+                else if (tph_load_form(ins, q, k, &b2, &w2) && b2 == b &&
+                         w2 == w)
+                    return 1;
+        }
+    }
+    return 0;
+}
 
 /* Are runs a and b the same instructions? */
 static int tph_same(const struct tp_relax_insn *ins, const struct tph_seq *a,
@@ -8045,7 +8116,7 @@ static void tph_copies(struct tp_relax *r, const struct tph_seq *seq,
 
 static void tp_hoist(struct tp_relax *r, int top)
 {
-    static int off = -1, stats = -1;
+    static int off = -1, stats = -1, load_off = -1;
     struct tp_relax_insn *ins = r->ins, *out;
     const int n = r->n;
     const int F = func_frame_words;
@@ -8154,7 +8225,9 @@ static void tp_hoist(struct tp_relax *r, int top)
         }
         /* the runs */
         for (k = h; k <= b && nseq < TPH_NSEQ; ) {
-            int e, depth = 0, best = -1, cnt = 0, rd, dl;
+            int e, depth = 0, best = -1, cnt = 0, rd, dl, mem = 0;
+            int memok = !ptrstore && !hascall && !func_has_volatile &&
+                        !tpk_off(TPK_TCC_TRANSPUTER_HOIST_LOAD, &load_off, 1);
             if (ins[k].opcode != TP_ENC_LDL && ins[k].opcode != TP_ENC_LDC &&
                 ins[k].opcode != TP_ENC_LDLP) {
                 k++;
@@ -8165,8 +8238,14 @@ static void tp_hoist(struct tp_relax *r, int top)
                     break;
                 if (ins[e].opcode == -1 && !ins[e].pinned)
                     continue;
-                if (!tph_pure(&ins[e], &rd, &dl) || rd > depth)
+                if (!tph_pure(&ins[e], &rd, &dl, memok) || rd > depth)
                     break;
+                if (ins[e].opcode == TP_ENC_LDNL || ins[e].opcode == TP_ENC_ADC ||
+                    ins[e].opcode == TP_ENC_OPR) {
+                    int r2, d2;
+                    if (!tph_pure(&ins[e], &r2, &d2, 0))
+                        mem = 1;
+                }
                 if (ins[e].opcode == TP_ENC_LDL) {
                     int x = ins[e].operand;
                     if (x < 0 || x >= F + 63 || wr[x] ||
@@ -8181,7 +8260,10 @@ static void tp_hoist(struct tp_relax *r, int top)
                 cnt++;
                 if (depth > 3)
                     break;
-                if (depth == 1 && cnt >= 3)
+                /* a run with a load needs its twin; two records will do,
+                 * a load being dearer than the word that replaces it */
+                if (depth == 1 && (cnt >= 3 || (mem && cnt >= 2)) &&
+                    (!mem || tph_twin(ins, head, k, e, at)))
                     best = e;
             }
             if (best < 0) {
