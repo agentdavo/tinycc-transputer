@@ -954,6 +954,11 @@ the occam compiler does, and what new codegen should be held to:
   at -mt9000).  `TCC_TRANSPUTER_SWITCH_THREAD=0`; `test_switch_thread.c`.
 - The scheduler runs once more after tp_hoist and tp_strength_reduce,
   which leave round trips of their own (`TCC_TRANSPUTER_RESCHED=0`).
+- Scheduler S16 `stl t; ldl t; stl p; ldl t` → `stl p; ldl p` (`x =
+  *++p`), `ldc -1; xor` → `not`, and `R; cj L; R` → `R; dup; cj L` (a
+  tested value reused on the fall-through) - Dhrystone's word strcmp
+  (`TCC_TRANSPUTER_COPY_PARK`, `_NOT_FOLD`, `_CJ_REUSE`;
+  `test_strcmp_rules.c`).
 - On the T9000 a `bsub` straight after a load is emitted as `sum` (same
   A + B): the grouper's address stage may not follow a load, the ALU may
   (`TCC_TRANSPUTER_SUM_AFTER_LOAD=0`; `coremark/transputer/cm-groups.py`

@@ -1612,6 +1612,49 @@ static int tps_s12(struct tps *s, int i, int *next)
     return 0;
 }
 
+static int tpk_off(int knob, int *cache, int dflt_on);
+
+/* S16: STL t ; LDL t ; STL p ; LDL t  ->  STL p ; LDL p   (t dead after)
+ * A value parked in t, copied into p and read again: read it from p.
+ * `x = *++aw` compiles to `ldl aw; ldnlp 1; stl t; ldl t; stl aw; ldl t;
+ * ldnl 0`, the pre-increment's value parked on its way to both the
+ * pointer and the load (MODERNISE's strcmp: 7 instructions a bump, now 5).
+ * TCC_TRANSPUTER_COPY_PARK=0 turns it off. */
+static int tps_s16(struct tps *s, int i, int a, int i1, int *next)
+{
+    static int off = -1;
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int i2, i3, p;
+
+    if (tpk_off(TPK_TCC_TRANSPUTER_COPY_PARK, &off, 1))
+        return 0;
+    if (ins[i1].opcode != TP_ENC_LDL || ins[i1].operand != a)
+        return 0;
+    i2 = tps_next(ins, an, n, i1);
+    i3 = i2 >= 0 ? tps_next(ins, an, n, i2) : -1;
+    if (i3 < 0 || ins[i2].opcode != TP_ENC_STL || ins[i3].opcode != TP_ENC_LDL ||
+        ins[i3].operand != a || (p = ins[i2].operand) == a || p < 0 ||
+        ins[i2].pinned || ins[i3].pinned ||
+        (an[i3].liveout & (1u << a)) || !tps_free(ins, an, i, i3))
+        return 0;
+    /* reading p back must give what the store wrote: not a volatile */
+    if (p >= s->nreg && func_has_volatile)
+        return 0;
+    an[i].dead = an[i1].dead = 1;
+    ins[i3].operand = p;
+    ins[i3].dup_load = 0;
+    if (tp_encode_len(TP_ENC_LDL, p) > ins[i3].new_len)
+        ins[i3].new_len = tp_encode_len(TP_ENC_LDL, p);
+    an[i3].use = p < s->nslot ? p : -1;
+    if (p < 32)
+        an[i2].liveout |= 1u << p;
+    s->removed += 2;
+    *next = i3;
+    return 1;
+}
+
 static int tps_s6_s10(struct tps *s, int i, int *next)
 {
     struct tp_relax_insn *ins = s->ins;
@@ -1714,6 +1757,7 @@ static int tps_round(struct tps *s)
             if (i1 < 0)
                 continue;
             if (tps_s1(s, i, a, i1, &i) || tps_s2_s3_s7(s, i, a, i1, &i) ||
+                tps_s16(s, i, a, i1, &i) ||
                 tps_s11(s, i, a, i1) || tps_s4_s5(s, i, a, i1, &i))
                 changed = 1;
         } else if (tps_s12(s, i, &i) || tps_s6_s10(s, i, &i)) {
@@ -2602,6 +2646,100 @@ static int tps_postinc_sink(struct tps *s)
     return hits;
 }
 
+/* R ; CJ L ; R  ->  R ; DUP ; CJ L   (TCC_TRANSPUTER_CJ_REUSE)
+ * The value a cj tests is wanted again on its fall-through, computed by
+ * the same run R: `while (*a && *a == *b)` is `ldl a; lbx; cj; ldl a; lbx;
+ * ...`.  A dup before the cj leaves the copy there when it falls through;
+ * when it jumps, L (a label: nothing on the stack is relied on there)
+ * gets one word more.  R pushes one value from nothing below it, stores
+ * nothing, and reads no volatile; the stack must have room for the dup.
+ * The records are reused in place: the cj moves one record on. */
+static void tps_cj_reuse(struct tps *s)
+{
+    static int off = -1;
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int c;
+
+    if (tpk_off(TPK_TCC_TRANSPUTER_CJ_REUSE, &off, 1) || tp_t414() ||
+        func_uses_inline_asm || func_has_volatile)
+        return;
+    for (c = 0; c < n; c++) {
+        int r[6], q[6], nr = 0, k, p, h, ok = 1;
+        if (an[c].dead || ins[c].opcode != TP_ENC_CJ || ins[c].pinned ||
+            an[c].head || an[c].depth < 1 || an[c].depth > 2)
+            continue;
+        /* R: the run before c that pushes the tested value */
+        for (p = tps_prev(ins, an, c), h = 0; p >= 0 && nr < 5;
+             p = tps_prev(ins, an, p)) {
+            int k2, d = 0;
+            r[nr++] = p;
+            /* does r[nr-1..0] (in order) push exactly one, reading nothing below? */
+            for (k2 = nr - 1; k2 >= 0; k2--) {
+                int x = r[k2];
+                if (!tps_movable(&ins[x], &an[x]) || an[x].reads > d) {
+                    d = -9;
+                    break;
+                }
+                d += an[x].delta;
+            }
+            if (d == 1) {
+                h = 1;
+                break;
+            }
+            if (an[p].head)
+                break;
+        }
+        if (!h)
+            continue;
+        /* R' after c: the same instructions, nothing landing in between */
+        for (k = 0, p = c; k < nr; k++) {
+            p = tps_next(ins, an, n, p);
+            if (p < 0 || ins[p].pinned ||
+                ins[p].opcode != ins[r[nr - 1 - k]].opcode ||
+                ins[p].operand != ins[r[nr - 1 - k]].operand) {
+                ok = 0;
+                break;
+            }
+            q[k] = p;
+        }
+        if (!ok || !tps_free(ins, an, c, q[nr - 1]) ||
+            !tps_free(ins, an, r[nr - 1], c) || nr < 2)
+            continue;
+        /* c's record becomes the dup, the cj moves to q[0], the rest goes */
+        {
+            struct tp_relax_insn cj = ins[c];
+            struct tps_ann ca = an[c];
+            ins[c].opcode = TP_ENC_OPR;
+            ins[c].operand = TP_OPR_DUP;
+            ins[c].is_branch = 0;
+            ins[c].new_len = tp_encode_len(TP_ENC_OPR, TP_OPR_DUP);
+            an[c].known = tps_effect(TP_ENC_OPR, TP_OPR_DUP, &an[c].delta,
+                                     &an[c].reads);
+            an[c].use = an[c].def = -1;
+            ins[q[0]].opcode = cj.opcode;
+            ins[q[0]].operand = cj.operand;
+            ins[q[0]].is_branch = cj.is_branch;
+            ins[q[0]].target_old = cj.target_old;
+            ins[q[0]].ext = cj.ext;
+            ins[q[0]].dup_load = 0;
+            ins[q[0]].new_len = cj.new_len;
+            an[q[0]].known = ca.known;
+            an[q[0]].delta = ca.delta;
+            an[q[0]].reads = ca.reads;
+            an[q[0]].use = an[q[0]].def = -1;
+            an[q[0]].succ1 = q[0] + 1 < n ? q[0] + 1 : -1;
+            an[q[0]].succ2 = ca.succ2;
+            an[q[0]].depth = ca.depth + 1;
+            for (k = 1; k < nr; k++)
+                an[q[k]].dead = 1;
+            s->removed += nr - 1;
+        }
+        c = q[nr - 1];
+    }
+}
+
 static void tps_dup_stl(struct tps *s)
 {
     static int off = -1;
@@ -3488,6 +3626,7 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
     tps_rev_commutative(&s);
     tps_rev_rev(&s);
     tps_shift_mask(&s);
+    tps_cj_reuse(&s);
     tps_dup_stl(&s);
     tps_mark_dup_loads(&s);
 
@@ -5204,6 +5343,7 @@ static void tpn_put(struct tp_relax_insn *p, int opc, int opd)
  * the second CoreMark round (compare folds, `eqc 1`, range tests, masks). */
 static int tpn_peep_on = -1;
 static int tpn_ext_on = 1;
+static int tpn_not_on = 1;
 static int tpn_stats[4];
 static int tpn_in_late;     /* tpn_late's runs: shapes after the scheduler */
 
@@ -5279,6 +5419,8 @@ static int tpn_peephole(struct tp_relax *r, const struct tpn_val *slotr,
         tpn_peep_on = !(e && *e == '0');
         e = tp_knob(TPK_TCC_TRANSPUTER_EXT_DROP);
         tpn_ext_on = !(e && *e == '0');
+        e = tp_knob(TPK_TCC_TRANSPUTER_NOT_FOLD);
+        tpn_not_on = !(e && *e == '0');
     }
     for (i = 0; i < n; i++) {
         struct tpn_val va, vb;
@@ -5526,6 +5668,22 @@ static int tpn_peephole(struct tp_relax *r, const struct tpn_val *slotr,
     old_rules:
         if (head[i])
             continue;
+        /* ldc -1; xor  ->  not  (~x, as HAS_ZERO's `& ~w` compiles) */
+        if (ins[i].opcode == TP_ENC_LDC && ins[i].operand == -1 &&
+            !ins[i].pinned && tpn_not_on) {
+            j = tpn_next(ins, n, i);
+            if (j < n && tpn_is(&ins[j], TP_ENC_OPR, TP_OPR_XOR) &&
+                !ins[j].pinned && !head[j]) {
+                for (k = i + 1; k < j; k++)
+                    if (head[k])
+                        break;
+                if (k == j) {
+                    tpn_put(&ins[i], -1, 0);
+                    tpn_put(&ins[j], TP_ENC_OPR, TP_OPR_NOT);
+                    continue;
+                }
+            }
+        }
         if (ins[i].opcode == TP_ENC_LDC && ins[i].operand > 0 &&
             !(ins[i].operand & (ins[i].operand + 1))) {
             j = tpn_next(ins, n, i);

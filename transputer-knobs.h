@@ -53,6 +53,9 @@
     K(TCC_TRANSPUTER_PARK_UNARY, "0...: a pushed value is parked while the one under it is worked on") \
     K(TCC_TRANSPUTER_POSTINC_SINK, "0...: *d++ = e parks the old d while e is computed") \
     K(TCC_TRANSPUTER_DUP_STL, "1: stl x; ldl x with x live after becomes dup; stl x (same count)") \
+    K(TCC_TRANSPUTER_COPY_PARK, "0...: stl t; ldl t; stl p; ldl t keeps reading t") \
+    K(TCC_TRANSPUTER_NOT_FOLD, "0...: ldc -1; xor stays as it is") \
+    K(TCC_TRANSPUTER_CJ_REUSE, "0...: a value a cj tested is computed again on its fall-through") \
     K(TCC_TRANSPUTER_SUM_AFTER_LOAD, "0...: a bsub straight after a load stays bsub (T9000 grouping)") \
     K(TCC_TRANSPUTER_ACCUM, "1/0: a loop's *p op= v kept in a frame word, overriding -m[no-]strict-aliasing") \
     K(TCC_TRANSPUTER_RESCHED, "0...: no scheduling again after the hoisting and strength reduction") \

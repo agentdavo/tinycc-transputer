@@ -828,6 +828,29 @@ code), `bsub -> ldl` 4.2%, `gt -> cj [prefix]` 2.5%, `adc -> lsx` 1.2%.
   letting the slot remap move tp_hoist's words, which it now leaves
   alone; open.
 
+## Dhrystone's strcmp (20 November 2026)
+
+MODERNISE's F2 word-at-a-time strcmp (`test/modern/dhry/strword.c` in
+the tp repo) was 27% of a Dhrystone; rewriting the C made it worse, so
+the lever is the code.  Three general rules, measured on `build_f2.sh`
+(LOOPS=20000) on main b2bc68e1 + the CoreMark work: 754 → 737
+instructions a Dhrystone at `-mt9000`, 810 → 793 at `-mt805`.
+
+- **S16** (`TCC_TRANSPUTER_COPY_PARK`): `stl t; ldl t; stl p; ldl t` →
+  `stl p; ldl p` with t dead after.  `x = *++aw` parked the new pointer
+  in t on its way to aw and the load: 7 instructions a bump, now 5.
+- **not** (`TCC_TRANSPUTER_NOT_FOLD`): `ldc -1; xor` → `not`, HAS_ZERO's
+  `~w`.
+- **cj reuse** (`TCC_TRANSPUTER_CJ_REUSE`, `tps_cj_reuse`): `R; cj L; R`
+  → `R; dup; cj L` when the run R pushes one value from nothing, stores
+  nothing and the function names no volatile: the byte tail's `*a` tested
+  and then compared.  The jump to L leaves a spare word; L is a label,
+  where nothing on the stack is relied on.  The cj moves one record on.
+
+CoreMark: −1,114 an iteration (800,893 → 799,779 at `-mt9000`).
+`test_strcmp_rules.c`: word strcmp and strlen, byte loops and `~x` over
+every length and alignment against volatile byte references.
+
 ## Step 3: instructions the compiler would use
 
 Measured on the final `-mt9000` image: how many instructions per iteration
