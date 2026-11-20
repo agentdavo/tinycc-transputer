@@ -80,6 +80,10 @@ ST_FUNC int tp_select_option(TCCState *s1, const char *name)
         s1->tp_jump_tables = on;
         return 1;
     }
+    if (!strcmp(name + (on ? 0 : 3), "crc-idiom")) {
+        s1->tp_crc_idiom = on;
+        return 1;
+    }
     return 0;
 }
 

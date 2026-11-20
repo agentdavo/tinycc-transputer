@@ -53,6 +53,7 @@
     K(TCC_TRANSPUTER_PARK_UNARY, "0...: a pushed value is parked while the one under it is worked on") \
     K(TCC_TRANSPUTER_POSTINC_SINK, "0...: *d++ = e parks the old d while e is computed") \
     K(TCC_TRANSPUTER_DUP_STL, "1: stl x; ldl x with x live after becomes dup; stl x (same count)") \
+    K(TCC_TRANSPUTER_CRC_IDIOM, "1/0: bit-serial reflected CRC loops become crcbyte, overriding -m[no-]crc-idiom") \
     K(TCC_TRANSPUTER_EXT_DROP, "0...: keep sign extensions a byte store or zero test does not need") \
     K(TCC_TRANSPUTER_FLAGS, "0...: no threading of a flag set just before it is tested") \
     K(TCC_TRANSPUTER_THREAD, "0...: no threading of jumps to jumps") \

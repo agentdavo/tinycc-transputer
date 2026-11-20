@@ -292,6 +292,10 @@ static int tps_effect(int opc, int opd, int *delta, int *reads)
             *reads = 2; *delta = -1; return 1;
         case TP_OPR_SB: case TP_OPR_SS:
             *reads = 2; *delta = -2; return 1;
+        case TP_OPR_BITREVWORD:
+            *reads = 1; *delta = 0;  return 1;
+        case TP_OPR_CRCBYTE:                  /* A the result, B old C */
+            *reads = 3; *delta = -2; return 1;
         }
         return 0;
     }
@@ -2635,6 +2639,778 @@ static void tps_dup_stl(struct tps *s)
     }
 }
 
+/* ---- bit-serial reflected CRC loops -> crcbyte (-mcrc-idiom) ----
+ *
+ * A loop that feeds 8 bits into a reflected CRC one at a time,
+ *
+ *     for (i = 0; i < 8; i++) {
+ *         if ((data ^ crc) & 1) crc = (crc >> 1) ^ P; else crc >>= 1;
+ *         data >>= 1;
+ *     }
+ *
+ * in any of its spellings, is one crcbyte (ISM: B the checksum, A the data
+ * in its top byte, C the generator; result in A).  Reflected, the bits go
+ * in the other way round, so
+ *
+ *     crc' = bitrevword(crcbyte(A = 0, B = bitrevword(crc ^ data), C = gen))
+ *
+ * with gen the W-bit polynomial reflected back, at the top of the word
+ * (P = #A001, W = 16: gen = #80050000).
+ *
+ * Recognised by what the code computes, not how it is written: a straight
+ * region [S, E] ending in the loop's back edge is executed symbolically.
+ * Every value is 32 bits, each an affine function over GF(2) of the input
+ * bits (the words the region reads before writing), so xor, shifts by
+ * constants, and/or with constants, sign extensions and the 0/1 tests stay
+ * exact; the loop counter is a constant all the way.  A branch on a
+ * one-bit condition runs both ways, and the two paths must meet again with
+ * every value differing by a constant: then the merged value is affine too
+ * (v0 ^ f.(v0 ^ v1)).  Anything else - memory, calls, a test of two
+ * variables, an add of a variable - and the region is not one.
+ *
+ * At the exit exactly one word written inside may be live, and its value
+ * must be T(XOR of the inputs, each masked to its low w bits), T being the
+ * 8-step zero-input CRC of some W-bit reflected P (8 <= W <= 32): P is
+ * read off the result (the response to the inputs' bit 7), W is its top
+ * bit, and every input bit's response is compared with T's.  That is the
+ * whole function, so the replacement is exact for every input, not just a
+ * tested few.  Off unless -mcrc-idiom (or TCC_TRANSPUTER_CRC_IDIOM=1);
+ * not on the T414, which has neither instruction. */
+#define TCRC_NW    4                /* 64-bit words of input-bit mask */
+#define TCRC_MAXIN (TCRC_NW * 2)    /* input words, 32 bits each */
+#define TCRC_SLOTS 64
+#define TCRC_STATES 4
+#define TCRC_STEPS 6000
+
+struct tcrc_bit { unsigned long long m[TCRC_NW]; unsigned char c; };
+struct tcrc_val { struct tcrc_bit b[32]; };
+struct tcrc_st {
+    int pc, cond, cp;               /* cond: cf == cp on this path */
+    struct tcrc_bit cf;
+    int sp;                         /* stk[0] is A */
+    struct tcrc_val stk[3];
+    unsigned long long wr;
+    struct tcrc_val slot[TCRC_SLOTS];
+};
+struct tcrc {
+    struct tps *s;
+    int inslot[TCRC_MAXIN], nin;
+    struct tcrc_st *st[TCRC_STATES];
+    int nst;
+};
+
+static int tcrc_bit_const(const struct tcrc_bit *b)
+{
+    int k;
+    for (k = 0; k < TCRC_NW; k++)
+        if (b->m[k])
+            return 0;
+    return 1;
+}
+static int tcrc_bit_eq(const struct tcrc_bit *a, const struct tcrc_bit *b)
+{
+    return !memcmp(a->m, b->m, sizeof a->m) && a->c == b->c;
+}
+static int tcrc_mask_eq(const struct tcrc_bit *a, const struct tcrc_bit *b)
+{
+    return !memcmp(a->m, b->m, sizeof a->m);
+}
+static void tcrc_bit_xor(struct tcrc_bit *d, const struct tcrc_bit *a)
+{
+    int k;
+    for (k = 0; k < TCRC_NW; k++)
+        d->m[k] ^= a->m[k];
+    d->c ^= a->c;
+}
+static void tcrc_const(struct tcrc_val *v, unsigned int k)
+{
+    int i;
+    memset(v, 0, sizeof *v);
+    for (i = 0; i < 32; i++)
+        v->b[i].c = (k >> i) & 1;
+}
+static int tcrc_isconst(const struct tcrc_val *v, unsigned int *k)
+{
+    int i;
+    unsigned int r = 0;
+    for (i = 0; i < 32; i++) {
+        if (!tcrc_bit_const(&v->b[i]))
+            return 0;
+        r |= (unsigned int)v->b[i].c << i;
+    }
+    *k = r;
+    return 1;
+}
+/* bits 1..31 the constant 0: a truth value, bit 0 its formula */
+static int tcrc_isbit(const struct tcrc_val *v)
+{
+    int i;
+    for (i = 1; i < 32; i++)
+        if (!tcrc_bit_const(&v->b[i]) || v->b[i].c)
+            return 0;
+    return 1;
+}
+
+static int tcrc_read(struct tcrc *c, struct tcrc_st *t, int s,
+                     struct tcrc_val *v)
+{
+    int k, i;
+    if (s < 0 || s >= TCRC_SLOTS)
+        return 0;
+    if ((t->wr >> s) & 1) {
+        *v = t->slot[s];
+        return 1;
+    }
+    for (k = 0; k < c->nin; k++)
+        if (c->inslot[k] == s)
+            break;
+    if (k == c->nin) {
+        if (c->nin == TCRC_MAXIN)
+            return 0;
+        c->inslot[c->nin++] = s;
+    }
+    memset(v, 0, sizeof *v);
+    for (i = 0; i < 32; i++) {
+        int x = k * 32 + i;
+        v->b[i].m[x >> 6] = 1ULL << (x & 63);
+    }
+    return 1;
+}
+
+static int tcrc_push(struct tcrc_st *t, const struct tcrc_val *v)
+{
+    t->stk[2] = t->stk[1];
+    t->stk[1] = t->stk[0];
+    t->stk[0] = *v;
+    if (t->sp < 3)
+        t->sp++;
+    return 1;
+}
+static int tcrc_pop(struct tcrc_st *t, struct tcrc_val *v)
+{
+    if (t->sp <= 0)
+        return 0;
+    *v = t->stk[0];
+    t->stk[0] = t->stk[1];
+    t->stk[1] = t->stk[2];
+    t->sp--;
+    return 1;
+}
+
+/* One instruction, not a CJ; 0: the region is not a CRC loop */
+static int tcrc_step(struct tcrc *c, struct tcrc_st *t)
+{
+    struct tps *s = c->s;
+    struct tp_relax_insn *in = &s->ins[t->pc];
+    struct tcrc_val a, b, r;
+    unsigned int ka, kb;
+    int i, opc = in->opcode, opd = in->operand;
+
+    switch (opc) {
+    case -1:
+        t->pc++;
+        return 1;
+    case TP_ENC_LDC:
+        tcrc_const(&r, (unsigned int)opd);
+        tcrc_push(t, &r);
+        break;
+    case TP_ENC_LDL:
+        if (!tcrc_read(c, t, opd, &r))
+            return 0;
+        tcrc_push(t, &r);
+        break;
+    case TP_ENC_STL:
+        if (opd < 0 || opd >= s->nslot || opd >= TCRC_SLOTS ||
+            ((s->escaped_slots >> opd) & 1) || !tcrc_pop(t, &a))
+            return 0;
+        t->slot[opd] = a;
+        t->wr |= 1ULL << opd;
+        break;
+    case TP_ENC_LDLP: {
+        /* `ldlp x; [adc k;] lb|lbx|ls|lsx`: part of word x (little
+         * endian), the narrow read of a local or parameter */
+        int q = t->pc + 1, off = 0, bits, sx, from;
+        while (q < s->n && s->ins[q].opcode == -1)
+            q++;
+        if (q < s->n && s->ins[q].opcode == TP_ENC_ADC &&
+            !s->ins[q].pinned) {
+            off = s->ins[q].operand;
+            for (q++; q < s->n && s->ins[q].opcode == -1; q++)
+                ;
+        }
+        if (q >= s->n || s->ins[q].opcode != TP_ENC_OPR || s->ins[q].pinned ||
+            s->an[q].head)
+            return 0;
+        switch (s->ins[q].operand) {
+        case TP_OPR_LB:  bits = 8;  sx = 0; break;
+        case TP_OPR_LBX: bits = 8;  sx = 1; break;
+        case TP_OPR_LS:  bits = 16; sx = 0; break;
+        case TP_OPR_LSX: bits = 16; sx = 1; break;
+        default: return 0;
+        }
+        if (off < 0 || off + bits / 8 > 4 || (bits == 16 && (off & 1)))
+            return 0;
+        for (i = t->pc + 1; i <= q; i++)
+            if (s->an[i].head)
+                return 0;
+        if (!tcrc_read(c, t, opd, &a))
+            return 0;
+        memset(&r, 0, sizeof r);
+        from = off * 8;
+        for (i = 0; i < 32; i++) {
+            if (i < bits)
+                r.b[i] = a.b[from + i];
+            else if (sx)
+                r.b[i] = a.b[from + bits - 1];
+        }
+        tcrc_push(t, &r);
+        t->pc = q + 1;
+        return 1;
+    }
+    case TP_ENC_ADC:
+        if (!tcrc_pop(t, &a) || !tcrc_isconst(&a, &ka))
+            return 0;
+        tcrc_const(&r, ka + (unsigned int)opd);
+        tcrc_push(t, &r);
+        break;
+    case TP_ENC_EQC:
+        if (!tcrc_pop(t, &a))
+            return 0;
+        if (tcrc_isconst(&a, &ka)) {
+            tcrc_const(&r, ka == (unsigned int)opd);
+        } else if (tcrc_isbit(&a) && (opd == 0 || opd == 1)) {
+            r = a;
+            r.b[0].c ^= opd == 0;
+        } else {
+            return 0;
+        }
+        tcrc_push(t, &r);
+        break;
+    case TP_ENC_J:
+        if (s->an[t->pc].succ1 < 0)
+            return 0;
+        t->pc = s->an[t->pc].succ1;
+        return 1;
+    case TP_ENC_OPR:
+        switch (opd) {
+        case TP_OPR_DUP:
+            if (t->sp < 1)
+                return 0;
+            a = t->stk[0];
+            tcrc_push(t, &a);
+            break;
+        case TP_OPR_REV:
+            if (t->sp < 2)
+                return 0;
+            a = t->stk[0];
+            t->stk[0] = t->stk[1];
+            t->stk[1] = a;
+            break;
+        case TP_OPR_MINT:
+            tcrc_const(&r, 0x80000000u);
+            tcrc_push(t, &r);
+            break;
+        case TP_OPR_NOT:
+            if (!tcrc_pop(t, &a))
+                return 0;
+            for (i = 0; i < 32; i++)
+                a.b[i].c ^= 1;
+            tcrc_push(t, &a);
+            break;
+        case TP_OPR_LDIFF: {    /* A = B - A - C, B = the borrow */
+            struct tcrc_val cc;
+            unsigned int kc;
+            unsigned long long dd;
+            if (t->sp < 3 || !tcrc_pop(t, &a) || !tcrc_pop(t, &b) ||
+                !tcrc_pop(t, &cc) || !tcrc_isconst(&a, &ka) ||
+                !tcrc_isconst(&b, &kb) || !tcrc_isconst(&cc, &kc))
+                return 0;
+            dd = (unsigned long long)kb - ka - (kc & 1);
+            tcrc_const(&r, (unsigned int)(dd >> 63) & 1);
+            tcrc_push(t, &r);
+            tcrc_const(&r, (unsigned int)dd);
+            tcrc_push(t, &r);
+            break;
+        }
+        case TP_OPR_XBWORD: case TP_OPR_XSWORD:
+            if (!tcrc_pop(t, &a))
+                return 0;
+            for (i = opd == TP_OPR_XBWORD ? 8 : 16; i < 32; i++)
+                a.b[i] = a.b[opd == TP_OPR_XBWORD ? 7 : 15];
+            tcrc_push(t, &a);
+            break;
+        default:
+            if (!tcrc_pop(t, &a) || !tcrc_pop(t, &b))
+                return 0;
+            switch (opd) {
+            case TP_OPR_XOR:
+                r = b;
+                for (i = 0; i < 32; i++)
+                    tcrc_bit_xor(&r.b[i], &a.b[i]);
+                break;
+            case TP_OPR_AND: case TP_OPR_OR:
+                for (i = 0; i < 32; i++) {
+                    const struct tcrc_bit *x = &a.b[i], *y = &b.b[i];
+                    if (!tcrc_bit_const(x)) {
+                        const struct tcrc_bit *z = x;
+                        x = y;
+                        y = z;
+                    }
+                    if (!tcrc_bit_const(x))
+                        return 0;   /* variable & variable */
+                    if (x->c == (opd == TP_OPR_AND))
+                        r.b[i] = *y;
+                    else
+                        r.b[i] = *x;
+                }
+                break;
+            case TP_OPR_SHL: case TP_OPR_SHR:
+                if (!tcrc_isconst(&a, &ka) || ka > 31)
+                    return 0;
+                memset(&r, 0, sizeof r);
+                for (i = 0; i < 32; i++) {
+                    int f = opd == TP_OPR_SHL ? i - (int)ka : i + (int)ka;
+                    if (f >= 0 && f < 32)
+                        r.b[i] = b.b[f];
+                }
+                break;
+            case TP_OPR_XWORD:              /* B sign-extended at mask A */
+                if (!tcrc_isconst(&a, &ka) || !ka || (ka & (ka - 1)))
+                    return 0;
+                for (i = 0; ka >> (i + 1); i++)
+                    ;
+                r = b;
+                for (int j = i + 1; j < 32; j++) {
+                    if (!tcrc_bit_const(&b.b[j]) || b.b[j].c)
+                        return 0;           /* outside xword's domain */
+                    r.b[j] = b.b[i];
+                }
+                break;
+            default:
+                if (!tcrc_isconst(&a, &ka) || !tcrc_isconst(&b, &kb))
+                    return 0;
+                switch (opd) {
+                case TP_OPR_SUM: case TP_OPR_ADD: case TP_OPR_BSUB:
+                    tcrc_const(&r, kb + ka); break;
+                case TP_OPR_DIFF: case TP_OPR_SUB:
+                    tcrc_const(&r, kb - ka); break;
+                case TP_OPR_PROD: case TP_OPR_MUL:
+                    tcrc_const(&r, kb * ka); break;
+                case TP_OPR_WSUB:
+                    tcrc_const(&r, ka + 4 * kb); break;
+                case TP_OPR_GT:
+                    tcrc_const(&r, (int)kb > (int)ka); break;
+                case TP_OPR_GTU:
+                    tcrc_const(&r, kb > ka); break;
+                default:
+                    return 0;
+                }
+            }
+            tcrc_push(t, &r);
+        }
+        break;
+    default:
+        return 0;
+    }
+    t->pc++;
+    return 1;
+}
+
+/* Two paths that split on one condition meet at the same instruction */
+static int tcrc_merge(struct tcrc *c, struct tcrc_st *x, struct tcrc_st *y)
+{
+    struct tcrc_st *z = x->cp == 0 ? x : y, *o = x->cp == 0 ? y : x;
+    unsigned long long w = x->wr | y->wr;
+    int s, i, k;
+
+    if (!x->cond || !y->cond || x->cp == y->cp || !tcrc_bit_eq(&x->cf, &y->cf))
+        return 0;
+    for (s = 0; s < TCRC_SLOTS; s++) {
+        struct tcrc_val v0, v1;
+        if (!((w >> s) & 1))
+            continue;
+        if (!tcrc_read(c, z, s, &v0) || !tcrc_read(c, o, s, &v1))
+            return 0;
+        for (i = 0; i < 32; i++) {
+            if (tcrc_bit_eq(&v0.b[i], &v1.b[i]))
+                continue;
+            if (!tcrc_mask_eq(&v0.b[i], &v1.b[i]))
+                return 0;           /* the paths differ by a variable */
+            tcrc_bit_xor(&v0.b[i], &z->cf);
+        }
+        z->slot[s] = v0;
+    }
+    z->wr = w;
+    if (z->sp != o->sp)
+        return 0;
+    for (k = 0; k < z->sp; k++)
+        for (i = 0; i < 32; i++) {
+            if (tcrc_bit_eq(&z->stk[k].b[i], &o->stk[k].b[i]))
+                continue;
+            if (!tcrc_mask_eq(&z->stk[k].b[i], &o->stk[k].b[i]))
+                return 0;
+            tcrc_bit_xor(&z->stk[k].b[i], &z->cf);
+        }
+    z->cond = 0;
+    if (z != x)
+        *x = *z;
+    return 1;
+}
+
+static void tcrc_free(struct tcrc *c)
+{
+    int k;
+    for (k = 0; k < TCRC_STATES; k++)
+        if (c->st[k]) {
+            tcc_free(c->st[k]);
+            c->st[k] = NULL;
+        }
+}
+
+/* Run [S, E] from S with empty stacks; the state at X, the one way out,
+ * in *out.  0 if the region does anything outside the model. */
+/* padding between the region's end and its exit is the exit */
+#define TCRC_NORM(p) ((p) > E && (p) < X ? X : (p))
+static int tcrc_run(struct tcrc *c, int S, int E, int X, struct tcrc_st **out)
+{
+    struct tps *s = c->s;
+    int steps = 0, k;
+
+    c->nin = 0;
+    c->st[0] = tcc_mallocz(sizeof(struct tcrc_st));
+    c->st[0]->pc = S;
+    c->nst = 1;
+    for (;;) {
+        struct tcrc_st *t;
+        int m = 0, same = -1, pc, nx;
+        if (c->nst == 0 || ++steps > TCRC_STEPS)
+            return 0;
+        for (k = 1; k < c->nst; k++)
+            if (c->st[k]->pc < c->st[m]->pc)
+                m = k;
+        for (k = 0; k < c->nst; k++)
+            if (k != m && c->st[k]->pc == c->st[m]->pc) {
+                if (same >= 0)
+                    return 0;
+                same = k;
+            }
+        if (same >= 0) {
+            if (s->an[c->st[m]->pc].head || c->st[m]->pc == X)
+                c->st[m]->sp = c->st[same]->sp = 0;
+            if (!tcrc_merge(c, c->st[m], c->st[same]))
+                return 0;
+            tcc_free(c->st[same]);
+            c->st[same] = c->st[--c->nst];
+            c->st[c->nst] = NULL;
+            if (m == c->nst)
+                m = same;
+        }
+        t = c->st[m];
+        pc = t->pc;
+        if (pc == X) {
+            if (c->nst != 1 || t->cond)
+                return 0;
+            *out = t;
+            return 1;
+        }
+        if (pc < S || pc > E)
+            return 0;
+        if (s->ins[pc].pinned || s->ins[pc].tab || s->ins[pc].icall)
+            return 0;
+        if (s->an[pc].head && pc != S)
+            t->sp = 0;          /* nothing on the stack survives a label */
+        if (s->ins[pc].opcode == TP_ENC_CJ) {
+            struct tcrc_val v;
+            unsigned int kv;
+            int tg = s->an[pc].succ2;
+            if (tg < 0 || t->sp < 1)
+                return 0;
+            v = t->stk[0];
+            if (tcrc_isconst(&v, &kv)) {
+                if (kv == 0) {
+                    nx = tg;
+                } else {
+                    tcrc_pop(t, &v);
+                    nx = pc + 1;
+                }
+            } else if (!tcrc_isbit(&v)) {
+                return 0;
+            } else if (t->cond) {
+                /* the same condition again: decided on this path */
+                if (!tcrc_mask_eq(&v.b[0], &t->cf))
+                    return 0;
+                if ((v.b[0].c ^ t->cf.c ^ t->cp) == 0) {
+                    tcrc_const(&t->stk[0], 0);
+                    nx = tg;
+                } else {
+                    tcrc_pop(t, &v);
+                    nx = pc + 1;
+                }
+            } else {
+                struct tcrc_st *u;
+                if (c->nst == TCRC_STATES)
+                    return 0;
+                u = tcc_malloc(sizeof *u);
+                *u = *t;
+                c->st[c->nst++] = u;
+                t->cond = u->cond = 1;
+                t->cf = u->cf = v.b[0];
+                t->cp = 0;              /* taken: the bit is 0 */
+                tcrc_const(&t->stk[0], 0);
+                t->pc = TCRC_NORM(tg);
+                u->cp = 1;
+                tcrc_pop(u, &v);
+                u->pc = TCRC_NORM(pc + 1);
+                if (tg < pc)
+                    return 0;
+                continue;
+            }
+            if (nx < pc && (c->nst != 1 || t->cond))
+                return 0;               /* a loop round a split path */
+            t->pc = TCRC_NORM(nx);
+            continue;
+        }
+        if (!tcrc_step(c, t))
+            return 0;
+        if (t->pc < pc && (c->nst != 1 || t->cond))
+            return 0;
+        t->pc = TCRC_NORM(t->pc);
+    }
+}
+#undef TCRC_NORM
+
+/* What the region leaves on the stack at X (a loop test's borrow, say) is
+ * nobody's if the code from X reads nothing it did not push, up to a ret
+ * or a label (where the emitter assumes an empty stack). */
+static int tcrc_leftover_dead(struct tps *s, int X, int sp)
+{
+    int q, r = 0, steps = 0;
+    if (sp == 0 || s->an[X].head)
+        return 1;
+    for (q = X; q < s->n && steps < 40; q++) {
+        int o = s->ins[q].opcode;
+        if (o == -1)
+            continue;
+        steps++;
+        if (q > X && s->an[q].head)
+            return 1;
+        if (o == TP_ENC_OPR && s->ins[q].operand == TP_OPR_RET)
+            return 1;
+        if (o == TP_ENC_J || o == TP_ENC_CJ || o == TP_ENC_CALL ||
+            !s->an[q].known || s->an[q].reads > r)
+            return 0;
+        r += s->an[q].delta;
+    }
+    return 0;
+}
+
+static int tps_crc_lower(struct tps *s)
+{
+    struct tp_relax_insn *ins = s->ins;
+    struct tps_ann *an = s->an;
+    const int n = s->n;
+    int k, hits = 0;
+    static int env = -2;
+
+    if (env == -2) {
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_CRC_IDIOM);
+        env = !e || !*e ? -1 : *e != '0';
+    }
+    if (!(env >= 0 ? env : tcc_state->tp_crc_idiom) || tp_t414() ||
+        func_uses_inline_asm || func_has_volatile)
+        return 0;
+    for (k = 0; k < n; k++) {
+        int h, E = k, X, S, tries = 0, nxor = 0, nshr = 0, j;
+        if (ins[k].opcode == TP_ENC_CJ)
+            h = an[k].succ2;
+        else if (ins[k].opcode == TP_ENC_J)
+            h = an[k].succ1;
+        else
+            continue;
+        if (h < 0 || h > k || k - h > 600)
+            continue;
+        for (j = h; j <= k; j++) {
+            int o = ins[j].opcode, d = ins[j].operand;
+            if (o == TP_ENC_OPR && d == TP_OPR_XOR) nxor++;
+            if (o == TP_ENC_OPR && d == TP_OPR_SHR) nshr++;
+            if (o == TP_ENC_CALL || o == TP_ENC_LDNL ||
+                o == TP_ENC_STNL || o == TP_ENC_AJW ||
+                (o == TP_ENC_OPR && (d == TP_OPR_GCALL || d == TP_OPR_RET ||
+                                     d == TP_OPR_SB)))
+                break;
+        }
+        if (j <= k || !nxor || !nshr)
+            continue;
+        for (X = k + 1; X < n && ins[X].opcode == -1; X++)
+            ;
+        if (X >= n)
+            continue;
+        /* S: back from the loop to a point with nothing on the stack, as
+         * far as the straight code before it goes (the entry masks are
+         * what show the high bits do not matter) */
+        for (S = h; S >= 0 && tries < 24; S--) {
+            struct tcrc c;
+            struct tcrc_st *f = NULL;
+            int ok = 0, o = -1, i, q, b, nw = 0;
+            unsigned int livein, P = 0, wmask[TCRC_MAXIN], gen = 0, N = 0;
+            int W = 0, ord[TCRC_MAXIN], no = 0;
+            if (ins[S].opcode == -1)
+                continue;
+            if (ins[S].opcode == TP_ENC_CALL || ins[S].opcode == TP_ENC_AJW ||
+                ins[S].opcode == TP_ENC_STNL ||
+                ins[S].opcode == TP_ENC_LDNL || ins[S].pinned ||
+                (ins[S].opcode == TP_ENC_OPR &&
+                 (ins[S].operand == TP_OPR_GCALL ||
+                  ins[S].operand == TP_OPR_RET)))
+                break;
+            if (an[S].depth != 0)
+                continue;
+            tries++;
+            /* nothing outside may jump into the middle */
+            for (i = 0; i < n; i++) {
+                int t2;
+                if (i >= S && i <= E)
+                    continue;
+                t2 = ins[i].opcode == TP_ENC_CJ ? an[i].succ2 :
+                     ins[i].opcode == TP_ENC_J ? an[i].succ1 : -1;
+                if (ins[i].tab > 0 && ins[i].is_branch)
+                    t2 = an[i].succ1;
+                if (t2 > S && t2 <= E)
+                    break;
+            }
+            if (i < n)
+                continue;
+            memset(&c, 0, sizeof c);
+            c.s = s;
+            if (!tcrc_run(&c, S, E, X, &f))
+                f = NULL;
+            if (f && tcrc_leftover_dead(s, X, f->sp)) {
+                livein = an[X].liveout;
+                if (an[X].def >= 0)
+                    livein &= ~(1u << an[X].def);
+                if (an[X].use >= 0)
+                    livein |= 1u << an[X].use;
+                livein |= an[X].uses;
+                for (i = 0; i < 32; i++)
+                    if (((f->wr >> i) & 1) && ((livein >> i) & 1)) {
+                        o = i;
+                        nw++;
+                    }
+                ok = nw == 1;
+            }
+            if (ok) {
+                const struct tcrc_val *v = &f->slot[o];
+                unsigned int col[TCRC_MAXIN][32];
+                memset(col, 0, sizeof col);
+                for (i = 0; i < 32 && ok; i++) {
+                    if (v->b[i].c)
+                        ok = 0;
+                    for (q = 0; q < c.nin * 32; q++)
+                        if ((v->b[i].m[q >> 6] >> (q & 63)) & 1)
+                            col[q >> 5][q & 31] |= 1u << i;
+                }
+                for (q = 0; q < c.nin && ok && !P; q++)
+                    P = col[q][7];
+                if (ok && P) {
+                    for (W = 32; !((P >> (W - 1)) & 1); W--)
+                        ;
+                    if (W < 8)
+                        ok = 0;
+                } else {
+                    ok = 0;
+                }
+                for (q = 0; q < c.nin && ok; q++) {
+                    int w = 0;
+                    for (b = 0; b < W; b++) {
+                        unsigned int x = 1u << b;
+                        int st;
+                        for (st = 0; st < 8; st++)
+                            x = (x & 1) ? (x >> 1) ^ P : x >> 1;
+                        if (col[q][b] != x)
+                            break;
+                        w++;
+                    }
+                    for (b = w; b < 32; b++)
+                        if (col[q][b])
+                            ok = 0;
+                    if (w == 0)
+                        ok = 0;     /* an input with no part in it */
+                    wmask[q] = w == 32 ? 0xffffffffu : (1u << w) - 1;
+                }
+            }
+            if (ok) {
+                int oc[48], od[48], m = 0, depth = 0, gf, cnt = 0, rr;
+                for (b = 0; b < W; b++)
+                    if ((P >> b) & 1)
+                        N |= 1u << (W - 1 - b);
+                gen = W == 32 ? N : N << (32 - W);
+                /* masked inputs first: each mask needs a place */
+                for (q = 0; q < c.nin; q++)
+                    if (wmask[q] != 0xffffffffu)
+                        ord[no++] = q;
+                for (q = 0; q < c.nin; q++)
+                    if (wmask[q] == 0xffffffffu)
+                        ord[no++] = q;
+                for (q = 0; q < no; q++) {
+                    int d = (q ? 2 : 1) + (wmask[ord[q]] != 0xffffffffu);
+                    if (d > depth)
+                        depth = d;
+                }
+                gf = 1 + depth <= 3;
+                if (gf) { oc[m] = TP_ENC_LDC; od[m++] = (int)gen; }
+                for (q = 0; q < no; q++) {
+                    oc[m] = TP_ENC_LDL; od[m++] = c.inslot[ord[q]];
+                    if (wmask[ord[q]] != 0xffffffffu) {
+                        oc[m] = TP_ENC_LDC; od[m++] = (int)wmask[ord[q]];
+                        oc[m] = TP_ENC_OPR; od[m++] = TP_OPR_AND;
+                    }
+                    if (q) { oc[m] = TP_ENC_OPR; od[m++] = TP_OPR_XOR; }
+                }
+                oc[m] = TP_ENC_OPR; od[m++] = TP_OPR_BITREVWORD;
+                if (!gf) {
+                    oc[m] = TP_ENC_LDC; od[m++] = (int)gen;
+                    oc[m] = TP_ENC_OPR; od[m++] = TP_OPR_REV;
+                }
+                oc[m] = TP_ENC_LDC; od[m++] = 0;
+                oc[m] = TP_ENC_OPR; od[m++] = TP_OPR_CRCBYTE;
+                oc[m] = TP_ENC_OPR; od[m++] = TP_OPR_BITREVWORD;
+                oc[m] = TP_ENC_STL; od[m++] = o;
+                for (i = S; i <= E; i++)
+                    cnt++;
+                if (cnt < m)
+                    ok = 0;
+                for (i = S, rr = 0; ok && i <= E; i++) {
+                    if (rr < m) {
+                        ins[i].opcode = oc[rr];
+                        ins[i].operand = od[rr];
+                        ins[i].new_len = tp_encode_len(oc[rr], od[rr]);
+                        rr++;
+                    } else {
+                        ins[i].opcode = -1;
+                        ins[i].operand = 0;
+                    }
+                    ins[i].is_branch = 0;
+                    ins[i].dup_load = 0;
+                }
+                if (ok) {
+                    if (tp_knob(TPK_TP_NARROW_STATS))
+                        fprintf(stderr, "[CRC] %s: W=%d P=%#x gen=%#x "
+                                "inputs %d, %d instructions -> %d\n",
+                                funcname ? funcname : "?", W, P, gen,
+                                c.nin, E - S + 1, m);
+                    hits++;
+                }
+            }
+            tcrc_free(&c);
+            if (ok) {
+                k = E;
+                break;
+            }
+        }
+    }
+    return hits;
+}
+
 static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
                              int top)
 {
@@ -2674,6 +3450,19 @@ static int tp_sched_function(struct tp_relax_insn *ins, int n, int size,
     if (!tps_annotate(&s))
         goto done;
     tps_mark_heads(&s);
+    /* CRC loops first, on the code as emitted; a rewrite renumbers
+     * nothing but changes the flow graph, so the analyses start again */
+    tps_depths(&s);
+    if (tps_liveness(&s) && tps_crc_lower(&s)) {
+        s.removed = 0;
+        memset(s.an, 0, sizeof(*s.an) * n);
+        if (!tps_annotate(&s))
+            goto done;
+        tps_mark_heads(&s);
+    } else {
+        for (i = 0; i < n; i++)
+            s.an[i].liveout = 0;
+    }
     tps_block_copies(&s);
     tps_note_indexed_pairs(&s);
     tps_depths(&s);

@@ -669,6 +669,52 @@ CoreMark iteration's remaining `ldl`/`stl` are 32.6% and 11.7% of its
 instructions mostly because its loops carry three or more live words.
 The −31% CoreMark needs is not in round trips.
 
+## `-mcrc-idiom`: bit-serial CRC loops as `crcbyte` (20 November 2026)
+
+crcu8 (core_util.c) was 15.6% of an iteration's instructions: 584 calls
+of 225.  It feeds a byte into a reflected CRC-16 one bit at a time, which
+is what `crcbyte` does a byte at a time, the other way round:
+
+    crc' = bitrevword(crcbyte(A = 0, B = bitrevword(crc ^ data), C = gen))
+
+gen is the W-bit polynomial reflected back to normal order at the top of
+the word (P = #A001, W = 16: #80050000).  MODERNISE checked it against
+the ISM's crcbyte for all 2^24 (data, crc) pairs; it holds for W from 8
+to 32 (host check: 8, 16, 24 and 32 with six polynomials).
+
+CoreMark's rules allow toolchain changes, not source changes, and all
+files built with one set of flags, so this is a general pass behind a
+flag that the build line shows (`EXTRA_CFLAGS=-mcrc-idiom`), not keyed
+to any name.  **How it recognises a loop** (`tps_crc_lower`): a region
+from a point with an empty stack through a loop's back edge is executed
+symbolically.  Every value is 32 bits, each an affine function over
+GF(2) of the input bits (the words the region reads before writing), so
+xor, constant shifts and masks, sign extensions, the narrow reads
+`ldlp x; lb`/`ls`, and `eqc 0/1` of a truth value stay exact; the loop
+counter is a constant all the way (`adc`, `gt`, `gtu`, `ldiff` on
+constants).  A branch on a one-bit condition runs both ways and the two
+paths must meet with every value differing by a constant, which keeps
+the merge affine.  At the exit exactly one written word may be live, and
+its value must equal T(xor of the inputs, each masked to its low w
+bits), T the 8-step reflected CRC of some P: P is read off the result
+(the response to an input's bit 7) and every input bit's response is
+compared with T's.  That is the whole function of the region, so the
+replacement is exact for all inputs.  Memory, calls, a variable add or
+compare, an 8-iteration count that is not 8, nested conditions: not one.
+
+Lowered in `tests/test_crc_idiom.c` at `-mt9000`, `-mt800` and `-mt425`:
+CoreMark's form, CRC-16/ARC (byte xored in first), reflected CCITT #8408
+as a ternary, CRC-8/MAXIM, CRC-32, xor after the shift.  Not lowered
+(and still right): 7 rounds, a left shift, an arithmetic shift, a test
+of bit 1.  All checked against a reference over every data byte and 64
+checksums.  `TP_NARROW_STATS=1` prints a `[CRC]` line for each loop
+lowered; `TCC_TRANSPUTER_CRC_IDIOM=1`/`0` overrides the flag.  Not on
+the T414 (no crcbyte, no bitrevword).
+
+crcu8 becomes `ldl data; ldc 255; and; ldl crc; ldc 65535; and; xor;
+bitrevword; ldc gen; rev; ldc 0; crcbyte; bitrevword` (the masks are the
+code's own: the parameters' high bits must not reach the result).
+
 ## Step 3: instructions the compiler would use
 
 Measured on the final `-mt9000` image: how many instructions per iteration

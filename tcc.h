@@ -827,6 +827,9 @@ struct TCCState {
     /* -mjump-tables: dense switches dispatch through a table of jumps
        (gen_switch_jump_table); -mno-jump-tables, the default, compares. */
     unsigned char tp_jump_tables;
+    /* -mcrc-idiom: a bit-serial reflected CRC loop becomes crcbyte
+       (tps_crc_lower); off by default, -mno-crc-idiom. */
+    unsigned char tp_crc_idiom;
     /* TP_EF_* of what this output holds: the target of every function
        compiled or assembled here, and the e_flags of every object loaded.
        Written as the output's e_flags. */

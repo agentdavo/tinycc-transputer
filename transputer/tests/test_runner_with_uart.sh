@@ -202,6 +202,12 @@ target_from_comment() {
 # `Needs: t805ops`: the T805/T425 additions such as lddevid (not -mt800/-mt414).
 # `Needs: t800ops`: T425/T800 block-move instructions (not -mt414).
 # `Needs: softfp`: the soft-float runtime, so only -mt425/-mt414.
+# A `Flags: -mcrc-idiom ...` line: options this test is compiled with as
+# well, on every part (code-generation switches, not parts: Target is that).
+flags_from_comment() {
+    sed -n '1,24p' "$1" | sed -n 's/.*Flags:[[:space:]]*\(-[-a-z0-9= ]*[a-z0-9]\).*/\1/p' | head -n1 || true
+}
+
 needs_from_comment() {
     sed -n '1,24p' "$1" | sed -n 's/.*Needs:[[:space:]]*\([a-z0-9]*\).*/\1/p' | head -n1 || true
 }
@@ -364,6 +370,7 @@ run_one_test() {
         fi
         TEST_CFLAGS="$TP_EXTRA_CFLAGS $want"
     fi
+    TEST_CFLAGS="$TEST_CFLAGS $(flags_from_comment "$file")"
     case "$(needs_from_comment "$file"):$TP_TARGET" in
     fpu:-mt425|fpu:-mt414|t805ops:-mt800|t805ops:-mt414|t800ops:-mt414|softfp:|softfp:-mt[89]*)
         printf "SKIP %s: needs %s\n" "$name" "$(needs_from_comment "$file")"

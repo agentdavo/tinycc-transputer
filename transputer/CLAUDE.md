@@ -935,6 +935,14 @@ the occam compiler does, and what new codegen should be held to:
   `stl x; ldl x` into `dup; stl x` (same count; for RTL A/B).  CoreMark
   -mt9000 841,525 -> 835,065, Dhrystone 2.1 1436 -> 1335 (-mt9000),
   1751 -> 1579 (-mt805); `test_f1_park.c`.
+- `-mcrc-idiom` (2026-11-20, off by default; `-mno-crc-idiom`,
+  `TCC_TRANSPUTER_CRC_IDIOM=1/0`): a loop that feeds 8 bits into a
+  reflected CRC of any polynomial and width 8..32 becomes `bitrevword;
+  crcbyte; bitrevword` (`tps_crc_lower`, before the scheduler's rules).
+  Recognised by executing the region symbolically over GF(2) and
+  comparing the result with the CRC map, not by its spelling
+  (`COREMARK-INSTR.md`, "-mcrc-idiom").  Not on the T414.
+  `test_crc_idiom.c`; the local runner now takes a `Flags:` header line.
 - Jump tables are on by default since 2026-11-10 (`-mno-jump-tables` or
   `T4_SWITCH_JT=0` for the compare chain; linux-7 boots with 101 of them,
   boot cycles unchanged).  A dense switch - more than six
