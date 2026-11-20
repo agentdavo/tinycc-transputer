@@ -887,7 +887,18 @@ static void tps_mark_heads(struct tps *s)
  * stnl 0`), `t[k]++` computes t + k into one slot and copies it to another.
  * A call, a jump, a branch target, and an LDLP of x or y end the scan, and
  * so does a store through a pointer when x or y is a local whose address a
- * pointer might hold.  TP_SCHED_MASK bit 14 turns it off. */
+ * pointer might hold.  TP_SCHED_MASK bit 14 turns it off.
+ *
+ * When x is a temporary written just before the copy (`stl x; ldl x;
+ * stl y`, how TCC assigns every computed value to a variable), the reads
+ * are moved only if all of y's reads move.  Otherwise the copy stays for
+ * the reads past the block, and the reads moved here keep x live, so S1/S5
+ * can no longer fold `stl x; ldl x; stl y` to `stl y`: both slots are
+ * written and x is read where y was.  Strword's shift-merge loop paid two
+ * instructions a word for it, `w = (lo >> sh) | (hi << rsh)` being tested
+ * in the loop's block and stored in the next.  Over the local tests and
+ * c-testsuite this made 102 files shorter and 6 longer (-302 bytes at
+ * -mt9000); copying all reads or none for every x lost 372. */
 static void tps_block_copies(struct tps *s)
 {
     struct tp_relax_insn *ins = s->ins;
@@ -896,14 +907,17 @@ static void tps_block_copies(struct tps *s)
     const int nslot = s->nslot;
     const int L = func_frame_words - s->top;
     int i, k, ldlp_above = 0;
+    int *rk, *rm, nr;
 
     if (!tps_on(14) || !tps_bisect_ok())
         return;
+    rk = tcc_malloc(sizeof(int) * 2 * (n + 1));
+    rm = rk + n + 1;
     for (i = 0; i < n; i++)
         if (ins[i].opcode == TP_ENC_LDLP && ins[i].operand >= L)
             ldlp_above = 1;
     for (i = 0; i < n; i++) {
-        int x, y, off = 0, has_off = 0, st, k1, private_xy;
+        int x, y, off = 0, has_off = 0, st, k1, private_xy, j2, m, p;
 
         if (an[i].dead || ins[i].pinned || ins[i].opcode != TP_ENC_LDL)
             continue;
@@ -935,8 +949,9 @@ static void tps_block_copies(struct tps *s)
             continue;
         private_xy = s->frame_private ||
                      (y < s->nreg && (x < s->nreg || x >= nslot));
+        nr = 0;
         for (k = st + 1; k < n; k++) {
-            int opc = ins[k].opcode, opd = ins[k].operand, dl, rd, m;
+            int opc = ins[k].opcode, opd = ins[k].operand, dl, rd;
 
             if (an[k].head)
                 break;
@@ -966,8 +981,8 @@ static void tps_block_copies(struct tps *s)
             if (opc != TP_ENC_LDL || opd != y || ins[k].pinned)
                 continue;
             if (!has_off) {
-                ins[k].operand = x;
-                an[k].use = x < nslot ? x : -1;
+                rk[nr] = k;
+                rm[nr++] = -1;
                 continue;
             }
             m = tps_next(ins, an, n, k);
@@ -975,6 +990,29 @@ static void tps_block_copies(struct tps *s)
                 (ins[m].opcode != TP_ENC_LDNL && ins[m].opcode != TP_ENC_STNL &&
                  ins[m].opcode != TP_ENC_LDNLP) || !tps_free(ins, an, k, m))
                 continue;
+            rk[nr] = k;
+            rm[nr++] = m;
+        }
+        if (!nr)
+            continue;
+        p = tps_prev(ins, an, i);
+        if (p >= 0 && ins[p].opcode == TP_ENC_STL && ins[p].operand == x) {
+            int total = 0, j;
+            for (j = 0; j < n; j++)
+                if (!an[j].dead && ins[j].opcode != -1 &&
+                    (an[j].use == y || (an[j].uses & (1u << y))))
+                    total++;
+            if (total != nr)
+                continue;
+        }
+        for (j2 = 0; j2 < nr; j2++) {
+            k = rk[j2];
+            m = rm[j2];
+            if (m < 0) {
+                ins[k].operand = x;
+                an[k].use = x < nslot ? x : -1;
+                continue;
+            }
             ins[k].operand = x;
             an[k].use = x < nslot ? x : -1;
             ins[m].operand += off;
@@ -984,6 +1022,7 @@ static void tps_block_copies(struct tps *s)
                 ins[m].new_len = tp_encode_len(ins[m].opcode, ins[m].operand);
         }
     }
+    tcc_free(rk);
 }
 
 /* Record the original pair before S4 removes the address staging store.
