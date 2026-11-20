@@ -107,15 +107,16 @@ static int tp_relax_byte_read(const struct tp_relax_insn *ins, int n, int i)
 {
     int j = i + 1;
 
-    if (ins[i].opcode != TP_ENC_LDLP)
+    if (ins[i].opcode != TP_ENC_LDLP || ins[i].pinned)
         return 0;
-    while (j < n && ins[j].opcode == -1)
+    while (j < n && ins[j].opcode == -1 && !ins[j].pinned)
         j++;
-    if (j < n && ins[j].opcode == TP_ENC_ADC &&
+    if (j < n && !ins[j].pinned && ins[j].opcode == TP_ENC_ADC &&
         ins[j].operand >= 0 && ins[j].operand <= 3)
-        for (j++; j < n && ins[j].opcode == -1; j++)
+        for (j++; j < n && ins[j].opcode == -1 && !ins[j].pinned; j++)
             ;
-    return j < n && ins[j].opcode == TP_ENC_OPR && ins[j].operand == TP_OPR_LB;
+    return j < n && !ins[j].pinned &&
+           ins[j].opcode == TP_ENC_OPR && ins[j].operand == TP_OPR_LB;
 }
 
 /* Why the last function could not be relaxed, for the frame-size error. */
@@ -375,6 +376,10 @@ static int tps_word_escapes(struct tp_relax_insn *ins, int n, int x, int top)
     for (i = 0; i < n; i++) {
         if (ins[i].opcode != TP_ENC_LDLP || ins[i].operand < lo ||
             ins[i].operand > hi)
+            continue;
+        /* `ldlp s; [adc k;] lb` reads a byte of word s: the address goes
+         * nowhere (the T800-family byte form of `(x >> 8k) & 255`) */
+        if (tp_relax_byte_read(ins, n, i))
             continue;
         for (j = i + 1; j < n && ins[j].opcode == -1; j++)
             ;
@@ -7038,6 +7043,254 @@ static int tp_loop_invert(struct tp_relax *r, int top)
     return 1;
 }
 
+/* A `do ... while (c--)` loop whose counter only counts, ended by the
+ * pointer it steps instead:
+ *
+ *   B: body; ldl c; ldl c; adc -1; stl c; eqc 0; cj B
+ *
+ * where the body is one straight block that steps a word p by a constant
+ * once a time round (`ldl p; [ldl p;] adc s; stl p` or `ldl p; ldnlp k;
+ * stl p`), and nothing in the function reads c but this test.  The loop
+ * runs c + 1 times, so p ends at p + s * (c + 1).  On the way in, c's own
+ * word takes that end less one (s > 0) or plus one (s < 0), computed with
+ * the unchecked `prod`/`sum`, and the bottom becomes
+ *
+ *   ldl p; ldl c; gt; cj B          (s > 0: round again while p < end)
+ *   ldl c; ldl p; gt; cj B          (s < 0: while p > end)
+ *
+ * 4 instructions for 6 a time round.  A signed `gt` is right because p
+ * cannot pass the sign boundary: an `adc` that did would set the Error
+ * flag, and `ldnlp` steps addresses, which lie on one side of it (RAM
+ * starts at MinInt).  A count that is negative on the way in would run the
+ * original loop until c overflowed, which C leaves undefined.  Doom's
+ * column and span drawers, `dest += SCREENWIDTH` / `*dest++`.  After the
+ * scheduler, before the hoisting.  TCC_TRANSPUTER_LOOP_END=0 turns it
+ * off. */
+static int tp_loop_end(struct tp_relax *r, int top)
+{
+    static int off = -1;
+    struct tp_relax_insn *ins = r->ins;
+    const int n = r->n;
+    const int F = func_frame_words;
+    char *head, *bad, *seen;
+    int *npred, i, k, nv = 0, cap = 0, nloops = 0;
+    static int trace;
+    struct tpx_one *v = NULL;
+
+    if (off < 0) {
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_LOOP_END);
+        off = (e && *e == '0') ? 1 : 0;
+        trace = e && *e == '2';
+    }
+#define TPLE_NO(why) { if (trace) fprintf(stderr, "[LOOPEND] %s: cj %d: %s\n", \
+                       funcname ? funcname : "?", c, why); continue; }
+    /* The decoded workspace accesses do not say which word is volatile, and
+     * this rewrites a counter's and a pointer's accesses: none in a function
+     * that names anything volatile. */
+    if (off || func_uses_inline_asm || func_has_volatile || n <= 0 || F > 4096)
+        return 0;
+    for (i = 0, k = -1; i < n; i++) {
+        if (ins[i].opcode == -1)
+            continue;
+        if (k < 0)
+            k = i;
+        if (ins[i].opcode == TP_ENC_OPR && ins[i].operand == TP_OPR_GAJW)
+            return 0;
+        if (ins[i].opcode == TP_ENC_AJW && i != k && !ins[i].icall) {
+            int j = tpn_next(ins, n, i);
+            if (j >= n || ins[j].opcode != TP_ENC_OPR ||
+                ins[j].operand != TP_OPR_RET)
+                return 0;
+        }
+    }
+    head = tcc_mallocz(n + 1);
+    npred = tcc_mallocz(sizeof(int) * (n + 1));
+    bad = tcc_mallocz(F + 2);
+    for (i = 0; i < n; i++) {
+        if (ins[i].tab > 0)
+            head[i] = 1;
+        if (ins[i].is_branch && (k = tpf_target(r, i)) >= 0) {
+            head[k] = 1;
+            npred[k]++;
+        }
+        if (ins[i].opcode == TP_ENC_LDLP) {
+            int j = tpn_next(ins, n, i), lo = 0, ext, s;
+            if (tp_relax_byte_read(ins, n, i))
+                ext = 1;
+            else
+                ext = j < n ? tpg_ldlp_extent(&ins[j], &lo) : -1;
+            if (ext < 0) {
+                lo = -1;
+                ext = 3;
+            }
+            for (s = ins[i].operand + lo; s < ins[i].operand + lo + ext; s++)
+                if (s >= 0 && s < F)
+                    bad[s] = 1;
+        }
+    }
+    seen = tcc_mallocz(n + 1);
+    for (i = 0; i < n; i++) {
+        int c = i, rr[5], B, C, P = -1, step = 0, q, at, ok = 1, calls = 0;
+        int pv;
+        if (ins[c].opcode != TP_ENC_CJ || !ins[c].is_branch ||
+            ins[c].pinned || ins[c].synth || (B = tpf_target(r, c)) < 0 ||
+            B >= c)
+            continue;
+        /* the bottom: ldl C; ldl C; adc -1; stl C; eqc 0; cj B */
+        rr[4] = tpf_prev(ins, c);
+        for (k = 3; k >= 0; k--)
+            rr[k] = rr[k + 1] >= 0 ? tpf_prev(ins, rr[k + 1]) : -1;
+        if (rr[0] < B ||
+            ins[rr[0]].opcode != TP_ENC_LDL ||
+            ins[rr[1]].opcode != TP_ENC_LDL ||
+            ins[rr[2]].opcode != TP_ENC_ADC || ins[rr[2]].operand != -1 ||
+            ins[rr[3]].opcode != TP_ENC_STL ||
+            ins[rr[4]].opcode != TP_ENC_EQC || ins[rr[4]].operand != 0) {
+            if (trace && rr[0] >= B)
+                fprintf(stderr, "[LOOPEND] %s: cj %d: bottom %d/%d %d/%d %d/%d"
+                        " %d/%d %d/%d\n", funcname ? funcname : "?", c,
+                        ins[rr[0]].opcode, ins[rr[0]].operand,
+                        ins[rr[1]].opcode, ins[rr[1]].operand,
+                        ins[rr[2]].opcode, ins[rr[2]].operand,
+                        ins[rr[3]].opcode, ins[rr[3]].operand,
+                        ins[rr[4]].opcode, ins[rr[4]].operand);
+            continue;
+        }
+        C = ins[rr[0]].operand;
+        if (ins[rr[1]].operand != C || ins[rr[3]].operand != C ||
+            C < 0 || C >= F || bad[C] || tps_word_escapes(ins, n, C, top))
+            TPLE_NO("counter word")
+        /* one straight block, entered only by falling in and the cj */
+        if (npred[B] != 1 || head[c])
+            TPLE_NO("entries")
+        for (q = B; q <= c && ok; q++) {
+            int o = ins[q].opcode;
+            if (q != B && head[q])
+                ok = 0;
+            /* code an earlier pass inserted (synth) is straight code too */
+            if (ins[q].pinned || ins[q].tab || ins[q].workspace_extent)
+                ok = 0;
+            if (q != c && (ins[q].is_branch || o == TP_ENC_J ||
+                           o == TP_ENC_CJ))
+                ok = 0;
+            if (o == TP_ENC_OPR && (ins[q].operand == TP_OPR_RET ||
+                                    ins[q].operand == TP_OPR_GAJW))
+                ok = 0;
+            if (o == TP_ENC_CALL || ins[q].icall ||
+                (o == TP_ENC_OPR && ins[q].operand == TP_OPR_GCALL))
+                calls = 1;
+        }
+        pv = tpf_prev(ins, B);
+        if (!ok || pv < 0 || ins[pv].opcode == TP_ENC_J ||
+            (ins[pv].opcode == TP_ENC_OPR && ins[pv].operand == TP_OPR_RET))
+            TPLE_NO("not one straight block")
+        /* a call reads its stacked arguments without an ldl */
+        if (C < func_max_outgoing_words)
+            TPLE_NO("counter is an argument word")
+        /* in the loop c is read and written by this test alone - the end
+         * goes into c's word on the way in, so a `count = *next++` in the
+         * body would overwrite it - and after it c is not read before it
+         * is written again (before the loop it still holds the count:
+         * Doom's `if (count < 0) return;`) */
+        for (q = B; q < rr[0]; q++)
+            if (ins[q].operand == C &&
+                (ins[q].opcode == TP_ENC_LDL || ins[q].opcode == TP_ENC_STL))
+                break;
+        if (q < rr[0] || tpf_live(r, c + 1, C, seen))
+            TPLE_NO("counter used elsewhere")
+        /* tpf_live follows ldl only: no byte reads of c anywhere */
+        for (q = 0; q < n; q++)
+            if (ins[q].opcode == TP_ENC_LDLP && ins[q].operand == C)
+                break;
+        if (q < n)
+            TPLE_NO("counter's address taken")
+        /* p: a word stepped once by a constant, and written nowhere else
+         * in the block */
+        for (q = B; q < rr[0]; q++) {
+            int a, b2, x, st, nst = 0;
+            if (ins[q].opcode != TP_ENC_STL)
+                continue;
+            x = ins[q].operand;
+            if (x == C || x < func_max_outgoing_words || x >= F || bad[x])
+                continue;
+            b2 = tpf_prev(ins, q);
+            a = b2 >= B ? tpf_prev(ins, b2) : -1;
+            if (a < B || ins[a].opcode != TP_ENC_LDL || ins[a].operand != x)
+                continue;
+            if (ins[b2].opcode == TP_ENC_ADC && ins[b2].operand != 0)
+                st = ins[b2].operand;
+            else if (ins[b2].opcode == TP_ENC_LDNLP && ins[b2].operand != 0)
+                st = 4 * ins[b2].operand;
+            else
+                continue;
+            for (k = B; k <= c; k++)
+                if (ins[k].opcode != -1 &&
+                    ((ins[k].opcode == TP_ENC_STL && ins[k].operand == x) ||
+                     (ins[k].opcode == TP_ENC_LDLP && ins[k].operand == x)))
+                    nst++;
+            if (nst != 1 || tps_word_escapes(ins, n, x, top))
+                continue;
+            P = x;
+            step = st;
+            break;
+        }
+        if (P < 0)
+            TPLE_NO("no stepped word")
+        if (nv + 8 > cap) {
+            cap = cap ? 2 * cap : 32;
+            v = tcc_realloc(v, sizeof(*v) * cap);
+        }
+        /* the way in: C := C * s + p + (s > 0 ? s - 1 : s + 1), in front
+         * of any padding a jump to B might name */
+        at = B;
+        while (at > 0 && ins[at - 1].opcode == -1 && !ins[at - 1].pinned)
+            at--;
+        v[nv].at = at; v[nv].opc = TP_ENC_LDL; v[nv].opd = C; v[nv++].tgt = -1;
+        if (step != 1) {
+            v[nv].at = at; v[nv].opc = TP_ENC_LDC; v[nv].opd = step;
+            v[nv++].tgt = -1;
+            v[nv].at = at; v[nv].opc = TP_ENC_OPR; v[nv].opd = TP_OPR_PROD;
+            v[nv++].tgt = -1;
+        }
+        v[nv].at = at; v[nv].opc = TP_ENC_LDL; v[nv].opd = P; v[nv++].tgt = -1;
+        v[nv].at = at; v[nv].opc = TP_ENC_OPR; v[nv].opd = TP_OPR_SUM;
+        v[nv++].tgt = -1;
+        if (step != 1 && step != -1) {
+            v[nv].at = at; v[nv].opc = TP_ENC_LDC;
+            v[nv].opd = step > 0 ? step - 1 : step + 1;
+            v[nv++].tgt = -1;
+            v[nv].at = at; v[nv].opc = TP_ENC_OPR; v[nv].opd = TP_OPR_SUM;
+            v[nv++].tgt = -1;
+        }
+        v[nv].at = at; v[nv].opc = TP_ENC_STL; v[nv].opd = C; v[nv++].tgt = -1;
+        /* the bottom */
+        if (step > 0) {
+            tpn_put(&ins[rr[0]], TP_ENC_LDL, P);
+            tpn_put(&ins[rr[1]], TP_ENC_LDL, C);
+        } else {
+            tpn_put(&ins[rr[0]], TP_ENC_LDL, C);
+            tpn_put(&ins[rr[1]], TP_ENC_LDL, P);
+        }
+        tpn_put(&ins[rr[2]], TP_ENC_OPR, TP_OPR_GT);
+        tpn_put(&ins[rr[3]], -1, 0);
+        tpn_put(&ins[rr[4]], -1, 0);
+        nloops++;
+    }
+#undef TPLE_NO
+    tcc_free(seen);
+    tcc_free(head);
+    tcc_free(npred);
+    tcc_free(bad);
+    if (!nv)
+        return 0;
+    tpx_insert(r, v, nv);
+    tcc_free(v);
+    if (tp_knob(TPK_TP_NARROW_STATS))
+        fprintf(stderr, "[LOOPEND] %s: %d loops\n",
+                funcname ? funcname : "?", nloops);
+    return 1;
+}
+
 /* A narrow loop counter's mask, where the loop's own test bounds it:
  *
  *   j T; X: ...; ldl s; adc c; ldc m; and; stl s; ...; T: ldl s; ldc B; gt;
@@ -9834,6 +10087,8 @@ static int tp_relax_function(void)
      * counts both from here on.  After the scheduler, whose round trips
      * would otherwise cut the runs it looks for. */
     if (tp_loop_invert(&r, tpg.n))
+        r.grown = 1;
+    if (tp_loop_end(&r, tpg.n))
         r.grown = 1;
     tp_hoist(&r, tpg.n);
     if (tp_hoist_w)
