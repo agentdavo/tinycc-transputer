@@ -110,6 +110,9 @@ static int tp_t414(void);
 static int tp_tvx(void);
 static int tp_try_inline_local_zero_memset(int nb_args);
 static int tp_try_inline_memcpy(int nb_args);
+static int tp_try_inline_strcpy_lit(int nb_args);
+static void tp_emit_move_call(SValue *src, SValue *dest, SValue *len,
+                              int nb_args);
 static int tp_push_sv_is_pure(const SValue *sv);
 
 /* TP_NO_CALLOPT=1 restores the pre-2026-08-05 call sequence: the
@@ -5810,26 +5813,110 @@ static int tp_try_inline_memcpy(int nb_args)
         !tp_push_sv_is_pure(&sv_len))
         return 0;                 /* gfunc_call's own save_regs still stands */
 
+    tp_emit_move_call(&sv_src, &sv_dest, &sv_len, nb_args);
+    return 1;
+}
+
+/* The call's MOVE, once its three operands are known to be pure pushes:
+ * src, dest and count into C, B and A, then dest into the return slot (both
+ * memcpy and strcpy return it), and the call's operands off the value stack.
+ * No REG_IRE2, and no mirror into the float return slots: the result is a
+ * pointer, so R_RET() names REG_IRET alone and nothing can read the others.
+ * Matches the return-type-driven capture in gfunc_call(). */
+static void tp_emit_move_call(SValue *src, SValue *dest, SValue *len,
+                              int nb_args)
+{
     abcreg_stack_depth = 0;
     tp_areg_invalidate();     /* no DUP shortcut against a stale AReg tag */
-    tp_push_sv(&sv_src);      /* src   -> CReg */
-    tp_push_sv(&sv_dest);     /* dest  -> BReg */
-    tp_push_sv(&sv_len);      /* count -> AReg */
+    tp_push_sv(src);          /* src   -> CReg */
+    tp_push_sv(dest);         /* dest  -> BReg */
+    tp_push_sv(len);          /* count -> AReg */
     Tp_OPR(TP_OPR_MOVE);
     abcreg_pop(3);            /* MOVE consumes all three */
     abcreg_stack_depth = 0;
 
-    /* memcpy returns dest; keep the standard return slot coherent. */
-    tp_push_sv(&sv_dest);
+    tp_push_sv(dest);
     Tp_STL(REG_IRET);
     abcreg_stack_depth = 0;
 
     vtop -= nb_args;
     vtop--;
+}
 
-    /* No REG_IRE2, and no mirror into the float return slots: memcpy returns
-     * void *, so R_RET() names REG_IRET alone and nothing can read the others.
-     * Matches the return-type-driven capture in gfunc_call(). */
+/* The bytes of the string `sv` addresses, counting its NUL, when they are
+ * known now and cannot change: a symbol defined in this unit in a section
+ * that is neither writable nor bss (a string literal, or a const array),
+ * the offset inside the symbol and the NUL before the symbol ends.
+ * -1 otherwise. */
+static int tp_const_string_size(const SValue *sv)
+{
+    ElfSym *esym;
+    Section *sec;
+    addr_t start, end, i;
+
+    if ((sv->r & (VT_VALMASK | VT_LVAL | VT_SYM)) != (VT_CONST | VT_SYM) ||
+        !sv->sym || sv->c.i < 0)
+        return -1;
+    esym = elfsym(sv->sym);
+    if (!esym || esym->st_shndx == SHN_UNDEF ||
+        esym->st_shndx >= tcc_state->nb_sections ||
+        ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
+        return -1;
+    sec = tcc_state->sections[esym->st_shndx];
+    if (!sec || sec->sh_type != SHT_PROGBITS || (sec->sh_flags & SHF_WRITE))
+        return -1;
+    if ((addr_t)sv->c.i >= esym->st_size)
+        return -1;
+    start = esym->st_value + sv->c.i;
+    end = esym->st_value + esym->st_size;
+    if (end > sec->data_offset)
+        return -1;
+    for (i = start; i < end; i++)
+        if (sec->data[i] == 0)
+            return (int)(i - start + 1);
+    return -1;
+}
+
+/* strcpy(dst, "literal") -> MOVE of the literal's bytes and its NUL.
+ *
+ * The length is known at compile time, so the copy is the fixed-size block
+ * transfer memcpy(dst, "literal", n) would be, as GCC lowers it: Dhrystone's
+ * strcpy(Str_1_Loc, "DHRYSTONE PROGRAM, 1'ST STRING") is one MOVE of 31
+ * bytes, not 31 trips round a byte loop or a word loop's prologue, merge
+ * and tail.  strcpy returns dst, as memcpy does.  Only an external strcpy
+ * qualifies; a static function of that name is the program's own. */
+static int tp_try_inline_strcpy_lit(int nb_args)
+{
+    SValue *fn_sv;
+    SValue sv_dest, sv_src, sv_len;
+    const char *name;
+    int n;
+
+    if (nb_args != 2 || !cur_text_section)
+        return 0;
+    fn_sv = &vtop[-nb_args];
+    if (!(fn_sv->r & VT_SYM) || !fn_sv->sym ||
+        (fn_sv->sym->type.t & VT_STATIC) ||
+        (fn_sv->r & (VT_VALMASK | VT_LVAL)) != VT_CONST)
+        return 0;
+    name = get_tok_str(fn_sv->sym->v, NULL);
+    if (!name || (strcmp(name, "strcpy") != 0 &&
+                  strcmp(name, "__builtin_strcpy") != 0))
+        return 0;
+    n = tp_const_string_size(&vtop[0]);
+    if (n <= 0)
+        return 0;
+
+    save_regs(nb_args + 1);
+    sv_dest = vtop[-1];
+    sv_src = vtop[0];
+    memset(&sv_len, 0, sizeof(sv_len));
+    sv_len.type.t = VT_INT;
+    sv_len.r = VT_CONST;
+    sv_len.c.i = n;
+    if (!tp_push_sv_is_pure(&sv_dest) || !tp_push_sv_is_pure(&sv_src))
+        return 0;
+    tp_emit_move_call(&sv_src, &sv_dest, &sv_len, nb_args);
     return 1;
 }
 

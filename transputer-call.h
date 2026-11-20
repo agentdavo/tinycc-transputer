@@ -789,6 +789,14 @@ ST_FUNC void gfunc_call(int nb_args) {
         }
         return;
     }
+    if (tp_try_inline_strcpy_lit(nb_args)) {
+        if (callarg_debug) {
+            fprintf(stderr, "[CALLARG_STRCPY_INLINE] func=%s ind=0x%x\n",
+                    funcname ? funcname : "<unknown>", ind);
+            fflush(stderr);
+        }
+        return;
+    }
     if (tp_try_inline_local_zero_memset(nb_args)) {
         if (callarg_debug) {
             fprintf(stderr, "[CALLARG_MEMSET_INLINE] func=%s ind=0x%x nb_args=%d\n",
