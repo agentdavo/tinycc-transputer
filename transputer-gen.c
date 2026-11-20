@@ -109,6 +109,7 @@ static int tp_soft_float(void);
 static int tp_t414(void);
 static int tp_tvx(void);
 static int tp_try_inline_local_zero_memset(int nb_args);
+static int tp_try_inline_memset_const(int nb_args);
 static int tp_try_inline_memcpy(int nb_args);
 static int tp_try_inline_strcpy_lit(int nb_args);
 static void tp_emit_move_call(SValue *src, SValue *dest, SValue *len,
@@ -6004,6 +6005,94 @@ static int tp_try_inline_local_zero_memset(int nb_args)
     /* No REG_IRE2 and no mirror into the float return slots: memset
      * returns void * (int if undeclared), which R_RET() names REG_IRET
      * alone - as in tp_try_inline_memcpy(). */
+    return 1;
+}
+
+/* memset(d, c, n), n a constant of at most 128 that the zero fill of a
+ * local above did not take, d and c pure pushes: the first min(n, 4)
+ * bytes stored one by one, then MOVEs of what is filled onto what follows
+ * it - 4, 8, 16 ... bytes, and the rest - as uClibc's memset does at run
+ * time.  Measured (tests/bench/bench_memset.c, t4 T800-model cycles,
+ * T805 / T9000, against a direct call of that memset): 8 bytes 194 / 176
+ * -> 66, 32 bytes 301 / 267 -> 115, 128 bytes 443 / 393 -> 202, for 27,
+ * 41 and 58 bytes more code; past 128 the call keeps 200 cycles of
+ * overhead against an ever longer expansion, so it stays a call.  Each
+ * MOVE's source and destination are adjacent, never overlapping.
+ * TCC_TRANSPUTER_MEMSET_INLINE=0 turns it off. */
+#define TP_MEMSET_INLINE_MAX 128
+
+static void tp_memset_move(SValue *dest, int at, int len)
+{
+    abcreg_stack_depth = 0;
+    tp_areg_invalidate();
+    tp_push_sv(dest);           /* source: the filled start -> CReg */
+    tp_push_sv(dest);
+    Tp_ADC(at);                 /* destination -> BReg */
+    Tp_LDC(len);                /* count -> AReg */
+    Tp_OPR(TP_OPR_MOVE);
+    abcreg_pop(3);
+    abcreg_stack_depth = 0;
+}
+
+static int tp_try_inline_memset_const(int nb_args)
+{
+    static int off = -1;
+    SValue *fn_sv, sv_dest, sv_val;
+    const char *name;
+    int n, k, done;
+
+    if (off < 0) {
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_MEMSET_INLINE);
+        off = (e && *e == '0') ? 1 : 0;
+    }
+    if (off || nb_args != 3 || !cur_text_section)
+        return 0;
+    fn_sv = &vtop[-nb_args];
+    if (!(fn_sv->r & VT_SYM) || !fn_sv->sym ||
+        (fn_sv->sym->type.t & VT_STATIC) ||
+        (fn_sv->r & (VT_VALMASK | VT_LVAL)) != VT_CONST)
+        return 0;
+    name = get_tok_str(fn_sv->sym->v, NULL);
+    if (!name || (strcmp(name, "memset") != 0 &&
+                  strcmp(name, "__builtin_memset") != 0 &&
+                  strcmp(name, "__aeabi_memset") != 0))
+        return 0;
+    if ((vtop[0].r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST ||
+        (long long)vtop[0].c.i < 0 ||
+        (long long)vtop[0].c.i > TP_MEMSET_INLINE_MAX)
+        return 0;
+    n = (int)vtop[0].c.i;
+
+    save_regs(nb_args + 1);
+    sv_dest = vtop[-2];
+    sv_val = vtop[-1];
+    if (!tp_push_sv_is_pure(&sv_dest) || !tp_push_sv_is_pure(&sv_val))
+        return 0;               /* gfunc_call's own save_regs still stands */
+
+    for (k = 0; k < n && k < 4; k++) {
+        abcreg_stack_depth = 0;
+        tp_areg_invalidate();
+        tp_push_sv(&sv_val);    /* sb stores BReg's low byte at AReg */
+        tp_push_sv(&sv_dest);
+        if (k)
+            Tp_ADC(k);
+        Tp_SB();
+        abcreg_stack_depth = 0;
+    }
+    for (done = 4; n >= 4 && 2 * done <= n; done *= 2)
+        tp_memset_move(&sv_dest, done, done);
+    if (n > done)
+        tp_memset_move(&sv_dest, done, n - done);
+
+    /* memset returns the destination */
+    abcreg_stack_depth = 0;
+    tp_areg_invalidate();
+    tp_push_sv(&sv_dest);
+    Tp_STL(REG_IRET);
+    abcreg_stack_depth = 0;
+
+    vtop -= nb_args;
+    vtop--;
     return 1;
 }
 

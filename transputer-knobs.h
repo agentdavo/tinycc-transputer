@@ -49,6 +49,7 @@
     K(TCC_TRANSPUTER_TAIL_DUP, "0...: no copies of short blocks in place of jumps to them") \
     K(TCC_TRANSPUTER_LOOP_INVERT, "0...: loops keep their one test of n > j at the bottom") \
     K(TCC_TRANSPUTER_LOOP_END, "0...: `do ... while (c--)` loops keep their counter, not ending on the pointer they step") \
+    K(TCC_TRANSPUTER_MEMSET_INLINE, "0...: memset of a constant length up to 128 bytes stays a call") \
     K(TCC_TRANSPUTER_STRENGTH, "0...: loops recompute their addresses from the counter") \
     K(TCC_TRANSPUTER_LOOP_CSE, "0...: a loop top recomputes what its bottom test computed") \
     K(TCC_TRANSPUTER_PARK_UNARY, "0...: a pushed value is parked while the one under it is worked on") \

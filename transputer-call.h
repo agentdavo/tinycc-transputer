@@ -805,6 +805,8 @@ ST_FUNC void gfunc_call(int nb_args) {
         }
         return;
     }
+    if (tp_try_inline_memset_const(nb_args))
+        return;
 
     /* Save any register-held values to the stack before the call.
      * This matches x86 (save_regs(nb_args+1)) and ARM behavior.
