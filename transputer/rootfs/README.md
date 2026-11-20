@@ -19,3 +19,7 @@ bash transputer/rootfs/stage.sh
 
 `.tpz` packages (gzip'd tar with manifest).
 Install with `tpkg install package.tpz`.
+
+Set `TPOS_SLIM_PACKAGES=1` to omit the Doom engine and CoreMark package
+archives when their executable is already staged. For offline reinstall,
+keep the archives on the SD image and pass their paths to `tpkg install`.

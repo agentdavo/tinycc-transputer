@@ -622,26 +622,27 @@ static void asm_parse_directive(TCCState *s1, int global)
                 } else {
 #ifdef TCC_TARGET_TRANSPUTER
                     if (e.sym) {
-                        int reloc_type = (size == 1) ? R_TRANSPUTER_8 : R_TRANSPUTER_16;
-                        greloc(sec, e.sym, ind, reloc_type);
-                        if (size == 1)
-                            g(0);
-                        else
-                            gen_le16(0);
-                    } else {
-                        if (size == 1)
-                            g(e.v);
-                        else
-                            gen_le16(e.v);
+                        int type;
+                        /* REL keeps the signed addend in the field itself.
+                         * For S+A-P, undo the parser's section-relative P. */
+                        if (e.pcrel) {
+                            type = size == 1 ? R_TRANSPUTER_IPREL8 : R_TRANSPUTER_IPREL16;
+                            e.v += ind;
+                        } else {
+                            type = size == 1 ? R_TRANSPUTER_8 : R_TRANSPUTER_16;
+                        }
+                        if ((int64_t)e.v != (size == 1 ? (int8_t)e.v : (int16_t)e.v))
+                            tcc_error("symbolic addend does not fit in signed %d bits", size * 8);
+                        greloc(sec, e.sym, ind, type);
                     }
 #else
                     if (e.sym)
                         expect("constant");
+#endif
                     if (size == 1)
                         g(e.v);
                     else
                         gen_le16(e.v);
-#endif
                 }
             } else {
                 ind += size;

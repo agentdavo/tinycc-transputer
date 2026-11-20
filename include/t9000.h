@@ -223,7 +223,7 @@ static inline unsigned t9_grant(t9_rds *r)
  * channels 0..nc-1 then resources nc..nc+nr-1 (also the priority order).
  * A resource that wins still has to be granted; t9_grant then returns at
  * once.  The ALT sequence must run in one function whose first parameter
- * the hardware overwrites (see lib/transputer-conc.c), hence slot0. */
+ * the hardware overwrites (see lib/transputer/transputer-conc.c), hence slot0. */
 static inline int t9_alt_core(int slot0, volatile int **chans, int nc,
                               t9_rds **rds, int nr)
 {

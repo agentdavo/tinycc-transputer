@@ -27,7 +27,7 @@ mkdir -p "$WORK" && cd "$WORK" || exit 1
 } > msglat.map
 for n in 0 1; do
     "$R/transputer-tcc" -mt9000tvx -static -nostdlib -I"$R/include" -DNODE=$n -DLEN=$LEN \
-        -o n$n.elf "$T/test_boot.S" "$HERE/msglat.c" "$R/lib/transputer-conc.c" "$R/transputer-libtcc1.a" 2>/dev/null &&
+        -o n$n.elf "$T/test_boot.S" "$HERE/msglat.c" "$R/lib/transputer/transputer-conc.c" "$R/transputer-libtcc1.a" 2>/dev/null &&
     "$R/transputer-netload" n$n.elf n$n.btl >/dev/null 2>&1 || { echo "node $n: build failed"; exit 1; }
 done
 export SPYNET=msglat.map T4_NODE_BTL=n%d.btl

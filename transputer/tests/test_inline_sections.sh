@@ -31,9 +31,9 @@ for compiler in $INLINE_TEST_CCS; do
     object="$INLINE_TEST_TMP/$compiler_name.o"
     reverse_object="$INLINE_TEST_TMP/$compiler_name-reverse.o"
 
-    "$compiler" -nostdlib -nostdinc -c -o "$object" \
+    TCC_TRANSPUTER_INLINE=0 "$compiler" -nostdlib -nostdinc -c -o "$object" \
         "$INLINE_TEST_DIR/test_inline_sections.c"
-    "$compiler" -nostdlib -nostdinc -c -o "$reverse_object" \
+    TCC_TRANSPUTER_INLINE=0 "$compiler" -nostdlib -nostdinc -c -o "$reverse_object" \
         "$INLINE_TEST_DIR/test_inline_sections_reverse.c"
 
     echo "compiler: $compiler_name"
@@ -48,6 +48,10 @@ for compiler in $INLINE_TEST_CCS; do
     assert_symbol_section "$object" mixed_shared .text
     assert_symbol_section "$object" init_address_path .init.text
     assert_symbol_section "$object" address_target .text
+    if objdump -t "$object" | awk '$NF == "unused_inline_path" { found = 1 } END { exit !found }'; then
+        echo "FAIL: unused_inline_path was emitted" >&2
+        exit 1
+    fi
     assert_symbol_section "$reverse_object" reverse_init_path .init.text
     assert_symbol_section "$reverse_object" reverse_live_path .live.text
     assert_symbol_section "$reverse_object" reverse_shared .text

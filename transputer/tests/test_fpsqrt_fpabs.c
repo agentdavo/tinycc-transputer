@@ -30,8 +30,25 @@ static volatile float  fneg = -2.5f;
 static volatile float  fq   = 0.25f;
 static volatile double d16  = 16.0;
 static volatile double dneg = -1.5;
+static volatile float fone = 1.0f;
+static volatile double done = 1.0;
 
 int fp_ident(float x) { return ((fb){ .f = x }).u; }
+
+/* These must cross a real function boundary: the arithmetic result is
+ * consumed once by sqrt, while the caller also checks return-slot aliases. */
+static float resident_f(float x) { return __fpsqrt(x * x + 7.0f); }
+static double resident_d(double x) { return __fpsqrt(x * x + 7.0); }
+static float irrational_f(float x) { return __fpsqrt(x * x + 1.0f); }
+static double irrational_d(double x) { return __fpsqrt(x * x + 1.0); }
+static float call_f(void) { return f9; }
+static double call_d(void) { return d16; }
+static float pending_f(float x) { return call_f() + __fpsqrt(x * x + 7.0f); }
+static double pending_d(double x) { return call_d() + __fpsqrt(x * x + 7.0); }
+static float alias_f(float x) { return x + __fpsqrt(x * x); }
+static double alias_d(double x) { return x + __fpsqrt(x * x); }
+static float signed_f(float x) { return __fpsqrt(x * fone); }
+static double signed_d(double x) { return __fpsqrt(x * done); }
 
 void test_main(void)
 {
@@ -82,6 +99,52 @@ void test_main(void)
     x = __fpsqrt(__fpabs(fneg) * 10.0f);
     a.f = x; b.f = 5.0f;
     check("nested", a.u == b.u);
+
+    a.f = resident_f(3.0f); b.f = 4.0f;
+    check("resident-f", a.u == b.u);
+    p.d = resident_d(3.0); q.d = 4.0;
+    check("resident-d", p.w[0] == q.w[0] && p.w[1] == q.w[1]);
+
+    a.f = irrational_f(1.0f);
+    check("rounded-f", a.u == 0x3fb504f3u);
+    p.d = irrational_d(1.0);
+    check("rounded-d", p.w[0] == 0x667f3bcdu && p.w[1] == 0x3ff6a09eu);
+
+    /* A pending call return occupies REG_FRET.  The second operand must
+     * not overwrite it, and sqrt(call()) must retain its normal spill. */
+    a.f = call_f() + resident_f(3.0f); b.f = 13.0f;
+    check("pending-f", a.u == b.u);
+    p.d = call_d() + resident_d(3.0); q.d = 20.0;
+    check("pending-d", p.w[0] == q.w[0] && p.w[1] == q.w[1]);
+    a.f = pending_f(3.0f); b.f = 13.0f;
+    check("pending-resident-f", a.u == b.u);
+    p.d = pending_d(3.0); q.d = 20.0;
+    check("pending-resident-d", p.w[0] == q.w[0] && p.w[1] == q.w[1]);
+    a.f = __fpsqrt(call_f()); b.f = 3.0f;
+    check("call-f", a.u == b.u);
+    p.d = __fpsqrt(call_d()); q.d = 4.0;
+    check("call-d", p.w[0] == q.w[0] && p.w[1] == q.w[1]);
+    a.f = alias_f(-3.0f);
+    check("alias-f", a.u == 0u);
+    p.d = alias_d(-3.0);
+    check("alias-d", p.w[0] == 0u && p.w[1] == 0u);
+
+    /* Preserve exceptional encodings through the arithmetic/sqrt boundary.
+     * Quiet NaN payload propagation is deliberately not prescribed here. */
+    b.u = 0x80000000u; a.f = signed_f(b.f);
+    check("negative-zero-f", a.u == b.u);
+    q.w[0] = 0u; q.w[1] = 0x80000000u; p.d = signed_d(q.d);
+    check("negative-zero-d", p.w[0] == q.w[0] && p.w[1] == q.w[1]);
+    b.u = 0x7f800000u; a.f = signed_f(b.f);
+    check("infinity-f", a.u == b.u);
+    q.w[0] = 0u; q.w[1] = 0x7ff00000u; p.d = signed_d(q.d);
+    check("infinity-d", p.w[0] == q.w[0] && p.w[1] == q.w[1]);
+    b.u = 0x7fc00001u; a.f = signed_f(b.f);
+    check("nan-f", (a.u & 0x7f800000u) == 0x7f800000u &&
+                   (a.u & 0x007fffffu) != 0u);
+    q.w[0] = 1u; q.w[1] = 0x7ff80000u; p.d = signed_d(q.d);
+    check("nan-d", (p.w[1] & 0x7ff00000u) == 0x7ff00000u &&
+                   ((p.w[1] & 0x000fffffu) != 0u || p.w[0] != 0u));
 
     uart_puts(pass ? "\nALL-PASS\n" : "\nFAILED\n");
 }

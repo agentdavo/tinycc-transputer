@@ -6,10 +6,29 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <stdint.h>
 #include <sys/mman.h>
 
 #include "fbwm.h"
 #include "fbwm_shm.h"
+
+static size_t last_map_len, last_unmap_len;
+
+void *__real_mmap(void *, size_t, int, int, int, off_t);
+int __real_munmap(void *, size_t);
+
+void *__wrap_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+{
+    last_map_len = len;
+    return __real_mmap(addr, len, prot, flags, fd, off);
+}
+
+int __wrap_munmap(void *addr, size_t len)
+{
+    last_unmap_len = len;
+    return __real_munmap(addr, len);
+}
 
 int fb_kbd_available(void) { return 0; }
 int fb_kbd_read(void) { return 0; }
@@ -190,6 +209,7 @@ static void test_retained_surfaces(void)
     int back, front;
     int bx, by;
     unsigned int marker = 0xFF123456;
+    unsigned int borrowed = 0xFF654321;
     int nx, ny;
 
     wm_init();
@@ -256,9 +276,95 @@ static void test_retained_surfaces(void)
         wm_destroy(doom);
     }
 
+    {
+        fbwm_rect_t outer;
+        int terminal;
+        uintptr_t mapping;
+        unsigned char residency;
+
+        CHECK(wm_outer_for_client(512, 350, FBWM_WIN_DEFAULT, &outer),
+              "terminal outer size");
+        terminal = wm_create(outer.x, outer.y, outer.w, outer.h,
+                             "Terminal", FBWM_WIN_DEFAULT);
+        CHECK(terminal >= 0 && wm_surface_create(terminal) == 0,
+              "two small surfaces leave the terminal slot available");
+        CHECK(last_map_len == 512 * 350 * 4, "map only the client pixel bytes");
+        mapping = (uintptr_t)wm_surface_pixels(terminal);
+        wm_surface_clear(terminal, marker);
+        wm_destroy(terminal);
+        CHECK(last_unmap_len == 512 * 350 * 4, "release the same extent");
+        CHECK(mincore((void *)mapping, 1, &residency) == -1 &&
+              errno == ENOMEM, "closing the window unmaps the surface");
+        CHECK(wm_outer_for_client(640, 400, FBWM_WIN_DEFAULT, &outer),
+              "larger terminal outer size");
+        terminal = wm_create(outer.x, outer.y, outer.w, outer.h,
+                             "Terminal", FBWM_WIN_DEFAULT);
+        CHECK(terminal >= 0, "reopen terminal");
+        CHECK(wm_surface_create(terminal) == 0 &&
+              wm_surface_pixels(terminal)[0] == wm_get(terminal)->body_bg,
+              "recreated surface clears stale pixels");
+        wm_destroy(terminal);
+    }
+
     wm_destroy(front);
     wm_destroy(back);
     CHECK(wm_surface_pixels(back) == 0, "destroy frees surface");
+
+    front = wm_create(100, 80, 220, 160, "Surface ownership", FBWM_WIN_DEFAULT);
+    CHECK(front >= 0 && wm_surface_create(front) == 0, "reuse owned surface slot");
+    CHECK(wm_surface_attach(front, &borrowed, 1, 1, 1) == 0,
+          "replace owned pixels with borrowed pixels");
+    CHECK(wm_surface_pixels(front) == &borrowed, "surface keeps the caller's buffer");
+    wm_init();
+    CHECK(wm_surface_pixels(front) == 0 && borrowed == 0xFF654321,
+          "reset detaches the caller's buffer");
+}
+
+static void test_surface_resize_reuse(void)
+{
+    fbwm_rect_t outer;
+    int win;
+    uintptr_t mapping;
+    unsigned int bg;
+    unsigned char residency;
+
+    wm_init();
+    CHECK(wm_outer_for_client(93, 61, FBWM_WIN_DEFAULT, &outer), "original size");
+    win = wm_create(40, 40, outer.w, outer.h, "Resize", FBWM_WIN_DEFAULT);
+    CHECK(win >= 0 && wm_surface_create(win) == 0, "create resize surface");
+    mapping = (uintptr_t)wm_surface_pixels(win);
+    bg = wm_get(win)->body_bg;
+    wm_surface_clear(win, 0xff654321);
+
+    last_map_len = last_unmap_len = 0;
+    wm_resize(win, outer.w + 1, outer.h);
+    CHECK(wm_surface_create(win) == 0, "recreate within the same pages");
+    CHECK(!last_map_len && !last_unmap_len &&
+          (uintptr_t)wm_surface_pixels(win) == mapping, "reuse the live mapping");
+    CHECK(wm_surface_width(win) == 94 && wm_surface_height(win) == 61 &&
+          wm_surface_stride(win) == 94 && wm_surface_pixels(win)[0] == bg &&
+          wm_surface_pixels(win)[94 * 61 - 1] == bg,
+          "resized buffer has the new stride and clears the added pixels");
+    wm_destroy(win);
+    CHECK(last_unmap_len == 93 * 61 * 4 &&
+          mincore((void *)mapping, 1, &residency) == -1 && errno == ENOMEM,
+          "close releases the original mapping");
+
+    win = wm_create(40, 40, outer.w, outer.h, "Resize", FBWM_WIN_DEFAULT);
+    CHECK(win >= 0 && wm_surface_create(win) == 0, "reopen resize surface");
+    CHECK(wm_outer_for_client(320, 240, FBWM_WIN_DEFAULT, &outer), "larger size");
+    last_map_len = last_unmap_len = 0;
+    wm_resize(win, outer.w, outer.h);
+    CHECK(wm_surface_create(win) == 0 &&
+          last_unmap_len == 93 * 61 * 4 && last_map_len == 320 * 240 * 4,
+          "growth across a page boundary remaps the surface");
+    CHECK(wm_outer_for_client(93, 61, FBWM_WIN_DEFAULT, &outer), "smaller size");
+    last_map_len = last_unmap_len = 0;
+    wm_resize(win, outer.w, outer.h);
+    CHECK(wm_surface_create(win) == 0 &&
+          last_unmap_len == 320 * 240 * 4 && last_map_len == 93 * 61 * 4,
+          "shrinking across a page boundary releases the extra pages");
+    wm_destroy(win);
 }
 
 static void test_shm_compose(void)
@@ -489,6 +595,34 @@ static void render_canonical_scene(void)
     fb_draw_cursor(FBWM_FB_WIDTH - 12, FBWM_WORK_H - 16);
 }
 
+static void test_shm_slot_bounds(void)
+{
+    static unsigned int source[400 * 300];
+    volatile unsigned int *boundary =
+        (volatile unsigned int *)(unsigned long)(TPOS_SHM_BASE + TPOS_SHM_SIZE);
+    const unsigned int canary = 0x13579bdfu;
+    int i;
+
+    tpos_shm_reset();
+    for (i = 0; i < 3; i++)
+        CHECK(tpos_shm_claim_slot(320, 240) == i, "first-fit slot order");
+    *boundary = canary;
+    CHECK(wm_shm_prepare_guest(9001, 320, 240, "slot bounds") == 3,
+          "fourth Doom-sized guest uses slot 3");
+    CHECK(*boundary == canary, "guest clear stays inside shared bank");
+    source[400 * 283 + 399] = 0x2468ace0u;
+    tpos_shm_blit_to_slot(3, source, 400, 400, 300);
+    CHECK(*boundary == canary, "surface copy stays inside shared bank");
+    CHECK(tpos_shm_slot_pixels(3)[400 * 283 + 399] == 0x2468ace0u,
+          "surface copy reaches last row of slot 3");
+    tpos_shm_reset();
+    CHECK(tpos_shm_claim_slot(400, 300) == 1, "large surface uses slot 1");
+    CHECK(tpos_shm_claim_slot(400, 300) == -1,
+          "large surface fails when slot 1 is occupied");
+    CHECK(tpos_shm_claim_slot(400, 284) == 3, "slot 3 fits bounded surface");
+    tpos_shm_reset();
+}
+
 int main(void)
 {
     const char *golden;
@@ -521,6 +655,8 @@ int main(void)
     test_window_geometry();
     test_widgets();
     test_retained_surfaces();
+    test_surface_resize_reuse();
+    test_shm_slot_bounds();
     test_shm_compose();
     test_phase2_wm();
     test_phase2_3_4();

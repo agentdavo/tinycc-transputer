@@ -13,10 +13,15 @@
 
 #include "fbwm.h"
 #include "fbwm_shm.h"
+#include "../tpkg/tfiles.h"
 
 /* Syscall interface */
 extern long __transputer_syscall(long, long, long, long, long, long, long);
+#define __NR_close     57
+#define __NR_read      63
+#define __NR_unlinkat  35
 #define __NR_exit_group 94
+#define __NR_open      1024
 
 static void tp_exit(int code)
 {
@@ -39,6 +44,29 @@ static long tp_spawn_extern(const char *path, const char *const *argv,
         ret = __transputer_syscall(__NR_tp_spawn, (long)path, (long)argv,
                                    (long)envp, 0, 0, 0);
     return ret;
+}
+
+static const char *night_relay_path;
+
+static int game_exists(const char *path)
+{
+    long fd = __transputer_syscall(__NR_open, (long)path, 0, 0, 0, 0, 0);
+    if (fd < 0)
+        return 0;
+    __transputer_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+    return 1;
+}
+
+static void find_night_relay(void)
+{
+    const char *local = "/usr/games/night-relay";
+    const char *sd = "/sd/usr/games/night-relay";
+
+    night_relay_path = 0;
+    if (game_exists(local))
+        night_relay_path = local;
+    else if (game_exists(sd))
+        night_relay_path = sd;
 }
 
 /* Simple delay (busy-wait loop) */
@@ -331,6 +359,8 @@ static void draw_desktop_bg(void)
 #define ICON_TPKG_Y   380
 #define ICON_FILES_X  180
 #define ICON_FILES_Y  80
+#define ICON_RELAY_X  180
+#define ICON_RELAY_Y  180
 #define ICON_W        64    /* hit area width */
 #define ICON_H        70    /* hit area height (icon + label) */
 
@@ -383,6 +413,20 @@ static void draw_icon_tpkg(int ix, int iy)
                      FBWM_TITLETXT, FBWM_DESKTOP);
 }
 
+static void draw_icon_night_relay(int ix, int iy)
+{
+    fb_fill_rect(ix, iy, 48, 48, 0xFF111A31);
+    fb_draw_rect(ix, iy, 48, 48, 0xFFD8A460);
+    fb_fill_rect(ix + 10, iy + 12, 4, 4, 0xFF55DEEF);
+    fb_fill_rect(ix + 22, iy + 7, 4, 4, 0xFF55DEEF);
+    fb_fill_rect(ix + 34, iy + 12, 4, 4, 0xFF55DEEF);
+    fb_fill_rect(ix + 21, iy + 22, 6, 6, FBWM_TITLETXT);
+    fb_fill_rect(ix + 10, iy + 35, 11, 4, 0xFFD8A460);
+    fb_fill_rect(ix + 27, iy + 35, 11, 4, 0xFFD8A460);
+    fb_puts_centered(ix - 24, iy + 52, 96, "Night Relay",
+                     FBWM_TITLETXT, FBWM_DESKTOP);
+}
+
 /* Forward decls used by the compositor shell. */
 static void flip_with_cursor(void);
 
@@ -407,6 +451,8 @@ static void paint_desktop_underlay(void)
     draw_icon_ttop(ICON_TTOP_X, ICON_TTOP_Y);
     paint_icon_selection(ICON_TPKG_X, ICON_TPKG_Y, icon_selected == 3);
     draw_icon_tpkg(ICON_TPKG_X, ICON_TPKG_Y);
+    if (night_relay_path)
+        draw_icon_night_relay(ICON_RELAY_X, ICON_RELAY_Y);
 }
 
 static void shell_tick_clock(void)
@@ -433,12 +479,95 @@ static void shell_compose(void)
     fbwm_present_scene();
 }
 
+static void launch_night_relay(void)
+{
+    const char *argv[] = { night_relay_path, 0 };
+    const char *envp[] = { "HOME=/", 0 };
+    long ret;
+
+    fbwm_uart_puts("LAUNCH:night-relay\r\n");
+    ret = __transputer_syscall(__NR_tp_spawn, (long)argv[0], (long)argv,
+                               (long)envp, 0, 0, 0);
+    if (ret < 0)
+        find_night_relay();
+    shell_compose();
+    fbwm_uart_puts(ret == 0 ? "NIGHT_RELAY_DESKTOP\r\n" :
+                              "NIGHT_RELAY_LAUNCH_FAILED\r\n");
+}
+
+static void launch_packages(const char *archive)
+{
+    const char *argv[] = { "/usr/bin/tpkg-ui", archive, 0 };
+    const char *envp[] = { "HOME=/", 0 };
+    long result;
+
+    fbwm_uart_puts("LAUNCH:tpkg-ui\r\n");
+    result = __transputer_syscall(__NR_tp_spawn, (long)argv[0], (long)argv,
+                                  (long)envp, 0, 0, 0);
+    if (result == -2) {
+        argv[0] = "/sd/usr/bin/tpkg-ui";
+        result = __transputer_syscall(__NR_tp_spawn, (long)argv[0], (long)argv,
+                                      (long)envp, 0, 0, 0);
+    }
+    find_night_relay();
+    shell_compose();
+    fbwm_uart_puts(result == 0 ? "PACKAGES_DESKTOP\r\n" :
+                                 "PACKAGES_LAUNCH_FAILED\r\n");
+}
+
+static void launch_files(void)
+{
+    static char archive[TFILES_PACKAGE_PATH_SIZE];
+    const char *argv[] = { "/usr/bin/tfiles", 0 };
+    const char *envp[] = { "HOME=/", 0 };
+    long result;
+
+    fbwm_uart_puts("LAUNCH:tfiles\r\n");
+    result = __transputer_syscall(__NR_tp_spawn, (long)argv[0], (long)argv,
+                                  (long)envp, 0, 0, 0);
+    if (result == -2) {
+        argv[0] = "/sd/usr/bin/tfiles";
+        result = __transputer_syscall(__NR_tp_spawn, (long)argv[0], (long)argv,
+                                      (long)envp, 0, 0, 0);
+    }
+    if (result == TFILES_OPEN_PACKAGE) {
+        long fd = __transputer_syscall(__NR_open, (long)TFILES_PACKAGE_REQUEST,
+                                       0, 0, 0, 0, 0);
+        if (fd >= 0) {
+            long n = __transputer_syscall(__NR_read, fd, (long)archive,
+                                         sizeof(archive), 0, 0, 0);
+            __transputer_syscall(__NR_close, fd, 0, 0, 0, 0, 0);
+            __transputer_syscall(__NR_unlinkat, -100, (long)TFILES_PACKAGE_REQUEST,
+                                 0, 0, 0, 0);
+            if (n > 1 && n <= sizeof(archive) && archive[n - 1] == 0 &&
+                archive[0] == '/') {
+                launch_packages(archive);
+                return;
+            }
+        }
+    }
+    shell_compose();
+    fbwm_uart_puts(result == 0 ? "FILES_DESKTOP\r\n" :
+                                 "FILES_ACTION_FAILED\r\n");
+}
+
+static int handle_night_relay_key(int key)
+{
+    if ((key != 'n' && key != 'N') || !night_relay_path)
+        return 0;
+    if (term_win >= 0 && !wm_is_minimized(term_win))
+        return 0;
+    launch_night_relay();
+    return 1;
+}
+
 static void draw_desktop(void)
 {
     fbwm_uart_puts("DESKTOP\r\n");
     /* Retain existing managed windows across exclusive app returns. */
     if (term_win < 0 && about_win < 0 && doom_win < 0)
         wm_init();
+    find_night_relay();
     fbwm_set_desktop_painter(paint_desktop_underlay);
     shell_compose();
 }
@@ -988,25 +1117,16 @@ static void handle_icon_click(int mx, int my)
     }
     if (icon_hit(mx, my, ICON_TPKG_X, ICON_TPKG_Y)) {
         icon_selected = 3;
-        fbwm_uart_puts("LAUNCH:tpkg-ui\r\n");
-        {
-            const char *av[] = {"/sd/usr/bin/tpkg-ui", 0};
-            const char *ev[] = {"HOME=/sd/home/tc", 0};
-            tp_spawn_extern("/sd/usr/bin/tpkg-ui", av, ev);
-        }
-        shell_compose();
+        launch_packages(0);
         return;
     }
     if (icon_hit(mx, my, ICON_FILES_X, ICON_FILES_Y)) {
         icon_selected = 4;
-        fbwm_uart_puts("LAUNCH:tfiles\r\n");
-        {
-            const char *av[] = {"/sd/usr/bin/tfiles", 0};
-            const char *ev[] = {"HOME=/sd/home/tc", 0};
-            tp_spawn_extern("/sd/usr/bin/tfiles", av, ev);
-        }
-        shell_compose();
+        launch_files();
+        return;
     }
+    if (night_relay_path && icon_hit(mx, my, ICON_RELAY_X, ICON_RELAY_Y))
+        launch_night_relay();
 }
 
 /* Desktop tour: mouse to icons, open Terminal, About, tman, DOOM.
@@ -1238,6 +1358,16 @@ static void desktop_event_loop(void)
         }
 
         key = process_keyboard();
+        if ((key == 'p' || key == 'P') && (term_win < 0 || wm_is_minimized(term_win))) {
+            launch_packages(0);
+            continue;
+        }
+        if (handle_night_relay_key(key))
+            continue;
+        if ((key == 'f' || key == 'F') && (term_win < 0 || wm_is_minimized(term_win))) {
+            launch_files();
+            continue;
+        }
         if (key == 27) {
             fbwm_uart_puts("EXIT\r\n");
             return;
@@ -1295,6 +1425,7 @@ static void desktop_event_loop(void)
                     r = tp_spawn_extern("/bin/busybox", av_sh, ev);
                 fbwm_uart_puts(r < 0 ? "SHELL_FAIL\r\n" : "SHELL_DONE\r\n");
             }
+            find_night_relay();
             need_compose = 1;
         }
         if (key && term_win >= 0 && wm_get(term_win) &&

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build CoreMark for Transputer T4 emulator
-set -e
+set -euo pipefail
 
 TOP="$(cd "$(dirname "$0")/../../.." && pwd)"
 # TCC, NETLOAD and T4 may name another toolchain or emulator build.
@@ -19,10 +19,12 @@ SUFFIX=""
 [ "$CPU" = t9000 ] || SUFFIX="-$CPU"
 LIBS=""
 case "$CPU" in
+t9000) ;;
 t425|t414) LIBS="$(dirname "$TCC")/transputer-libtcc1-$CPU.a" ;;
 t800|t805) LIBS="$(dirname "$TCC")/transputer-libtcc1-t800.a" ;;
+*) echo "Unsupported CPU: $CPU (use t9000, t805, t800, t425 or t414)" >&2; exit 1 ;;
 esac
-OUT="/tmp/coremark_transputer$SUFFIX"
+OUT="${WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/coremark-$CPU.XXXXXX")}"
 BTL="${BTL:-$PORT/coremark$SUFFIX.btl}"
 RUN_COREMARK="${RUN_COREMARK:-1}"
 # Enough iterations for the 10 s a CoreMark run must last, with margin, on
@@ -31,6 +33,8 @@ RUN_COREMARK="${RUN_COREMARK:-1}"
 # -s425/-s414, which are half as fast).  CoreMark counts
 # a shorter run as an error, so ITERATIONS=N for a quick smoke-test image
 # ends "Errors detected" even when every CRC is right.
+# ITERATIONS=0 enables CoreMark's own calibration for a >=10-second run.
+# These are standalone boot images; build-flt.sh builds the Linux application.
 case "$CPU" in
 t9000) ITERATIONS="${ITERATIONS:-2400}" ;;
 *)     ITERATIONS="${ITERATIONS:-1200}" ;;
@@ -42,9 +46,27 @@ esac
 ELF="${BTL%.btl}.elf"
 CMDS="${BTL%.btl}.build.txt"
 
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$(dirname "$BTL")"
+case "${COREMARK_TRIAL:-}" in
+    "") ;;
+    crcbyte)
+        if [ "$CPU" = t414 ]; then
+            echo "CRCBYTE trial requires T425, T800 or newer" >&2
+            exit 1
+        fi
+        ;;
+    matrix-walk) ;;
+    *) echo "unknown CoreMark diagnostic trial: $COREMARK_TRIAL" >&2; exit 1 ;;
+esac
+if [ -n "${COREMARK_TRIAL:-}" ]; then
+    echo "CoreMark diagnostic (modified input): $COREMARK_TRIAL" >&2
+    python3 "$PORT/opcode-trial.py" "$COREMARK_TRIAL" "$COREMARK" "$OUT"
+fi
 {
     echo "# CoreMark for the $CPU, $(date -u '+%Y-%m-%d %H:%M UTC')"
+    if [ -n "${COREMARK_TRIAL:-}" ]; then
+        echo "# Diagnostic trial: $COREMARK_TRIAL"
+    fi
     echo "# compiler $(git -C "$TOP" describe --always --dirty 2>/dev/null): $TCC"
 } > "$CMDS"
 # Record a command in $CMDS, then run it.
@@ -70,7 +92,11 @@ echo "=== Compiling CoreMark for Transputer (ITERATIONS=$ITERATIONS) ==="
 # Compile all source files
 for src in core_main.c core_list_join.c core_matrix.c core_state.c core_util.c; do
     echo "  CC $src"
-    run "$TCC" $CFLAGS $DEFS -c -o "$OUT/${src%.c}.o" "$COREMARK/$src"
+    input="$COREMARK/$src"
+    case "${COREMARK_TRIAL:-}:$src" in
+        crcbyte:core_util.c|matrix-walk:core_matrix.c) input="$OUT/$src" ;;
+    esac
+    run "$TCC" $CFLAGS $DEFS -c -o "$OUT/${src%.c}.o" "$input"
 done
 
 # Port-specific files
@@ -141,16 +167,34 @@ fi
 if [ -z "${T4_CPU:-}" ]; then
     T4_CPU=-s8
     case "$CPU" in
+    t9000) T4_CPU=-s9 ;;
     t425|t414) grep -qa -- '-s414, -s425' "$T4" && T4_CPU="-s${CPU#t}" ;;
     esac
 fi
 
 echo "=== Running on T4 ($T4_CPU) ==="
-UART="$OUT/coremark.uart"
-rm -f "$UART"
-DISPLAY= WAYLAND_DISPLAY= T4_UART_CONSOLE=0 T4_UART_LOG="$UART" \
-    timeout 300 "$T4" $T4_CPU -si -se -sb "$BTL" 2>/dev/null || true
+UART="${BTL%.btl}.uart"
+RUN_LOG="${BTL%.btl}.run.log"
+: > "$UART"
+status=0
+DISPLAY= WAYLAND_DISPLAY= T4_HEADLESS=1 SDL_VIDEODRIVER=dummy \
+    T4_UART_CONSOLE=0 T4_UART_LOG="$UART" \
+    timeout -k 5 "${COREMARK_TIMEOUT:-300}" "$T4" $T4_CPU -si -se -sb "$BTL" \
+    > "$RUN_LOG" 2>&1 || status=$?
 
 echo ""
 echo "=== UART Output ==="
 tr -d '\000' < "$UART"
+
+# T4's normal stopped-processor exit is 255. A completed image may remain
+# idle until timeout, but a crash or missing/short/incorrect run is a failure.
+case "$status" in
+0|124|137|255) ;;
+*) echo "T4 failed with status $status; see $RUN_LOG" >&2; exit 1 ;;
+esac
+if ! grep -q 'Correct operation validated' "$UART" ||
+   grep -Eq 'Errors detected|Cannot validate operation' "$UART"; then
+    echo "CoreMark validation failed; see $UART and $RUN_LOG" >&2
+    exit 1
+fi
+echo "=== CoreMark $CPU validated ==="

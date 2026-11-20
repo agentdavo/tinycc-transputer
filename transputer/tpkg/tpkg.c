@@ -2,7 +2,7 @@
  * tpkg — TransputerOS Package Manager
  *
  * Manages .tpz packages (gzip'd tar with .tpz-info manifest).
- * Uses BusyBox tar/gzip for extraction, maintains an install database
+ * Reads the archive directly and maintains an install database
  * in /var/lib/tpkg/<package>/{info,files}.
  *
  * Usage:
@@ -13,6 +13,10 @@
  *   tpkg files   <package>      List files owned by a package
  */
 
+#include "tpkg.h"
+#include "tpz.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,18 +26,41 @@
 
 #define TPKG_DB      "/var/lib/tpkg"
 #define MAX_LINE     256
-#define MAX_PATH     256
+#define MAX_PATH     (TPZ_PATH + 16)
+#define INSTALL_LOCK TPKG_DB "/.install"
 #define MAX_FILES    512
 #define MAX_PACKAGES 64
 #define MAX_DEPS     16
 #define MAX_DEPNAME  32
+
+/* The GUI shows the result in its own status area. */
+#ifdef TPKG_EMBEDDED
+#define REPORT(stream, ...) ((void)0)
+#else
+#define REPORT(stream, ...) fprintf(stream, __VA_ARGS__)
+#endif
+
+#ifdef __transputer__
+/* The compact guest exposes the legacy mkdir slot. */
+extern long __transputer_syscall(long, long, long, long, long, long, long);
+static int tpkg_mkdir(const char *path, mode_t mode)
+{
+    long result = __transputer_syscall(1030, (long)path, mode, 0, 0, 0, 0);
+    if (result < 0) {
+        errno = -result;
+        return -1;
+    }
+    return 0;
+}
+#define mkdir tpkg_mkdir
+#endif
 
 /* -----------------------------------------------------------------------
  * Utility: simple mkdir -p (create parent directories)
  * ----------------------------------------------------------------------- */
 static void mkdirp(const char *path)
 {
-    char tmp[MAX_PATH];
+    static char tmp[MAX_PATH];
     char *p;
     int len;
 
@@ -87,25 +114,13 @@ static const char *read_field(const char *infopath, const char *key)
 }
 
 /* -----------------------------------------------------------------------
- * Extract .tpz-info from a .tpz archive to a buffer file
- * Returns 0 on success
- * ----------------------------------------------------------------------- */
-static int extract_info(const char *tpzfile, const char *outpath)
-{
-    char cmd[MAX_PATH * 2];
-    snprintf(cmd, sizeof(cmd),
-        "tar xzf %s -O .tpz-info > %s 2>/dev/null", tpzfile, outpath);
-    return system(cmd);
-}
-
-/* -----------------------------------------------------------------------
  * Dependency checking
  * ----------------------------------------------------------------------- */
 
 /* Check if a package is installed */
 static int is_installed(const char *pkgname)
 {
-    char path[MAX_PATH];
+    static char path[MAX_PATH];
     snprintf(path, sizeof(path), "%s/%s/info", TPKG_DB, pkgname);
     return access(path, R_OK) == 0;
 }
@@ -154,7 +169,7 @@ static int check_deps(const char *infopath)
 
     for (i = 0; i < ndeps; i++) {
         if (!is_installed(deps[i])) {
-            fprintf(stderr, "  MISSING dependency: %s\n", deps[i]);
+            REPORT(stderr, "  MISSING dependency: %s\n", deps[i]);
             missing++;
         }
     }
@@ -162,152 +177,310 @@ static int check_deps(const char *infopath)
     return missing;
 }
 
-/* -----------------------------------------------------------------------
- * tpkg install <file.tpz>
- * ----------------------------------------------------------------------- */
+static int package_name(const char *name)
+{
+    size_t len = strlen(name);
+    return len && len < MAX_DEPNAME && name[0] != '.' &&
+        strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789-._+") == len;
+}
+
+static int payload_path(char *absolute, const char *relative)
+{
+    size_t len = strlen(relative);
+    if (!len || !strcmp(relative, ".tpz-info") ||
+        (!strncmp(relative, "var/lib/tpkg", 12) &&
+         (relative[12] == '/' || !relative[12])) ||
+        (len >= 9 && (!strcmp(relative + len - 9, ".tpkg-new") ||
+                      !strcmp(relative + len - 9, ".tpkg-old"))))
+        return -1;
+    snprintf(absolute, MAX_PATH, "/%s", relative);
+    return 0;
+}
+
+static int make_directory(const char *path)
+{
+    struct stat st;
+    if (mkdir(path, 0755) == 0)
+        return 0;
+    return errno == EEXIST && lstat(path, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
+}
+
+static int parents(char *path)
+{
+    char *slash = path + 1;
+    while ((slash = strchr(slash, '/')) != NULL) {
+        int rc;
+        *slash = 0;
+        rc = make_directory(path);
+        *slash++ = '/';
+        if (rc)
+            return -1;
+    }
+    return 0;
+}
+
+/* Stage writes next to their destination so rename works across mounts. */
+static FILE *stage_file(const char *path, unsigned mode)
+{
+    static char temp[MAX_PATH + 16];
+    FILE *file;
+    int fd;
+    snprintf(temp, sizeof(temp), "%s.tpkg-new", path);
+    fd = open(temp, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, mode);
+    if (fd < 0)
+        return NULL;
+    file = fdopen(fd, "w+b");
+    if (!file) {
+        close(fd);
+        unlinkat(AT_FDCWD, temp, 0);
+    }
+    return file;
+}
+
+static void discard_stage(const char *path)
+{
+    static char temp[MAX_PATH + 16];
+    snprintf(temp, sizeof(temp), "%s.tpkg-new", path);
+    unlinkat(AT_FDCWD, temp, 0);
+}
+
+/* A backup directory marks a file with no previous version. The backup
+ * also prevents a later archive member from writing this path again. */
+static void finish_file(const char *path, int keep)
+{
+    static char backup[MAX_PATH + 16];
+    struct stat st;
+    snprintf(backup, sizeof(backup), "%s.tpkg-old", path);
+    if (lstat(backup, &st))
+        return;
+    if (S_ISDIR(st.st_mode)) {
+        if (!keep)
+            unlinkat(AT_FDCWD, path, 0);
+        unlinkat(AT_FDCWD, backup, AT_REMOVEDIR);
+    } else if (keep) {
+        unlinkat(AT_FDCWD, backup, 0);
+    } else {
+        renameat(AT_FDCWD, backup, AT_FDCWD, path);
+    }
+}
+
+static int publish_file(const char *path)
+{
+    static char temp[MAX_PATH + 16], backup[MAX_PATH + 16];
+    struct stat st;
+    snprintf(temp, sizeof(temp), "%s.tpkg-new", path);
+    snprintf(backup, sizeof(backup), "%s.tpkg-old", path);
+    if (lstat(backup, &st) == 0 || errno != ENOENT)
+        return -1;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISREG(st.st_mode) || renameat(AT_FDCWD, path, AT_FDCWD, backup))
+            return -1;
+    } else if (errno != ENOENT || mkdir(backup, 0700)) {
+        return -1;
+    }
+    if (renameat(AT_FDCWD, temp, AT_FDCWD, path)) {
+        finish_file(path, 0);
+        return -1;
+    }
+    return 0;
+}
+
+static int install_member(FILE *archive, struct tpz_member *member, FILE *files)
+{
+    static char path[MAX_PATH];
+    FILE *out;
+    int error;
+    if (!member->path[0] && member->directory)
+        return 0;
+    if (payload_path(path, member->path) || parents(path))
+        return -1;
+    if (member->directory)
+        return make_directory(path);
+    out = stage_file(path, member->mode);
+    if (!out)
+        return -1;
+    error = tpz_copy(archive, out, member->size);
+    if (fclose(out))
+        error = -1;
+    if (error || publish_file(path)) {
+        discard_stage(path);
+        return -1;
+    }
+    if (fprintf(files, "%s\n", member->path) < 0 || fflush(files)) {
+        finish_file(path, 0);
+        return -1;
+    }
+    return 0;
+}
+
+static void finish_payload(FILE *files, int keep)
+{
+    static char path[MAX_PATH];
+    char relative[TPZ_PATH + 1];
+    rewind(files);
+    while (fgets(relative, sizeof(relative), files)) {
+        char *newline = strchr(relative, '\n');
+        if (!newline)
+            break;
+        *newline = 0;
+        if (!payload_path(path, relative))
+            finish_file(path, keep);
+    }
+}
+
+static int install_payload(FILE *archive, const char *info, const char *files_path)
+{
+    struct tpz_member member;
+    int next, status = 1;
+    FILE *files = stage_file(files_path, 0644);
+    if (!files)
+        return 1;
+    while ((next = tpz_next(archive, &member)) > 0)
+        if (install_member(archive, &member, files))
+            break;
+    if (next == 0 && !fflush(files) && !publish_file(info)) {
+        if (!publish_file(files_path)) {
+            finish_file(files_path, 1);
+            status = 0;
+        }
+        finish_file(info, status == 0);
+    }
+    finish_payload(files, status == 0);
+    fclose(files);
+    discard_stage(files_path);
+    return status;
+}
+
 static int cmd_install(const char *tpzfile)
 {
-    char tmpinfo[MAX_PATH];
-    char dbdir[MAX_PATH];
-    char infopath[MAX_PATH];
-    char filespath[MAX_PATH];
-    char cmd[MAX_PATH * 2];
-    const char *pkgname;
-    const char *version;
-    FILE *f;
+    struct tpz_member member;
+    static char info[MAX_PATH], files[MAX_PATH], temp_info[MAX_PATH + 16];
+    char manifest[4096], name[MAX_DEPNAME];
+    FILE *archive, *out;
+    char *line;
+    int status = 1, rc;
 
-    /* Check file exists */
-    if (access(tpzfile, R_OK) != 0) {
-        fprintf(stderr, "tpkg: cannot read %s\n", tpzfile);
+    archive = tpz_open(tpzfile);
+    if (!archive) {
+        REPORT(stderr, "tpkg: cannot unpack %s\n", tpzfile);
         return 1;
     }
-
-    /* Extract manifest to temp file */
-    strcpy(tmpinfo, "/tmp/.tpkg-info-tmp");
-    if (extract_info(tpzfile, tmpinfo) != 0) {
-        fprintf(stderr, "tpkg: failed to read .tpz-info from %s\n", tpzfile);
-        return 1;
+    if (tpz_next(archive, &member) != 1 || member.directory ||
+        strcmp(member.path, ".tpz-info") || member.size >= sizeof(manifest) ||
+        fread(manifest, 1, member.size, archive) != member.size ||
+        fseek(archive, (-member.size) & 511, SEEK_CUR))
+        goto done;
+    manifest[member.size] = 0;
+    line = manifest;
+    while (strncmp(line, "Package:", 8) != 0) {
+        line = strchr(line, '\n');
+        if (!line)
+            goto done;
+        line++;
     }
+    line += 8;
+    line += strspn(line, " \t");
+    if (strcspn(line, "\r\n") >= sizeof(name))
+        goto done;
+    snprintf(name, sizeof(name), "%.*s", (int)strcspn(line, "\r\n"), line);
+    if (!package_name(name))
+        goto done;
 
-    pkgname = read_field(tmpinfo, "Package");
-    if (!pkgname[0]) {
-        fprintf(stderr, "tpkg: no Package field in .tpz-info\n");
-        unlink(tmpinfo);
-        return 1;
+    snprintf(info, sizeof(info), "%s/%s/info", TPKG_DB, name);
+    snprintf(files, sizeof(files), "%s/%s/files", TPKG_DB, name);
+    snprintf(temp_info, sizeof(temp_info), "%s.tpkg-new", info);
+    if (parents(info) || !(out = stage_file(info, 0644)))
+        goto done;
+    rc = fwrite(manifest, 1, member.size, out) != member.size;
+    if (fclose(out))
+        rc = 1;
+    if (!rc && !check_deps(temp_info)) {
+        REPORT(stdout, "Installing %s %s ...\n", name, read_field(temp_info, "Version"));
+        status = install_payload(archive, info, files);
     }
-
-    version = read_field(tmpinfo, "Version");
-
-    printf("Installing %s %s ...\n", pkgname, version);
-
-    /* Check dependencies */
-    {
-        int nmissing = check_deps(tmpinfo);
-        if (nmissing > 0) {
-            fprintf(stderr, "tpkg: %d missing dependenc%s — install them first\n",
-                    nmissing, nmissing == 1 ? "y" : "ies");
-            unlink(tmpinfo);
-            return 1;
-        }
-    }
-
-    /* Create database directory */
-    snprintf(dbdir, sizeof(dbdir), "%s/%s", TPKG_DB, pkgname);
-    mkdirp(dbdir);
-
-    /* Extract package to root */
-    snprintf(cmd, sizeof(cmd), "tar xzf %s -C / 2>/dev/null", tpzfile);
-    if (system(cmd) != 0) {
-        fprintf(stderr, "tpkg: extraction failed\n");
-        return 1;
-    }
-
-    /* Save manifest to database */
-    snprintf(infopath, sizeof(infopath), "%s/info", dbdir);
-    snprintf(cmd, sizeof(cmd), "cp %s %s", tmpinfo, infopath);
-    system(cmd);
-
-    /* Record file list */
-    snprintf(filespath, sizeof(filespath), "%s/files", dbdir);
-    snprintf(cmd, sizeof(cmd),
-        "tar tzf %s 2>/dev/null | grep -v '^\\./\\?$' | grep -v '^\\.tpz-info$' > %s",
-        tpzfile, filespath);
-    system(cmd);
-
-    unlink(tmpinfo);
-
-    /* Count files */
-    {
-        int count = 0;
-        char line[MAX_PATH];
-        f = fopen(filespath, "r");
-        if (f) {
-            while (fgets(line, sizeof(line), f)) count++;
-            fclose(f);
-        }
-        printf("  %s %s installed (%d files)\n", pkgname, version, count);
-    }
-
-    return 0;
+    discard_stage(info);
+    if (!status)
+        REPORT(stdout, "  %s installed\n", name);
+done:
+    if (status)
+        REPORT(stderr, "tpkg: installation of %s failed\n", tpzfile);
+    fclose(archive);
+    return status;
 }
 
-/* -----------------------------------------------------------------------
- * tpkg remove <package>
- * ----------------------------------------------------------------------- */
 static int cmd_remove(const char *pkgname)
 {
-    char dbdir[MAX_PATH];
-    char filespath[MAX_PATH];
-    char infopath[MAX_PATH];
-    char filepath[MAX_PATH];
-    char line[MAX_PATH];
+    static char info[MAX_PATH], files[MAX_PATH], dir[MAX_PATH], path[MAX_PATH];
+    char line[TPZ_PATH + 4], normalized[TPZ_PATH];
     FILE *f;
-    int count = 0;
-    const char *version;
+    int count = 0, failed = 0;
 
-    snprintf(dbdir, sizeof(dbdir), "%s/%s", TPKG_DB, pkgname);
-    snprintf(infopath, sizeof(infopath), "%s/info", dbdir);
-    snprintf(filespath, sizeof(filespath), "%s/files", dbdir);
-
-    if (access(infopath, R_OK) != 0) {
-        fprintf(stderr, "tpkg: package '%s' is not installed\n", pkgname);
+    if (!package_name(pkgname))
+        return 1;
+    snprintf(dir, sizeof(dir), "%s/%s", TPKG_DB, pkgname);
+    snprintf(info, sizeof(info), "%s/%s/info", TPKG_DB, pkgname);
+    snprintf(files, sizeof(files), "%s/%s/files", TPKG_DB, pkgname);
+    f = fopen(files, "r");
+    if (!f || access(info, R_OK) != 0) {
+        if (f)
+            fclose(f);
+        REPORT(stderr, "tpkg: package '%s' is not installed\n", pkgname);
         return 1;
     }
-
-    version = read_field(infopath, "Version");
-    printf("Removing %s %s ...\n", pkgname, version);
-
-    /* Delete installed files (in reverse order to remove files before dirs) */
-    f = fopen(filespath, "r");
-    if (f) {
-        /* Read all paths, delete files first */
-        while (fgets(line, sizeof(line), f)) {
-            int len = strlen(line);
-            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
-                line[--len] = 0;
-            if (len == 0) continue;
-
-            /* Convert ./path to /path */
-            if (line[0] == '.' && line[1] == '/')
-                snprintf(filepath, sizeof(filepath), "/%s", line + 2);
-            else
-                snprintf(filepath, sizeof(filepath), "/%s", line);
-
-            if (unlink(filepath) == 0)
-                count++;
+    while (fgets(line, sizeof(line), f)) {
+        char *end = strpbrk(line, "\r\n");
+        if (!end) {
+            failed = 1;
+            break;
         }
-        fclose(f);
+        *end = 0;
+        if (!line[0] || !strcmp(line, "./") || !strcmp(line, "."))
+            continue;
+        if (tpz_relative_path(normalized, line) || payload_path(path, normalized)) {
+            failed = 1;
+            break;
+        }
+        if (unlinkat(AT_FDCWD, path, 0) == 0)
+            count++;
+        else if (errno != ENOENT && errno != EISDIR)
+            failed = 1;
     }
-
-    /* Remove database entry */
-    unlink(infopath);
-    unlink(filespath);
-    rmdir(dbdir);
-
-    printf("  %s removed (%d files deleted)\n", pkgname, count);
+    failed |= ferror(f);
+    fclose(f);
+    if (failed || unlinkat(AT_FDCWD, info, 0) || unlinkat(AT_FDCWD, files, 0) ||
+        unlinkat(AT_FDCWD, dir, AT_REMOVEDIR)) {
+        REPORT(stderr, "tpkg: removal of %s failed\n", pkgname);
+        return 1;
+    }
+    REPORT(stdout, "  %s removed (%d files deleted)\n", pkgname, count);
     return 0;
 }
 
+static int with_install_lock(int (*operation)(const char *), const char *arg)
+{
+    int rc;
+    mkdirp(TPKG_DB);
+    if (mkdir(INSTALL_LOCK, 0700)) {
+        REPORT(stderr, "tpkg: cannot lock the package database\n");
+        return 1;
+    }
+    rc = operation(arg);
+    if (unlinkat(AT_FDCWD, INSTALL_LOCK, AT_REMOVEDIR))
+        return 1;
+    return rc;
+}
+
+int tpkg_install(const char *archive)
+{
+    return with_install_lock(cmd_install, archive);
+}
+
+int tpkg_remove(const char *package)
+{
+    return with_install_lock(cmd_remove, package);
+}
+
+#ifndef TPKG_EMBEDDED
 /* -----------------------------------------------------------------------
  * tpkg list
  * ----------------------------------------------------------------------- */
@@ -429,7 +602,7 @@ int main(int argc, char **argv)
 
     if (strcmp(argv[1], "install") == 0) {
         if (argc < 3) { fprintf(stderr, "tpkg install: missing filename\n"); return 1; }
-        return cmd_install(argv[2]);
+        return tpkg_install(argv[2]);
     }
     if (strcmp(argv[1], "depends") == 0) {
         if (argc < 3) { fprintf(stderr, "tpkg depends: missing package name\n"); return 1; }
@@ -489,7 +662,7 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "remove") == 0) {
         if (argc < 3) { fprintf(stderr, "tpkg remove: missing package name\n"); return 1; }
-        return cmd_remove(argv[2]);
+        return tpkg_remove(argv[2]);
     }
     if (strcmp(argv[1], "list") == 0) {
         return cmd_list();
@@ -507,3 +680,4 @@ int main(int argc, char **argv)
     usage();
     return 1;
 }
+#endif

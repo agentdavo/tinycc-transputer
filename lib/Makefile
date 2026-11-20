@@ -94,6 +94,7 @@ $(TOP)/$(X)libtcc1.a : $(OBJ-libtcc1) $(TCC)
 # (-mt414), each with the soft-float helpers its floating point calls, and
 # for the T800 (-mt800 and -mt805): the default one is -mt9000 code.
 ifeq "$T" "transputer"
+VPATH += $(TOPSRC)/lib/transputer
 SOFTFP-transputer = transputer-softfp.o transputer-softfp-sn.o transputer-softfp-db.o
 OBJ-t425 = $(patsubst %.o,transputer-t425-%.o,$(OBJ-transputer) $(SOFTFP-transputer))
 OBJ-t414 = $(patsubst %.o,transputer-t414-%.o,$(OBJ-transputer) $(SOFTFP-transputer))
@@ -103,13 +104,13 @@ all: $(TOP)/transputer-libtcc1-t425.a $(TOP)/transputer-libtcc1-t414.a
 all: $(TOP)/transputer-libtcc1-t800.a
 
 # Software TVX is built from t4's semantic headers (vendored in
-# transputer-tvx/), which include <stdint.h> and friends: give it a
+# transputer/tvx/), which include <stdint.h> and friends: give it a
 # libc-free set rather than the host's /usr/include.
 $(addprefix $(X),$(TVX-transputer)) \
 $(addprefix transputer-t800-,$(TVX-transputer)) \
 $(addprefix transputer-t425-,$(TVX-transputer)) \
 $(addprefix transputer-t414-,$(TVX-transputer)) : \
-    XFLAGS += -nostdinc -I$(TOPSRC)/lib/transputer-tvx/include -I$(TOPSRC)/include
+    XFLAGS += -nostdinc -I$(TOPSRC)/lib/transputer/tvx/include -I$(TOPSRC)/include
 
 $(TOP)/transputer-libtcc1-t425.a : $(OBJ-t425) $(TCC)
 	$S$(XAR) rcs $@ $(OBJ-t425)

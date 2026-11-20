@@ -19,7 +19,7 @@ printf '%s\n' "Connect HOST to processor 0 link 0" "Connect HOST to processor 1 
     "Connect processor 0 link 2 to processor 1 link 2" > vlbw.map
 for n in 0 1; do
     "$R/transputer-tcc" -static -nostdlib -I"$R/include" -DNODE=$n -o n$n.elf \
-        "$T/test_boot.S" "$HERE/vlbw.c" "$R/lib/transputer-conc.c" "$R/transputer-libtcc1.a" 2>/dev/null &&
+        "$T/test_boot.S" "$HERE/vlbw.c" "$R/lib/transputer/transputer-conc.c" "$R/transputer-libtcc1.a" 2>/dev/null &&
     "$R/transputer-netload" n$n.elf n$n.btl >/dev/null 2>&1 || { echo "node $n: build failed"; exit 1; }
 done
 export SPYNET=vlbw.map

@@ -93,13 +93,19 @@ ST_FUNC void gen_le32(int c);
 #include "tcc.h"
 #include "transputer-opcodes.h"
 #include "transputer-enc.h"  /* Unified prefix encoding */
+#include "transputer-knobs.h"
 
 /* Forward declarations */
 static void transputer_func_reset(void);
+static void tp_gen_tvx_unary(int opr);
+static void tp_gen_tvx_binary(int opr);
+static void tp_gen_vec2(int opr);
+static void tp_gen_vec3(int opr);
+static void emit_instr(int opc, int v);
 static void tp_push_sv(SValue *sv);
 static void tp_push_float_sv(SValue *sv);
 static void tp_store_fpu_result_to_slot(int slot, int bt);
-static int tp_t425(void);
+static int tp_soft_float(void);
 static int tp_t414(void);
 static int tp_tvx(void);
 static int tp_try_inline_local_zero_memset(int nb_args);
@@ -114,7 +120,7 @@ static int tp_no_callopt(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_NO_CALLOPT") ? 1 : 0;
+        v = tp_knob(TPK_TP_NO_CALLOPT) ? 1 : 0;
     return v;
 }
 static int tp_case_cmp(uint64_t a, uint64_t b, int is_unsigned);
@@ -122,28 +128,18 @@ static uint64_t tp_switch_total_selectors(struct switch_t *sw, int is_unsigned);
 static void tp_switch_emit_instr(int opcode, int operand);
 static void tp_switch_emit_fixed_slot(int opcode, int operand, int slot_size);
 static void tp_switch_patch_fixed_slot(int offset, int opcode, int operand, int slot_size);
-static void switch_slot_add(int instr_offset, int slot_size, int opcode,
-                            int target_addr, int base_addr);
 static void tp_builtin_return_void(void);
-void tp_emit_1op(int opcode);
-void tp_emit_2op(int opcode, int b_idx, int a_idx);
-void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx);
+static void tp_gen_flag_result(int opr);
+static void tp_builtin_word_result(void);
+static void tp_emit_1op(int opcode);
+static void tp_emit_2op(int opcode, int b_idx, int a_idx);
+static void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx);
 struct tp_call_words {
     SValue *words;
     int count;
     int cap;
 };
-typedef void (*tp_builtin_gen_fn)(void);
-struct tp_builtin_desc {
-    int tok;
-    const char *args;
-    tp_builtin_gen_fn gen;
-    unsigned char returns_void;
-};
-static const struct tp_builtin_desc *tp_find_builtin_desc(int tok);
-struct tp_soft_tvx_desc;
-static const struct tp_soft_tvx_desc *tp_find_soft_tvx(int tok);
-static void tp_soft_tvx_call(const struct tp_soft_tvx_desc *s);
+static void tp_gen_tvx_dot4(int opr);
 static void tp_call_words_reserve(struct tp_call_words *cw, int extra_words);
 static void tp_expand_struct_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug);
 static void tp_expand_scalar_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug);
@@ -159,129 +155,7 @@ static void tp_ldc_pooled(int v);
 static void Tp_STL(int v);
 static void Tp_LDL(int v);
 static void abcreg_push(int count);
-static int func_start_ind;
-
-/* Forward declarations for builtins defined later in this file */
-void gen_builtin_saveh(void);
-void gen_builtin_savel(void);
-void gen_builtin_sthf(void);
-void gen_builtin_sthb(void);
-void gen_builtin_stlf(void);
-void gen_builtin_stlb(void);
-void gen_builtin_norm(void);
-void gen_builtin_bitcnt(void);
-void gen_builtin_bitrevword(void);
-void gen_builtin_bitrevnbits(void);
-void gen_builtin_csub0(void);
-void gen_builtin_fmul(void);
-void gen_builtin_lddevid(void);
-void gen_builtin_fpsqrt(void);
-void gen_builtin_testhalterr(void);
-void gen_builtin_stoperr(void);
-void gen_builtin_testpranal(void);
-void gen_builtin_fpchkerr(void);
-void gen_builtin_fptesterr(void);
-void gen_builtin_fpseterr(void);
-void gen_builtin_fpclrerr(void);
-void gen_builtin_fpint(void);
-void gen_builtin_fpintrp(void);
-void gen_builtin_fpintrm(void);
-void gen_builtin_fpintrz(void);
-void gen_builtin_fprem(void);
-void gen_builtin_fpabs(void);
-void gen_builtin_bf16tof32(void);
-void gen_builtin_f32tobf16(void);
-void gen_builtin_bf16pack(void);
-void gen_builtin_bf16unpkh(void);
-void gen_builtin_mxfp4tof32(void);
-void gen_builtin_f32tomxfp4(void);
-void gen_builtin_mxe8m0tof32(void);
-void gen_builtin_mxe8m0of(void);
-void gen_builtin_mxfp4dot(void);
-void gen_builtin_bf16dot(void);
-void gen_builtin_mxfp4gemv(void);
-void gen_builtin_mxfp4unpk8(void);
-void gen_builtin_f32tomxfp4x8(void);
-void gen_builtin_bf16mul2(void);
-void gen_builtin_bf16add2(void);
-void gen_builtin_vsetlen(void);
-void gen_builtin_mxfp4gemvbf(void);
-void gen_builtin_vadd(void);
-void gen_builtin_vmul(void);
-void gen_builtin_vsilu(void);
-void gen_builtin_vrmsnorm(void);
-void gen_builtin_vsoftmax(void);
-void gen_builtin_f16tof32(void);
-void gen_builtin_f32tof16(void);
-void gen_builtin_q8dot(void);
-void gen_builtin_q8dotbf(void);
-void gen_builtin_iq1mdot(void);
-void gen_builtin_iq2xxsdot(void);
-void gen_builtin_iq3xxsdot(void);
-void gen_builtin_qsetfmt(void);
-void gen_builtin_qdot(void);
-void gen_builtin_vhad32(void);
-void gen_builtin_mxqrot(void);
-void gen_builtin_mxqrotbf(void);
-void gen_builtin_ftsetvp(void);
-void gen_builtin_ftransp(void);
-void gen_builtin_ftranspb(void);
-void gen_builtin_fsincos(void);
-void gen_builtin_frsqrtb(void);
-void gen_builtin_frecipb(void);
-void gen_builtin_fsincosb(void);
-void gen_builtin_vsetstride(void);
-void gen_builtin_ftcull(void);
-void gen_builtin_tskin(void);
-void gen_builtin_vsetfmt(void);
-void gen_builtin_ftsetlit(void);
-void gen_builtin_flitb(void);
-void gen_builtin_qgemm(void);
-void gen_builtin_vblend8(void);
-void gen_builtin_vfill(void);
-void gen_builtin_vfill2d(void);
-void gen_builtin_csumb(void);
-void gen_builtin_vblend2d(void);
-void gen_builtin_stvxstate(void);
-void gen_builtin_csumcpy(void);
-void gen_builtin_vq8k(void);
-void gen_builtin_vq80(void);
-void gen_builtin_vcvt(void);
-void gen_builtin_vxfer(void);
-void gen_builtin_ldconf(void);
-void gen_builtin_stconf(void);
-void gen_builtin_initvlcb(void);
-void gen_builtin_sethdr(void);
-void gen_builtin_writehdr(void);
-void gen_builtin_readhdr(void);
-void gen_builtin_setchmode(void);
-void gen_builtin_stopch(void);
-void gen_builtin_swapbfr(void);
-void gen_builtin_vin(void);
-void gen_builtin_vout(void);
-void gen_builtin_ldchstatus(void);
-void gen_builtin_chantype(void);
-void gen_builtin_semwait(void);
-void gen_builtin_semsignal(void);
-void gen_builtin_mkrc(void);
-void gen_builtin_unmkrc(void);
-void gen_builtin_grant(void);
-void gen_builtin_enbg(void);
-void gen_builtin_disg(void);
-void gen_builtin_irdsq(void);
-void gen_builtin_erdsq(void);
-void gen_builtin_ldresptr(void);
-void gen_builtin_stresptr(void);
-void gen_builtin_tld(void);
-void gen_builtin_tst(void);
-void gen_builtin_tclr(void);
-void gen_builtin_f2ldm(void);
-void gen_builtin_f4ldm(void);
-void gen_builtin_f2ldma(void);
-void gen_builtin_f2stm(void);
-void gen_builtin_fmvmul4(void);
-void gen_builtin_fmvmul4st(void);
-void gen_builtin_fpoly3(void);
+static int func_start_ind = -1;  /* where the function being compiled begins */
 
 /* DUP optimization: track what's in AReg after tp_push_sv().
  * If next push wants the same value, emit DUP instead of reloading.
@@ -328,7 +202,7 @@ static int tp_no_ldnlp(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_NO_LDNLP") ? 1 : 0;
+        v = tp_knob(TPK_TP_NO_LDNLP) ? 1 : 0;
     return v;
 }
 
@@ -350,6 +224,8 @@ static int tp_no_ldnlp(void)
  * Only for pointers.  On a signed integer `adc` is the error-*checking* add and
  * dropping the check would change behaviour under `t4 -se`; addresses cannot
  * meaningfully overflow, which is why tp_adc_would_trap already exempts them. */
+static int tp_ptr_add_is_addr;
+
 static int tp_addr_disp_words(int bytes)
 {
     if (tp_no_ldnlp())
@@ -361,7 +237,7 @@ static int tp_addr_disp_words(int bytes)
     return bytes >> 2;
 }
 
-/* Set by tccgen.c around the final `+` of a pointer computation.
+/* Set around the final `+` of a pointer computation (tp_ptradd_addr).
  *
  * `bsub` and `sum` compute the same thing (AReg + BReg, commutative), but the
  * T9000 grouper charges `bsub` to stage 2 (address calculations, 2 per cycle,
@@ -372,112 +248,84 @@ static int tp_addr_disp_words(int bytes)
  * What the flag still decides is the constant form: a pointer plus a whole
  * number of words becomes `ldnlp`, also stage 2 (tp_addr_disp_words), where an
  * integer keeps the error-checking `adc`. */
-ST_DATA int tp_ptr_add_is_addr;
 
 static void tp_areg_invalidate(void) { tp_areg_tag = TP_AREG_TAG_NONE; }
 
-/* Tracks the STL that was emitted most recently, so a matching LDL of the same
- * workspace-slot register can cancel it instead of round-tripping the value
- * through memory. Valid only while tp_last_stl_end == ind, i.e. while nothing
- * whatsoever has been emitted since — which also makes raw g() byte writes
- * invalidate it for free. */
-static int tp_last_stl_reg = -1;
-static int tp_last_stl_off = -1;
-static int tp_last_stl_end = -1;
+#include "transputer-hist.h"
 
-/* The slot gen_opf last stored an FPU result to, and where that `ldlp slot;
- * fpstnl` is; see tp_fpu_take_resident(). */
-static int tp_fpr_reg = -1;
-static int tp_fpr_off = -1;
-static int tp_fpr_end = -1;
-static int tp_fpr_db;
+static int tp_fpu_take_resident(SValue *sv, int is_db);
 
-/* Same idea, but for the immediately preceding instruction of any kind. Used
- * to fold a constant address adjustment into the following non-local access. */
-static int tp_last_opc = -1;
-static int tp_last_val = 0;
-static int tp_last_off = -1;
-static int tp_last_end = -1;
-
-/* One further back, so that cancelling a store can re-expose the instruction
- * that preceded it — typically the ADC whose offset we then want to fold into
- * the following LDNL/STNL. */
-static int tp_prev_opc = -1;
-static int tp_prev_val = 0;
-static int tp_prev_off = -1;
-static int tp_prev_end = -1;
-
-/* A short trailing window of emitted instructions.
- *
- * The two trackers above only reach one and two instructions back, which is
- * enough to fold `ADC k` into the LDNL that immediately follows it. The store
- * path needs more: by the time store() runs, the address has been computed,
- * offset and spilled, and the whole RHS has been emitted on top of it, so the
- * ADC is four or more instructions behind the STNL. Keeping a small window of
- * what was emitted lets store() roll the tail back and rebuild it in the order
- * the T9000 wants.
- *
- * Only instructions emitted through emit_instr() and emit_local_op() are
- * recorded. Anything written with a raw g() — LDC_ABS relocation placeholders,
- * jump placeholders — leaves a gap that the contiguity check below detects, so
- * those invalidate the window for free, exactly as they do for tp_last_*. */
-#define TP_HIST_N 24
-#define TP_HIST_INSTR 0    /* emitted by emit_instr(): val is the operand   */
-#define TP_HIST_LOCAL 1    /* emitted by emit_local_op(): val is a byte offset */
-
-struct tp_hist_ent {
-    int kind;
-    int opc;
-    int val;
-    int off;
-    int end;
-};
-
-/* hist[0] is the most recently emitted instruction. */
-static struct tp_hist_ent tp_hist[TP_HIST_N];
-static int tp_hist_n;
-
-static void tp_hist_clear(void)
+/* What the environment asks to see of a relocation as tccgen.c's greloca()
+ * emits it: T4_IPREL_NONFUNC_WARN, T4_IPREL_DIAG, T4_RELOC_LOG (with
+ * T4_RELOC_SYM and T4_RELOC_TYPE) and T4_SYM_TRACE. */
+ST_FUNC void tp_greloca_trace(Section *s, Sym *sym, unsigned long offset,
+                              int type)
 {
-    tp_hist_n = 0;
-}
+    static int reloc_type_filter = -2;
+    const char *reloc_sym_filter = tp_knob(TPK_T4_RELOC_SYM);
 
-/* Code from `off` onwards has been rolled back; forget it. */
-static void tp_hist_rollback(int off)
-{
-    while (tp_hist_n > 0 && tp_hist[0].end > off) {
-        int i;
-        for (i = 0; i < tp_hist_n - 1; i++)
-            tp_hist[i] = tp_hist[i + 1];
-        tp_hist_n--;
+    if (reloc_type_filter == -2) {
+        const char *env = tp_knob(TPK_T4_RELOC_TYPE);
+        reloc_type_filter = env && *env ? (int)strtol(env, NULL, 0) : -1;
     }
-}
 
-static void tp_hist_record(int kind, int opc, int val, int off, int end)
-{
-    int i;
-    for (i = (tp_hist_n < TP_HIST_N ? tp_hist_n : TP_HIST_N - 1); i > 0; i--)
-        tp_hist[i] = tp_hist[i - 1];
-    tp_hist[0].kind = kind;
-    tp_hist[0].opc = opc;
-    tp_hist[0].val = val;
-    tp_hist[0].off = off;
-    tp_hist[0].end = end;
-    if (tp_hist_n < TP_HIST_N)
-        tp_hist_n++;
-}
-
-static void tp_stl_track_clear(void)
-{
-    tp_last_stl_reg = -1;
-    tp_last_stl_off = -1;
-    tp_last_stl_end = -1;
-    tp_last_opc = -1;
-    tp_last_off = -1;
-    tp_last_end = -1;
-    tp_prev_opc = -1;
-    tp_prev_off = -1;
-    tp_prev_end = -1;
+    /* Bug detection: IPREL32 should only be used for function calls */
+    if (type == R_TRANSPUTER_IPREL32 && sym) {
+        int bt = sym->type.t & VT_BTYPE;
+        /* IPREL32 is only valid for function calls (bt == VT_FUNC).
+         * If we're emitting IPREL32 for a non-function symbol, that's a bug! */
+        if (bt != VT_FUNC && tp_knob_on(TPK_T4_IPREL_NONFUNC_WARN)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            fprintf(stderr,
+                    "BUG_IPREL32_NONFUNCTION: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx\n",
+                    get_tok_str(sym->v, NULL), bt, func, fname,
+                    file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset);
+        }
+        if (tp_knob_on(TPK_T4_IPREL_DIAG)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "IPREL_DIAG: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    get_tok_str(sym->v, NULL), bt, func, fname,
+                    file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+    if ((type == R_TRANSPUTER_IPREL32 || type == R_TRANSPUTER_LDC_ABS) && sym && tp_knob_on(TPK_T4_RELOC_LOG)) {
+        const char *name = get_tok_str(sym->v, NULL);
+        if ((!reloc_sym_filter || strstr(name, reloc_sym_filter)) &&
+            (reloc_type_filter < 0 || reloc_type_filter == type)) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "RELOC_EMIT: sym=%s type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    name, type, func, fname, file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
+    if (sym && tp_knob_on(TPK_T4_SYM_TRACE)) {
+        const char *name = get_tok_str(sym->v, NULL);
+        if (name && strstr(name, tp_knob(TPK_T4_SYM_TRACE))) {
+            const char *fname = file ? file->filename : "<unknown>";
+            const char *func = funcname ? funcname : "<no func>";
+            uint8_t op = 0;
+            int bt = sym->type.t & VT_BTYPE;
+            if (s && s->data && offset < s->data_offset)
+                op = ((uint8_t *)s->data)[offset];
+            fprintf(stderr,
+                    "SYM_RELOC: sym=%s bt=0x%x type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
+                    name, bt, type, func, fname, file ? file->line_num : -1,
+                    s ? s->name : "<no-section>", offset, op);
+        }
+    }
 }
 
 /* Fold `ADC k` into the word offset of the LDNL/STNL that follows it.
@@ -494,38 +342,38 @@ static void tp_stl_track_clear(void)
 static int tp_fold_adc_into_nonlocal(int base_words)
 {
     int words;
+    const struct tp_hist_ent *last;
 
     /* Never rewind under nocode_wanted: emission is suppressed, so `ind` is
      * frozen and the trackers may describe *live* pre-region code.  Folding
      * would delete that code while the replacement is itself suppressed. */
     if (nocode_wanted)
         return base_words;
-    if ((tp_last_opc != TP_OP_ADC && tp_last_opc != TP_OP_LDNLP) ||
-        tp_last_end != ind || tp_last_off < 0)
+    last = tp_hist_last_instr();
+    if (!last || (last->opc != TP_OP_ADC && last->opc != TP_OP_LDNLP))
         return base_words;
-    if (tp_last_off < func_start_ind)
+    if (last->off < func_start_ind)
         return base_words;
-    if (tp_last_val == 0)
+    if (last->val == 0)
         return base_words;
-    if (tp_last_opc == TP_OP_LDNLP) {
+    if (last->opc == TP_OP_LDNLP) {
         /* LDNLP already carries a word displacement.  Folding it away is still
          * a win: the access resolves the displacement itself, so this removes
          * an instruction as well as a stage-2 slot. */
-        words = base_words + tp_last_val;
+        words = base_words + last->val;
     } else {
-        if (tp_last_val & 3)
+        if (last->val & 3)
             return base_words;
-        words = base_words + (tp_last_val >> 2);
+        words = base_words + (last->val >> 2);
     }
     /* Keep the folded form to encodings that are no longer than what we
      * removed; a huge displacement would just move the prefix bytes around. */
     if (words < 0 || words > 4095)
         return base_words;
 
-    ind = tp_last_off;
+    ind = last->off;
     cur_text_section->data_offset = ind;
     tp_hist_rollback(ind);
-    tp_stl_track_clear();
     return words;
 }
 
@@ -554,27 +402,16 @@ static int tp_reg_live_on_vstack(int r, SValue *except)
 static int tp_push_reg_or_cancel_stl(int r, SValue *except)
 {
     /* See tp_fold_adc_into_nonlocal: no rollback while emission is off. */
-    if (!nocode_wanted &&
-        tp_last_stl_reg == r && tp_last_stl_end == ind &&
-        tp_last_stl_off >= 0 && tp_last_stl_off >= func_start_ind &&
-        !tp_reg_live_on_vstack(r, except)) {
-        int roll_to = tp_last_stl_off;
-        int p_opc = tp_prev_opc, p_val = tp_prev_val;
-        int p_off = tp_prev_off, p_end = tp_prev_end;
+    int roll_to = tp_hist_last_stl(r);
 
+    if (!nocode_wanted && roll_to >= 0 && roll_to >= func_start_ind &&
+        !tp_reg_live_on_vstack(r, except)) {
         ind = roll_to;
         cur_text_section->data_offset = ind;
-        tp_hist_rollback(ind);
-        tp_stl_track_clear();
         /* The instruction before the cancelled store is once again the last
-         * thing emitted, so re-expose it — otherwise a preceding ADC can no
-         * longer be folded into the LDNL/STNL that follows. */
-        if (p_end == roll_to) {
-            tp_last_opc = p_opc;
-            tp_last_val = p_val;
-            tp_last_off = p_off;
-            tp_last_end = p_end;
-        }
+         * thing emitted: a preceding ADC can still be folded into the
+         * LDNL/STNL that follows. */
+        tp_hist_rollback_keep_last(ind);
         tp_areg_invalidate();
         abcreg_push(1);
         return 1;
@@ -607,186 +444,33 @@ static void tp_builtin_return_void(void)
     vtop->type.t = VT_VOID;
 }
 
-static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
+/* A jump table as it is emitted: `ldl idx; ldc 5; prod; ldc 2; ldpi; bsub;
+ * gcall`, then one five-byte `j` for each index (front-padded with pfix 0,
+ * the width of every other jump placeholder).  gcall's return address is
+ * dropped: the stack is empty at a case label.  tp_relax_function() then
+ * gives the entries the common width their displacements need, and when
+ * that is four bytes indexes them with wsub: `ldl idx; ldc 2; ldpi; wsub;
+ * gcall`, 11 T800 cycles. */
+#define TP_SWITCH_JUMP_SLOT_SIZE 5
+/* The tables of the function being compiled: section offsets of the
+ * dispatch's `ldc width` and of the first entry. */
+struct tp_swtab {
+    int scale, table, entries;
+};
+static struct tp_swtab *swtab_log;
+static int swtab_count, swtab_cap;
+
+static void swtab_add(int scale, int table, int entries)
 {
-    static const struct tp_builtin_desc descs[] = {
-        { TOK___out,         "eee", gen_builtin_out,         1 },
-        { TOK___in,          "eee", gen_builtin_in,          1 },
-        { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1 },
-        { TOK___outword,     "ee",  gen_builtin_outword,     1 },
-        { TOK___tin,         "e",   gen_builtin_tin,         0 },
-        { TOK___resetch,     "e",   gen_builtin_resetch,     0 },
-        { TOK___move,        "eee", gen_builtin_move,        1 },
-        { TOK___move2dinit,  "eee", gen_builtin_move2dinit,  1 },
-        { TOK___move2dall,   "eee", gen_builtin_move2dall,   1 },
-        { TOK___move2dnonzero,"eee",gen_builtin_move2dnonzero,1 },
-        { TOK___move2dzero,  "eee", gen_builtin_move2dzero,  1 },
-        { TOK___crcbyte,     "eee", gen_builtin_crcbyte,     0 },
-        { TOK___crcword,     "eee", gen_builtin_crcword,     0 },
-        { TOK___ldtimer,     "",    gen_builtin_ldtimer,     0 },
-        { TOK___sttimer,     "e",   gen_builtin_sttimer,     1 },
-        { TOK___mint,        "",    gen_builtin_mint,        0 },
-        { TOK___ldpri,       "",    gen_builtin_ldpri,       0 },
-        { TOK___startp,      "ee",  gen_builtin_startp,      1 },
-        { TOK___endp,        "",    gen_builtin_endp,        1 },
-        { TOK___runp,        "e",   gen_builtin_runp,        1 },
-        { TOK___stopp,       "",    gen_builtin_stopp,       1 },
-        { TOK___alt,         "",    gen_builtin_alt,         1 },
-        { TOK___altwt,       "",    gen_builtin_altwt,       0 },
-        { TOK___altend,      "",    gen_builtin_altend,      1 },
-        { TOK___talt,        "",    gen_builtin_talt,        1 },
-        { TOK___taltwt,      "",    gen_builtin_taltwt,      0 },
-        { TOK___enbc,        "ee",  gen_builtin_enbc,        1 },
-        { TOK___enbs,        "e",   gen_builtin_enbs,        1 },
-        { TOK___enbt,        "ee",  gen_builtin_enbt,        1 },
-        { TOK___disc,        "eee", gen_builtin_disc,        0 },
-        { TOK___diss,        "ee",  gen_builtin_diss,        0 },
-        { TOK___dist,        "eee", gen_builtin_dist,        0 },
-        { TOK___saveh,       "e",   gen_builtin_saveh,       1 },
-        { TOK___savel,       "e",   gen_builtin_savel,       1 },
-        { TOK___sthf,        "e",   gen_builtin_sthf,        1 },
-        { TOK___sthb,        "e",   gen_builtin_sthb,        1 },
-        { TOK___stlf,        "e",   gen_builtin_stlf,        1 },
-        { TOK___stlb,        "e",   gen_builtin_stlb,        1 },
-        { TOK___gajw,        "e",   gen_builtin_gajw,        0 },
-        { TOK___wcnt,        "",    gen_builtin_wcnt,        0 },
-        { TOK___seterr,      "",    gen_builtin_seterr,      1 },
-        { TOK___testerr,     "",    gen_builtin_testerr,     0 },
-        { TOK___sethalterr,  "",    gen_builtin_sethalterr,  1 },
-        { TOK___clrhalterr,  "",    gen_builtin_clrhalterr,  1 },
-        { TOK___testhalterr, "",    gen_builtin_testhalterr, 0 },
-        { TOK___stoperr,     "",    gen_builtin_stoperr,     1 },
-        { TOK___testpranal,  "",    gen_builtin_testpranal,  0 },
-        { TOK___norm,        "e",   gen_builtin_norm,        0 },
-        { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0 },
-        { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0 },
-        { TOK_builtin_popcountl, "e", gen_builtin_bitcnt,    0 },
-        { TOK___bitrevword,  "e",   gen_builtin_bitrevword,  0 },
-        { TOK___bitrevnbits, "ee",  gen_builtin_bitrevnbits, 0 },
-        { TOK___csub0,       "ee",  gen_builtin_csub0,       0 },
-        { TOK___fmul,        "ee",  gen_builtin_fmul,        0 },
-        { TOK___lddevid,     "",    gen_builtin_lddevid,     0 },
-        { TOK___fpchkerr,    "",    gen_builtin_fpchkerr,    1 },
-        { TOK___fptesterr,   "",    gen_builtin_fptesterr,   0 },
-        { TOK___fpseterr,    "",    gen_builtin_fpseterr,    1 },
-        { TOK___fpclrerr,    "",    gen_builtin_fpclrerr,    1 },
-        { TOK___fpint,       "e",   gen_builtin_fpint,       0 },
-        { TOK___fpintrp,     "e",   gen_builtin_fpintrp,     0 },
-        { TOK___fpintrm,     "e",   gen_builtin_fpintrm,     0 },
-        { TOK___fpintrz,     "e",   gen_builtin_fpintrz,     0 },
-        { TOK___fprem,       "ee",  gen_builtin_fprem,       0 },
-        /* __fpabs stays last: the TVX builtins start after it */
-        { TOK___fpsqrt,      "e",   gen_builtin_fpsqrt,      0 },
-        { TOK___fpabs,       "e",   gen_builtin_fpabs,       0 },
-        /* TVX (MXFP4 / bfloat16) */
-        { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0 },
-        { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0 },
-        { TOK___bf16pack,    "ee",  gen_builtin_bf16pack,    0 },
-        { TOK___bf16unpkh,   "e",   gen_builtin_bf16unpkh,   0 },
-        { TOK___mxfp4tof32,  "e",   gen_builtin_mxfp4tof32,  0 },
-        { TOK___f32tomxfp4,  "e",   gen_builtin_f32tomxfp4,  0 },
-        { TOK___mxe8m0tof32, "e",   gen_builtin_mxe8m0tof32, 0 },
-        { TOK___mxe8m0of,    "e",   gen_builtin_mxe8m0of,    0 },
-        { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0 },
-        { TOK___bf16dot,     "eeee",gen_builtin_bf16dot,     0 },
-        { TOK___mxfp4gemv,   "eeee",gen_builtin_mxfp4gemv,   0 },
-        { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1 },
-        { TOK___f32tomxfp4x8,"e",   gen_builtin_f32tomxfp4x8,0 },
-        { TOK___bf16mul2,    "ee",  gen_builtin_bf16mul2,    0 },
-        { TOK___bf16add2,    "ee",  gen_builtin_bf16add2,    0 },
-        { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1 },
-        { TOK___mxfp4gemvbf, "eeee",gen_builtin_mxfp4gemvbf, 0 },
-        { TOK___vadd,        "eee", gen_builtin_vadd,        1 },
-        { TOK___vmul,        "eee", gen_builtin_vmul,        1 },
-        { TOK___vsilu,       "ee",  gen_builtin_vsilu,       1 },
-        { TOK___vrmsnorm,    "eee", gen_builtin_vrmsnorm,    1 },
-        { TOK___vsoftmax,    "ee",  gen_builtin_vsoftmax,    1 },
-        { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0 },
-        { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0 },
-        { TOK___q8dot,       "eeee",gen_builtin_q8dot,       0 },
-        { TOK___q8dotbf,     "eeee",gen_builtin_q8dotbf,     0 },
-        { TOK___iq1mdot,     "eeee",gen_builtin_iq1mdot,     0 },
-        { TOK___iq2xxsdot,   "eeee",gen_builtin_iq2xxsdot,   0 },
-        { TOK___iq3xxsdot,   "eeee",gen_builtin_iq3xxsdot,   0 },
-        { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1 },
-        { TOK___qdot,        "eeee",gen_builtin_qdot,        0 },
-        { TOK___vhad32,      "eee", gen_builtin_vhad32,      1 },
-        { TOK___mxqrot,      "eee", gen_builtin_mxqrot,      1 },
-        { TOK___mxqrotbf,    "eee", gen_builtin_mxqrotbf,    1 },
-        { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1 },
-        { TOK___ftransp,     "eee", gen_builtin_ftransp,     0 },
-        { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0 },
-        { TOK___fsincos,     "ee",  gen_builtin_fsincos,     1 },
-        { TOK___frsqrtb,     "e",   gen_builtin_frsqrtb,     0 },
-        { TOK___frecipb,     "e",   gen_builtin_frecipb,     0 },
-        { TOK___fsincosb,    "ee",  gen_builtin_fsincosb,    1 },
-        { TOK___vsetstride,  "ee",  gen_builtin_vsetstride,  1 },
-        { TOK___ftcull,      "eee", gen_builtin_ftcull,      0 },
-        { TOK___tskin,       "eee", gen_builtin_tskin,       0 },
-        { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1 },
-        { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1 },
-        { TOK___flitb,       "eee", gen_builtin_flitb,       0 },
-        { TOK___qgemm,       "eee", gen_builtin_qgemm,       0 },
-        { TOK___vblend8,     "eee", gen_builtin_vblend8,     1 },
-        { TOK___vfill,       "eee", gen_builtin_vfill,       1 },
-        { TOK___vfill2d,     "eee", gen_builtin_vfill2d,     1 },
-        { TOK___csumb,       "eee", gen_builtin_csumb,       0 },
-        { TOK___vblend2d,    "eee", gen_builtin_vblend2d,    1 },
-        { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1 },
-        { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0 },
-        { TOK___vq8k,        "ee",  gen_builtin_vq8k,        1 },
-        { TOK___vq80,        "ee",  gen_builtin_vq80,        1 },
-        { TOK___vcvt,        "eee", gen_builtin_vcvt,        1 },
-        { TOK___vxfer,       "ee",  gen_builtin_vxfer,       1 },
-        /* T9000 configuration space and VCP */
-        { TOK___ldconf,      "e",   gen_builtin_ldconf,      0 },
-        { TOK___stconf,      "ee",  gen_builtin_stconf,      1 },
-        { TOK___initvlcb,    "ee",  gen_builtin_initvlcb,    1 },
-        { TOK___sethdr,      "eee", gen_builtin_sethdr,      1 },
-        { TOK___writehdr,    "eee", gen_builtin_writehdr,    1 },
-        { TOK___readhdr,     "eee", gen_builtin_readhdr,     1 },
-        { TOK___setchmode,   "ee",  gen_builtin_setchmode,   1 },
-        { TOK___stopch,      "e",   gen_builtin_stopch,      1 },
-        { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0 },
-        { TOK___vin,         "eee", gen_builtin_vin,         0 },
-        { TOK___vout,        "eee", gen_builtin_vout,        1 },
-        { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0 },
-        { TOK___chantype,    "e",   gen_builtin_chantype,    0 },
-        /* T9000 semaphores and resource channels */
-        { TOK___semwait,     "e",   gen_builtin_semwait,     1 },
-        { TOK___semsignal,   "e",   gen_builtin_semsignal,   1 },
-        { TOK___mkrc,        "eee", gen_builtin_mkrc,        1 },
-        { TOK___unmkrc,      "e",   gen_builtin_unmkrc,      1 },
-        { TOK___grant,       "ee",  gen_builtin_grant,       1 },
-        { TOK___enbg,        "ee",  gen_builtin_enbg,        1 },
-        { TOK___disg,        "eee", gen_builtin_disg,        0 },
-        { TOK___irdsq,       "eee", gen_builtin_irdsq,       1 },
-        { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0 },
-        { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0 },
-        { TOK___stresptr,    "ee",  gen_builtin_stresptr,    1 },
-        /* T9 FPU Temps T0-T7 */
-        { TOK___tld,         "e",   gen_builtin_tld,         0 },
-        { TOK___tst,         "ee",  gen_builtin_tst,         1 },
-        { TOK___tclr,        "e",   gen_builtin_tclr,        1 },
-        { TOK___f2ldm,       "ee",  gen_builtin_f2ldm,       1 },
-        { TOK___f4ldm,       "ee",  gen_builtin_f4ldm,       1 },
-        { TOK___f2ldma,      "ee",  gen_builtin_f2ldma,      1 },
-        { TOK___f2stm,       "ee",  gen_builtin_f2stm,       1 },
-        { TOK___fmvmul4,     "ee",  gen_builtin_fmvmul4,     0 },
-        { TOK___fmvmul4st,   "eee", gen_builtin_fmvmul4st,   1 },
-        { TOK___fpoly3,      "ee",  gen_builtin_fpoly3,      0 },
-        { 0,                 NULL,  NULL,                    0 }
-    };
-    const struct tp_builtin_desc *desc;
-
-    for (desc = descs; desc->tok != 0; ++desc) {
-        if (desc->tok == tok)
-            return desc;
+    if (swtab_count == swtab_cap) {
+        swtab_cap = swtab_cap ? swtab_cap * 2 : 8;
+        swtab_log = tcc_realloc(swtab_log, swtab_cap * sizeof(*swtab_log));
     }
-    return NULL;
+    swtab_log[swtab_count].scale = scale;
+    swtab_log[swtab_count].table = table;
+    swtab_log[swtab_count].entries = entries;
+    swtab_count++;
 }
-
-#define TP_SWITCH_JUMP_SLOT_SIZE 9
 #define TP_SWITCH_MAX_SPAN      2048
 
 static int tp_case_cmp(uint64_t a, uint64_t b, int is_unsigned)
@@ -874,7 +558,8 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     uint64_t span_u64, total_u64;
     int *targets = NULL;
     int *entry_offs = NULL;
-    int ldc_slot_off, table_anchor, table_off, miss_ind;
+    int scale_off, table_off, miss_ind;
+    uint32_t base_u;
     int switch_t;
     int idx_reg;
 
@@ -905,6 +590,14 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     if (total_u64 * 3 < (uint64_t)entries)  /* density >= 33% (was 50%) */
         return 0;
 
+    /* A table that starts just above zero is indexed by the value itself:
+     * a few unused entries cost less than a subtraction at every dispatch. */
+    base_u = min_u;
+    if (min_u != 0 && min_u <= 16 && (is_unsigned || (int32_t)max_u > 0)) {
+        base_u = 0;
+        entries = (int)max_u + 1;
+    }
+
     targets = tcc_malloc(entries * sizeof(*targets));
     entry_offs = tcc_malloc(entries * sizeof(*entry_offs));
     for (i = 0; i < entries; ++i)
@@ -915,7 +608,7 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
         if (is_unsigned) {
             uint32_t v, v2 = (uint32_t)p->v2;
             for (v = (uint32_t)p->v1; ; ++v) {
-                int idx = (int)((uint64_t)v - (uint64_t)min_u);
+                int idx = (int)((uint64_t)v - (uint64_t)base_u);
                 if (idx < 0 || idx >= entries)
                     tcc_error("transputer switch index out of bounds");
                 targets[idx] = p->ind;
@@ -923,7 +616,7 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
                     break;
             }
         } else {
-            int64_t v, v2 = (int32_t)p->v2, min_s = (int32_t)min_u;
+            int64_t v, v2 = (int32_t)p->v2, min_s = (int32_t)base_u;
             for (v = (int32_t)p->v1; tp_case_cmp(v, v2, 0) <= 0; ++v) {
                 int idx = (int)(v - min_s);
                 if (idx < 0 || idx >= entries)
@@ -935,24 +628,22 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
 
     d = *pdsym;
 
-    {
-        int ty = is_unsigned ? (VT_INT | VT_UNSIGNED) : VT_INT;
-
+    /* The index, x - base as an unsigned word, and one unsigned test for
+     * both ends of the range: a value below the base wraps to a large one.
+     * Unsigned so that the subtraction cannot set the Error flag.  No test
+     * when the default is `__builtin_unreachable()`: the program promises
+     * a case. */
+    vdup();
+    vtop->type.t = VT_INT | VT_UNSIGNED;
+    if (base_u != 0) {
+        vpush64(VT_INT | VT_UNSIGNED, base_u);
+        gen_op('-');
+    }
+    if (!sw->def_unreachable) {
         vdup();
-        vpush64(ty, min_u);
-        gen_op(TOK_LT);
-        d = gvtst(0, d);
-
-        vdup();
-        vpush64(ty, max_u);
-        gen_op(TOK_GT);
-        d = gvtst(0, d);
-
-        vdup();
-        if (min_u != 0) {
-            vpush64(ty, min_u);
-            gen_op('-');
-        }
+        vpush64(VT_INT | VT_UNSIGNED, (uint32_t)entries);
+        gen_op(TOK_ULT);
+        d = gvtst(1, d);
     }
 
     gv(RC_INT);
@@ -964,16 +655,12 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     else
         tcc_error("transputer switch: unsupported idx value form");
 
-    if (TP_SWITCH_JUMP_SLOT_SIZE != 1) {
-        tp_switch_emit_instr(TP_OP_LDC, TP_SWITCH_JUMP_SLOT_SIZE);
-        tp_switch_emit_instr(TP_OP_OPR, TP_OPR_PROD);
-    }
-
-    ldc_slot_off = ind;
-    tp_switch_emit_fixed_slot(TP_OP_LDC, 0, TP_SWITCH_JUMP_SLOT_SIZE);
+    scale_off = ind;
+    tp_switch_emit_instr(TP_OP_LDC, TP_SWITCH_JUMP_SLOT_SIZE);
+    tp_switch_emit_instr(TP_OP_OPR, TP_OPR_PROD);
+    /* the table starts two bytes after ldpi: bsub, gcall */
+    tp_switch_emit_instr(TP_OP_LDC, 2);
     tp_switch_emit_instr(TP_OP_OPR, TP_OPR_LDPI);
-
-    table_anchor = ind;
     tp_switch_emit_instr(TP_OP_OPR, TP_OPR_BSUB);
     tp_switch_emit_instr(TP_OP_OPR, TP_OPR_GCALL);
 
@@ -986,82 +673,19 @@ ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym)
     miss_ind = gind();
     d = gjmp(d);
 
-    tp_switch_patch_fixed_slot(ldc_slot_off, TP_OP_LDC, table_off - table_anchor,
-                               TP_SWITCH_JUMP_SLOT_SIZE);
-    switch_slot_add(ldc_slot_off, TP_SWITCH_JUMP_SLOT_SIZE, TP_OP_LDC,
-                    table_off, table_anchor);
     for (i = 0; i < entries; ++i) {
         int target = targets[i] >= 0 ? targets[i] : miss_ind;
         tp_switch_patch_fixed_slot(entry_offs[i], TP_OP_J,
                                    target - (entry_offs[i] + TP_SWITCH_JUMP_SLOT_SIZE),
                                    TP_SWITCH_JUMP_SLOT_SIZE);
-        switch_slot_add(entry_offs[i], TP_SWITCH_JUMP_SLOT_SIZE, TP_OP_J,
-                        target, -1);
     }
+    swtab_add(scale_off, table_off, entries);
 
     tcc_free(entry_offs);
     tcc_free(targets);
 
     vpop();
     *pdsym = d;
-    return 1;
-}
-
-ST_FUNC int gen_transputer_builtin_call(int tok)
-{
-    const struct tp_builtin_desc *desc;
-
-    desc = tp_find_builtin_desc(tok);
-    if (!desc)
-        return 0;
-    /* The table lists the T4xx/T8xx builtins up to __fpabs, then the TVX
-     * ones (__bf16tof32 .. __vxfer), then the T9000's VCP and the T9 core's
-     * T&L temps.  TVX takes -mt9000tvx, bar the 16-bit float conversions,
-     * which every other target does in software (their gen functions), and
-     * the builtins software TVX covers, which become calls; the rest takes
-     * a T9000. */
-    if (desc > tp_find_builtin_desc(TOK___fpabs)) {
-        if (desc <= tp_find_builtin_desc(TOK___vxfer)) {
-            if (!tp_tvx() && tok != TOK___bf16tof32 && tok != TOK___f32tobf16
-                && tok != TOK___f16tof32 && tok != TOK___f32tof16) {
-                const struct tp_soft_tvx_desc *soft = tp_find_soft_tvx(tok);
-                if (!soft)
-                    tcc_error("%s is a TVX instruction with no software "
-                              "version, not available without -mt9000tvx",
-                              get_tok_str(tok, NULL));
-                parse_builtin_params(0, desc->args);
-                save_reg(REG_IRET);
-                tp_soft_tvx_call(soft);
-                return 1;
-            }
-        } else if (!tcc_state->tp_t9000) {
-            tcc_error("%s is a T9000 instruction, not available with -m%s",
-                      get_tok_str(tok, NULL), tp_target_name(tcc_state));
-        }
-    }
-    if (tp_t414()) {
-        switch (tok) {          /* instructions the T425 added */
-        case TOK___move2dinit: case TOK___move2dall:
-        case TOK___move2dnonzero: case TOK___move2dzero:
-        case TOK___crcbyte: case TOK___crcword:
-        case TOK___bitrevword: case TOK___bitrevnbits: case TOK___lddevid:
-            tcc_error("%s is a T425 instruction, not available with -mt414",
-                      get_tok_str(tok, NULL));
-        }
-    }
-    if (tcc_state->tp_t800 && tok == TOK___lddevid)
-        tcc_error("%s is a T805 instruction, not available with -mt800",
-                  get_tok_str(tok, NULL));
-
-    parse_builtin_params(0, desc->args);
-    /* Integer results land in REG_IRET, which may still hold a pending
-     * call result on the vstack (`icall() + __ldtimer()`); without a spill
-     * both operands would name the builtin's result.  Spilling after the
-     * arguments are parsed also covers an argument that is that result. */
-    save_reg(REG_IRET);
-    desc->gen();
-    if (desc->returns_void)
-        tp_builtin_return_void();
     return 1;
 }
 
@@ -1090,30 +714,30 @@ ST_FUNC void transputer_init(struct TCCState *s) {
     (void)s;
 
     /* Cache all debug env vars once at init time */
-    env = getenv("T4_DEBUG");
+    env = tp_knob(TPK_T4_DEBUG);
     tp_debug_enabled = (env && *env) ? 1 : 0;
-    env = getenv("T4_GENOPI_DEBUG");
+    env = tp_knob(TPK_T4_GENOPI_DEBUG);
     tp_genopi_debug = env && *env;
-    env = getenv("T4_LOAD_DEBUG");
+    env = tp_knob(TPK_T4_LOAD_DEBUG);
     tp_load_debug = env && *env;
-    env = getenv("T4_INSTR_DEBUG");
+    env = tp_knob(TPK_T4_INSTR_DEBUG);
     tp_instr_debug = env && *env;
-    env = getenv("T4_EMIT_LOCAL_DEBUG");
+    env = tp_knob(TPK_T4_EMIT_LOCAL_DEBUG);
     tp_emit_local_debug = env && *env ? atoi(env) : 0;
-    env = getenv("T4_GEN_SYM");
+    env = tp_knob(TPK_T4_GEN_SYM);
     tp_gen_sym_filter = (env && *env) ? env : NULL;
-    env = getenv("T4_STORE_DEBUG");
+    env = tp_knob(TPK_T4_STORE_DEBUG);
     tp_store_debug = env && *env;
-    env = getenv("T4_STRUCTCOPY_DEBUG");
+    env = tp_knob(TPK_T4_STRUCTCOPY_DEBUG);
     tp_structcopy_debug = env && *env;
-    env = getenv("T4_CALLARG_DEBUG");
+    env = tp_knob(TPK_T4_CALLARG_DEBUG);
     tp_callarg_debug = env && *env;
-    env = getenv("T4_OPF_DEBUG");
+    env = tp_knob(TPK_T4_OPF_DEBUG);
     tp_opf_debug = env && *env;
-    env = getenv("T4_VT_LOCAL_DEBUG");
+    env = tp_knob(TPK_T4_VT_LOCAL_DEBUG);
     tp_vt_local_debug = env && *env;
     if (!tp_vt_local_debug) {
-        env = getenv("TCC_TRANSPUTER_DEBUG_VT");
+        env = tp_knob(TPK_TCC_TRANSPUTER_DEBUG_VT);
         tp_vt_local_debug = env && *env;
     }
 
@@ -1212,6 +836,13 @@ static int tp_staged_lo[3], tp_staged_hi[3];
  * emit_instr), so func_max_slot_used cannot see what it touches and the
  * reserved region must fall back to the static worst case. */
 static int func_uses_inline_asm = 0;
+/* The function reads or writes a volatile object (tp_note_volatile, from
+ * gv and vstore): the post-pass merges no two loads in it. */
+static int func_has_volatile = 0;
+ST_FUNC void tp_note_volatile(void)
+{
+    func_has_volatile = 1;
+}
 /* Words reserved below the locals in the current function's frame, i.e. the
  * slot number the first local lands on.  Computed in gfunc_epilog and read by
  * the evaluation-stack scheduler, which must only treat slots below it as
@@ -1223,7 +854,6 @@ static int func_frame_reserved = FRAME_SLOT_MIN_LOCALS;
  * read by the evaluation-stack scheduler. */
 static int func_frame_words;
 extern const char *funcname;
-static int func_start_ind = -1;
 static int func_start_nsym;   /* symtab size when the function began */
 static int func_start_nrel;   /* its code section's relocation count then */
 static Sym *func_start_sym;   /* the function itself */
@@ -1234,7 +864,7 @@ static char tp_trace_func_name[64];
 static int tp_trace_func_active(void) {
     const char *env;
     if (tp_trace_func_enabled == -1) {
-        env = getenv("TCC_TRACE_FUNC");
+        env = tp_knob(TPK_TCC_TRACE_FUNC);
         if (env && *env) {
             strncpy(tp_trace_func_name, env, sizeof(tp_trace_func_name) - 1);
             tp_trace_func_name[sizeof(tp_trace_func_name) - 1] = '\0';
@@ -1280,6 +910,9 @@ struct local_patch {
     int tcc_offset;     /* TCC's internal offset (usually negative) */
     int opcode;         /* The opcode used (LDL, STL, LDLP) */
     int placeholder_size; /* 2 or 3 bytes reserved at emit time */
+    int proven_nonvolatile_read; /* direct read of an unescaped, nonvolatile int */
+    int incoming_pointer;       /* ABI word loaded by a pointer parameter home */
+    unsigned char stack_copy;   /* high-word load of a typed double copy */
     struct local_patch *next;
 };
 
@@ -1289,16 +922,6 @@ struct jump_patch_meta {
     int instr_len;                    /* encoded instruction length (set by gsym_addr) */
     unsigned char is_conditional;     /* 1 for CJ placeholder, 0 for J */
     unsigned char patched;            /* 1 once gsym_addr patched it */
-    struct jump_patch_meta *next;
-};
-
-struct switch_slot_meta {
-    int instr_offset;                 /* fixed-width slot start */
-    int slot_size;                    /* slot width used by switch table */
-    int opcode;                       /* TP_OP_LDC or TP_OP_J */
-    int target_addr;                  /* jump target or table offset target */
-    int base_addr;                    /* base address for relative LDC, -1 for J */
-    struct switch_slot_meta *next;
 };
 
 static struct local_patch *local_patches = NULL;
@@ -1306,8 +929,12 @@ static struct local_patch *local_patches = NULL;
  * appended, not prepended: tp_drop_local_patches_from scans the leading run
  * and relies on it holding the most recently emitted offsets. */
 static struct local_patch *local_patches_tail = NULL;
-static struct jump_patch_meta *jump_patches = NULL;
-static struct switch_slot_meta *switch_slots = NULL;
+/* The function's jump placeholders, sorted by instr_offset so that
+ * jump_patch_find can binary-search them: a linear list made every gjmp and
+ * every chain link a scan, quadratic in a function's jumps.  Code is emitted
+ * forwards, so a new placeholder nearly always goes on the end. */
+static struct jump_patch_meta *jump_patches;
+static int jump_patch_count, jump_patch_cap;
 
 static int func_prologue_ajw_offset = -1;  /* -1 = not set, >=0 = valid offset */
 
@@ -1389,25 +1016,45 @@ static void wide_log_add(int offset, int opcode, int operand) {
     wide_log_count++;
 }
 
+/* Index of the first placeholder at or after instr_offset. */
+static int jump_patch_index(int instr_offset)
+{
+    int lo = 0, hi = jump_patch_count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (jump_patches[mid].instr_offset < instr_offset)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
 static struct jump_patch_meta *jump_patch_find(int instr_offset)
 {
-    struct jump_patch_meta *p;
-    for (p = jump_patches; p; p = p->next) {
-        if (p->instr_offset == instr_offset)
-            return p;
-    }
+    int i = jump_patch_index(instr_offset);
+    if (i < jump_patch_count && jump_patches[i].instr_offset == instr_offset)
+        return &jump_patches[i];
     return NULL;
 }
 
 static struct jump_patch_meta *jump_patch_upsert(int instr_offset, int is_conditional)
 {
-    struct jump_patch_meta *p = jump_patch_find(instr_offset);
-    if (!p) {
-        p = tcc_malloc(sizeof(*p));
-        p->instr_offset = instr_offset;
-        p->next = jump_patches;
-        jump_patches = p;
+    int i = jump_patch_index(instr_offset);
+    struct jump_patch_meta *p;
+    if (i == jump_patch_count || jump_patches[i].instr_offset != instr_offset) {
+        if (jump_patch_count == jump_patch_cap) {
+            jump_patch_cap = jump_patch_cap ? jump_patch_cap * 2 : 64;
+            jump_patches = tcc_realloc(jump_patches,
+                                       jump_patch_cap * sizeof(*jump_patches));
+        }
+        /* Only a placeholder re-emitted after a rollback lands mid-array. */
+        memmove(jump_patches + i + 1, jump_patches + i,
+                (jump_patch_count - i) * sizeof(*jump_patches));
+        jump_patch_count++;
+        jump_patches[i].instr_offset = instr_offset;
     }
+    p = &jump_patches[i];
     p->is_conditional = is_conditional ? 1 : 0;
     return p;
 }
@@ -1420,46 +1067,21 @@ static void jump_patch_add(int instr_offset, int is_conditional)
     p->patched = 0;
 }
 
-static void switch_slot_add(int instr_offset, int slot_size, int opcode,
-                            int target_addr, int base_addr)
-{
-    struct switch_slot_meta *p = tcc_malloc(sizeof(*p));
-    p->instr_offset = instr_offset;
-    p->slot_size = slot_size;
-    p->opcode = opcode;
-    p->target_addr = target_addr;
-    p->base_addr = base_addr;
-    p->next = switch_slots;
-    switch_slots = p;
-}
-
 /* Reset per function */
 static void transputer_func_reset(void) {
     struct local_patch *p = local_patches;
-    struct jump_patch_meta *j = jump_patches;
-    struct switch_slot_meta *s = switch_slots;
 
     while(p) {
         struct local_patch *next = p->next;
         tcc_free(p);
         p = next;
     }
-    while (j) {
-        struct jump_patch_meta *next = j->next;
-        tcc_free(j);
-        j = next;
-    }
-    while (s) {
-        struct switch_slot_meta *next = s->next;
-        tcc_free(s);
-        s = next;
-    }
     local_patches = NULL;
     local_patches_tail = NULL;
-    jump_patches = NULL;
-    switch_slots = NULL;
+    jump_patch_count = 0;
+    swtab_count = 0;
     tp_hist_clear();
-    tp_fpr_reg = -1;
+    tp_fpr_forget();
     func_prologue_ajw_offset = -1;  /* Reset prologue offset */
     leave_ajw_count = 0;
     abcreg_stack_depth = 0;
@@ -1469,6 +1091,7 @@ static void transputer_func_reset(void) {
     func_max_slot_used = -1;
     tp_staging_push = 0;
     func_uses_inline_asm = 0;
+    func_has_volatile = 0;
     func_frame_reserved = FRAME_SLOT_MIN_LOCALS;
     func_frame_words = 0;
     func_has_switch_slots = 0;
@@ -1483,7 +1106,6 @@ static void transputer_func_reset(void) {
 /*************************************************************/
 /* Instruction emission */
 /*************************************************************/
-/* NOTE: g(), gen_le16(), gen_le32() are defined in transputer-asm.c */
 
 /* Emit Transputer instruction with nibble operand (handles Oreg properly) */
 /* TCC_TRANSPUTER_FPLDNLI=0 keeps `wsub; fpldnlsn' apart, for an A/B run. */
@@ -1492,10 +1114,124 @@ static int tp_fpu_indexed_ok(void)
     static int ok = -1;
 
     if (ok < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPLDNLI");
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_FPLDNLI);
         ok = !(e && *e == '0');
     }
     return ok;
+}
+
+/******************************************************/
+/* Basic byte emit helpers                            */
+/******************************************************/
+ST_FUNC void g(int c)
+{
+    int ind1;
+    static int last_byte = -1;
+    static int nfix_opr_log_count = 0;
+    static int nfix_opr_warn;
+    static int prefix_count = 0;
+    static int call_log_count = 0;
+    static int call_log_limit;
+    static int call_log_short;
+    static const char *call_log_filter;
+    static int env_read;
+    if (nocode_wanted)
+        return;
+    if (!cur_text_section)
+        return;
+    /* Read the trace knobs once: this runs for every byte emitted. */
+    if (!env_read) {
+        const char *env;
+        env = tp_knob(TPK_T4_NFIX_OPR_WARN);
+        nfix_opr_warn = env && *env ? atoi(env) : 0;
+        env = tp_knob(TPK_T4_CALL_EMIT_TRACE);
+        call_log_limit = env && *env ? atoi(env) : 0;
+        env = tp_knob(TPK_T4_CALL_EMIT_SHORT);
+        call_log_short = env && *env ? atoi(env) : 0;
+        call_log_filter = tp_knob(TPK_T4_CALL_EMIT_FILTER);
+        env_read = 1;
+    }
+    ind1 = ind + 1;
+    if (ind1 > cur_text_section->data_allocated)
+        section_realloc(cur_text_section, ind1);
+    cur_text_section->data[ind] = c;
+    if (nfix_opr_warn && nfix_opr_log_count < 64
+        && last_byte >= 0
+        && ((last_byte & 0xF0) == 0x60)
+        && ((c & 0xF0) == 0xF0)) {
+        const char *fname = file ? file->filename : "<unknown>";
+        const char *func = funcname ? funcname : "<no func>";
+        fprintf(stderr, "WARN: g(): NFIX->OPR sequence 0x%02X 0x%02X at offset=0x%x file=%s func=%s\n",
+                last_byte, c, ind, fname, func);
+        nfix_opr_log_count++;
+    }
+    /* Note: 0xF3 is a valid Transputer instruction byte (OPR 3).
+     * When preceded by PFIX 3 (0x23), it encodes OPR 0x33 = XOR.
+     * This is used legitimately in unsigned comparison code.
+     * Do NOT intercept or replace this byte! */
+    ind = ind1;
+    /* Keep data_offset in sync with ind */
+    if (ind > cur_text_section->data_offset)
+        cur_text_section->data_offset = ind;
+    last_byte = c;
+
+    if ((c & 0xF0) == 0x20 || (c & 0xF0) == 0x60) {
+        prefix_count++;
+    } else {
+        if (call_log_limit > 0 && call_log_count < call_log_limit) {
+            int opc = c & 0xF0;
+            if (opc == 0x90 || opc == 0x00 || opc == 0xA0) {
+                const char *fname = file ? file->filename : "<unknown>";
+                const char *func = funcname ? funcname : "<no func>";
+                fprintf(stderr,
+                        "CALL_EMIT: byte=0x%02X prefixes=%d offset=0x%x file=%s func=%s\n",
+                        c, prefix_count, ind - 1, fname, func);
+                call_log_count++;
+            }
+        } else if (call_log_short > 0 && call_log_count < call_log_short) {
+#define TP_IPREL_NIBBLES 9
+
+            int opc = c & 0xF0;
+            if ((opc == 0x90 || opc == 0x00 || opc == 0xA0) &&
+                prefix_count < (TP_IPREL_NIBBLES - 1)) {
+                const char *fname = file ? file->filename : "<unknown>";
+                const char *func = funcname ? funcname : "<no func>";
+                if (call_log_filter && *call_log_filter) {
+                    if (!strstr(fname, call_log_filter) &&
+                        (!func || !strstr(func, call_log_filter))) {
+                        prefix_count = 0;
+                        return;
+                    }
+                }
+                fprintf(stderr,
+                        "CALL_EMIT_SHORT: byte=0x%02X prefixes=%d offset=0x%x file=%s func=%s\n",
+                        c, prefix_count, ind - 1, fname, func);
+                call_log_count++;
+            }
+        }
+        prefix_count = 0;
+    }
+}
+
+ST_FUNC void gen_le16(int v)
+{
+    g(v);
+    g(v >> 8);
+}
+
+ST_FUNC void gen_le32(int v)
+{
+    g(v);
+    g(v >> 8);
+    g(v >> 16);
+    g(v >> 24);
+}
+
+/* Classify only the direct workspace opcodes; callers apply their own
+ * operand bounds and account for any indirect access following LDLP. */
+static int tp_is_direct_workspace_op(int opc)
+{
+    return opc == TP_OP_LDL || opc == TP_OP_STL || opc == TP_OP_LDLP;
 }
 
 static void emit_instr(int opc, int v) {
@@ -1523,7 +1259,7 @@ static void emit_instr(int opc, int v) {
     /* Track highest fixed workspace slot used for dynamic frame sizing.
      * Only counts direct register/scratch slot accesses (non-negative operands).
      * Local variable accesses go through emit_local_op() and are NOT counted here. */
-    if ((opc == TP_OP_LDL || opc == TP_OP_STL || opc == TP_OP_LDLP) &&
+    if (tp_is_direct_workspace_op(opc) &&
         v >= 0 && v < FRAME_SLOT_MIN_LOCALS) {
         /* LDLP of a fixed slot is always followed by an indirect access
          * (LDNL/STNL, FPLDNLDB/FPSTNLDB, ...) that can reach slot+1 for the
@@ -1535,7 +1271,7 @@ static void emit_instr(int opc, int v) {
     /* A call word being materialised must not read or overwrite one that is
      * already staged (see tp_stage_push). */
     if (tp_staging_push && !nocode_wanted && v >= 0 &&
-        (opc == TP_OP_LDL || opc == TP_OP_STL || opc == TP_OP_LDLP)) {
+        tp_is_direct_workspace_op(opc)) {
         for (i = 0; i < 3; i++)
             if (v >= tp_staged_lo[i] && v < tp_staged_hi[i])
                 tcc_internal_error("call word staged in a slot the next one uses");
@@ -1555,7 +1291,6 @@ static void emit_instr(int opc, int v) {
         ind = tp_hist[0].off;
         cur_text_section->data_offset = ind;
         tp_hist_rollback(ind);
-        tp_stl_track_clear();
         start_off = ind;
         v = v == TP_FPU_LDNLSN ? TP_OPR_FPLDNLSNI : TP_OPR_FPLDNLDBI;
     }
@@ -1569,7 +1304,7 @@ static void emit_instr(int opc, int v) {
          *
          * Every rule that rewrites already-emitted code decides it is safe by
          * checking that nothing has been emitted since - and it tests that
-         * with `tp_last_stl_end == ind`.  While emission is suppressed `ind`
+         * by the newest entry of the window ending at `ind`.  While emission is suppressed `ind`
          * does not move, so a whole parenthesised expression can go by without
          * disturbing the trackers, and a rule then matches an instruction from
          * *before* the suppressed region against one from after it.
@@ -1584,7 +1319,6 @@ static void emit_instr(int opc, int v) {
          * exactly this shape, which made cpu_capacity_span() return the struct
          * base instead of its ->cpus member; __set_bit then OR'd a bit into a
          * list pointer and asym_cpu_capacity_scan() looped forever. */
-        tp_stl_track_clear();
         tp_hist_clear();
         return;
     }
@@ -1593,21 +1327,6 @@ static void emit_instr(int opc, int v) {
     for (i = 0; i < len; i++) {
         g(buf[i]);
     }
-    if (opc == TP_OP_STL && v >= 0 && v < NB_REGS) {
-        tp_last_stl_reg = v;
-        tp_last_stl_off = start_off;
-        tp_last_stl_end = ind;
-    } else {
-        tp_stl_track_clear();
-    }
-    tp_prev_opc = tp_last_opc;
-    tp_prev_val = tp_last_val;
-    tp_prev_off = tp_last_off;
-    tp_prev_end = tp_last_end;
-    tp_last_opc = opc;
-    tp_last_val = v;
-    tp_last_off = start_off;
-    tp_last_end = ind;
     tp_hist_record(TP_HIST_INSTR, opc, v, start_off, ind);
     tp_trace_emit_bytes("emit_instr", start_off, ind);
 }
@@ -1753,35 +1472,42 @@ static void Tp_WSUBDB(void) { Tp_OPR_BINARY(TP_OPR_WSUBDB); }
 #define TP_T9K_SSUB     16
 #define TP_T9K_FPU      32   /* fpge, fpmulby2/divby2, fprz/rn, fpr32/64 cvts */
 #define TP_T9K_GTU      64
+/* Does the part compiled for have `f` (TP_EF_*)? */
+static int tp_isa_has(unsigned f)
+{
+    return tcc_state && tp_has(tcc_state, f);
+}
+
 static int tp_t9k_mask = -1;
 static int tp_have_t9000_feat(int feat) {
-    if (!(tcc_state && tcc_state->tp_t9000))
+    if (!tp_isa_has(TP_EF_T9000))
         return 0;
     if (tp_t9k_mask < 0) {
-        const char *e = getenv("TP_T9K_MASK");
+        const char *e = tp_knob(TPK_TP_T9K_MASK);
         tp_t9k_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x7f;
     }
     return (tp_t9k_mask & feat) != 0;
 }
 
-/* -mt425: the IMS T425 has the T805's integer instructions and no FPU. */
-static int tp_t425(void)
+/* -mt425 and -mt414: no FPU, so floating point is calls to the soft-float
+ * helpers in the part's transputer-libtcc1. */
+static int tp_soft_float(void)
 {
-    return tcc_state && tcc_state->tp_t425;
+    return tcc_state && !tp_has(tcc_state, TP_EF_FPU);
 }
 
-/* -mt414: the IMS T414 also lacks what the T425 added - dup and wsubdb
- * among what the code generator emits (Norcroft xpuops.h). */
+/* -mt414: the IMS T414 lacks what the T425 and the T800 added - dup and
+ * wsubdb among what the code generator emits (Norcroft xpuops.h). */
 static int tp_t414(void)
 {
-    return tcc_state && tcc_state->tp_t414;
+    return tcc_state && !tp_has(tcc_state, TP_EF_T800OPS);
 }
 
 /* -mt9000tvx: the only target with the TVX extension.  Everywhere else the
- * 16-bit float conversions call the helpers in lib/transputer-f16.c. */
+ * 16-bit float conversions call the helpers in lib/transputer/transputer-f16.c. */
 static int tp_tvx(void)
 {
-    return tcc_state && tcc_state->tp_tvx;
+    return tp_isa_has(TP_EF_TVX);
 }
 
 /* -mt800 and -mt414: the original T800 and the T414 lack what the T805
@@ -1789,7 +1515,7 @@ static int tp_tvx(void)
  * generator emits (xpuops.h marks pop "T425 only"). */
 static int tp_no_t805_ops(void)
 {
-    return tcc_state && (tcc_state->tp_t414 || tcc_state->tp_t800);
+    return tcc_state && !tp_has(tcc_state, TP_EF_T805OPS);
 }
 static void Tp_LS(void)     { Tp_OPR_UNARY(TP_OPR_LS); }
 static void Tp_LSX(void)    { Tp_OPR_UNARY(TP_OPR_LSX); }
@@ -1921,6 +1647,9 @@ static void emit_local_op(int op, int tcc_offset_bytes) {
     p->instr_offset = ind;
     p->tcc_offset = tcc_offset_bytes;
     p->opcode = op;
+    p->proven_nonvolatile_read = 0;
+    p->incoming_pointer = 0;
+    p->stack_copy = 0;
     p->next = local_patches;
     if (!local_patches)
         local_patches_tail = p;
@@ -2029,7 +1758,7 @@ static int tp_pool_reserve_size(void)
 {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TP_POOL");
+        const char *e = tp_knob(TPK_TP_POOL);
         v = e ? atoi(e) : TP_POOL_RESERVE_DEFAULT;
         if (v < 0)
             v = 0;
@@ -2044,7 +1773,7 @@ static int tp_pool_debug(void)
 {
     static int v = -1;
     if (v < 0)
-        v = getenv("TP_POOL_DEBUG") ? 1 : 0;
+        v = tp_knob(TPK_TP_POOL_DEBUG) ? 1 : 0;
     return v;
 }
 
@@ -2072,6 +1801,9 @@ static void tp_local_patch_append(int off, int op, int tcc_offset_bytes)
     p->instr_offset = off;
     p->tcc_offset = tcc_offset_bytes;
     p->opcode = op;
+    p->proven_nonvolatile_read = 0;
+    p->incoming_pointer = 0;
+    p->stack_copy = 0;
     p->placeholder_size = 3;
     p->next = NULL;
 
@@ -2349,7 +2081,161 @@ static void tp_sign_extend(int bits, int narrow) {
 static void tp_sign_extend_16_in_areg(void) { tp_sign_extend(16, 0); }
 static void tp_sign_extend_8_in_areg(void) { tp_sign_extend(8, 0); }
 
+/* A halfword from the byte address in A on a part without ls (T800, T805,
+ * T425, T414): the high byte first and shifted up, then the low byte ORed
+ * in, so only the address is parked (in `slot`): 9 instructions where
+ * parking the low byte too took 11.  The stack never holds more than the
+ * old sequence held, one word above whatever was under the address. */
+static void tp_load_half_bytes(int slot)
+{
+    Tp_STL(slot);
+    Tp_LDL(slot);
+    Tp_ADC(1);
+    Tp_LB();
+    Tp_LDC(8);
+    Tp_SHL();                   /* A = high byte << 8 */
+    Tp_LDL(slot);
+    Tp_LB();
+    Tp_OR();
+}
+
+/* A halfword local at frame byte offset `off`, the same parts.  At an even
+ * offset it is one half of a workspace word, so the word is read and the
+ * half taken out: ldl w; ldc #ffff; and for the low one, ldl w; ldc 16;
+ * shr for the high one (8 and 21 T800 cycles where two lb and a shift cost
+ * 27 or more, and no ldlp the post-pass must treat as an escaping address).
+ * The bytes of an odd (packed) one are read high first, nothing parked. */
+static void tp_load_local_half(int off, int is_unsigned)
+{
+    int rem = off & 3;
+
+    if (rem == 0 || rem == 2) {
+        emit_local_op(TP_OP_LDL, off - rem);
+        abcreg_push(1);
+        if (rem == 2) {
+            Tp_LDC(16);
+            Tp_SHR();
+            if (!is_unsigned)
+                tp_sign_extend(16, 1);
+        } else if (is_unsigned) {
+            Tp_LDC(0xffff);
+            Tp_AND();
+        } else
+            tp_sign_extend(16, 0);
+        return;
+    }
+    emit_local_addr(off + 1);
+    Tp_LB();
+    Tp_LDC(8);
+    Tp_SHL();
+    emit_local_addr(off);
+    Tp_LB();
+    Tp_OR();
+    if (!is_unsigned)
+        tp_sign_extend(16, 1);
+}
+
 /* Push a floating-point SValue onto the T800 FPU stack (FA/FB/FC). */
+/*
+ * Words at an address that may not be word aligned.
+ *
+ * A member of a packed or #pragma pack(N < 4) struct can sit at any byte
+ * (VT_UNALIGNED, set by tccgen's member access), and so can a local at a
+ * frame byte offset that is not a multiple of four.  ldnl/stnl and ldl/stl
+ * ignore the low two address bits, so `p->k` with k at offset 1 read bytes
+ * 0..3 and a store wrote over the bytes before it.  lb and sb have no
+ * alignment precondition (ISM 4.4): such a word is four bytes, little
+ * endian, and a long long or double two such words.
+ *
+ * The address is parked in a word the access may use: a scratch slot
+ * (`slot` >= 0) or a frame temporary at tcc offset `off`.  The callers use
+ * a temporary of their own (tp_park_new): the scratch slots can hold a
+ * call's staged arguments while one of them is loaded, which emit_instr's
+ * staging check rejects.
+ */
+static int tp_park_new(int bytes)
+{
+    loc = (loc - bytes) & -4;
+    return loc;
+}
+
+static int tp_word_unaligned(const SValue *sv)
+{
+    if (!(sv->r & VT_LVAL))
+        return 0;
+    if ((sv->r & VT_VALMASK) == VT_LOCAL)
+        return (sv->c.i & 3) != 0;
+    return (sv->r & VT_UNALIGNED) != 0;
+}
+
+static void tp_park_op(int op, int slot, int off)
+{
+    if (slot >= 0) {
+        if (op == TP_OP_LDL) Tp_LDL(slot); else Tp_STL(slot);
+    } else {
+        emit_local_op(op, off);
+        if (op == TP_OP_LDL) abcreg_push(1); else abcreg_pop(1);
+    }
+}
+
+/* AReg = the word in bytes addr+k .. addr+k+3, the address parked.  Two
+ * stack places above whatever is below. */
+static void tp_bytes_load(int slot, int off, int k)
+{
+    int b;
+    for (b = 3; b >= 0; b--) {
+        tp_park_op(TP_OP_LDL, slot, off);
+        if (k + b)
+            Tp_ADC(k + b);
+        Tp_LB();
+        if (b < 3)
+            Tp_OR();
+        if (b) {
+            Tp_LDC(8);
+            Tp_SHL();
+        }
+    }
+}
+
+/* Bytes addr+k .. addr+k+3 = the word pushed by `push_val` (a workspace
+ * slot, or a frame word at tcc offset `voff` when vslot < 0). */
+static void tp_bytes_store(int slot, int off, int k, int vslot, int voff)
+{
+    int b;
+    for (b = 0; b < 4; b++) {
+        tp_park_op(TP_OP_LDL, vslot, voff);
+        if (b) {
+            Tp_LDC(8 * b);
+            Tp_SHR();
+        }
+        tp_park_op(TP_OP_LDL, slot, off);
+        if (k + b)
+            Tp_ADC(k + b);
+        Tp_SB();
+    }
+}
+
+/* Emit a full-width relocatable address without changing stack tracking.
+ * Callers account for the pushed word and apply any symbol addend. */
+static void tp_emit_sym_reloc(const SValue *sv, const char *kind, int bt)
+{
+    int i;
+
+    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
+    if (kind && tp_gen_sym_filter) {
+        const char *name = get_tok_str(sv->sym->v, NULL);
+        if (name && strstr(name, tp_gen_sym_filter))
+            fprintf(stderr,
+                    "GEN_RELOC: kind=%s sym=%s type=%d bt=0x%x file=%s line=%d\n",
+                    kind, name, R_TRANSPUTER_LDC_ABS, bt,
+                    file ? file->filename : "<unknown>",
+                    file ? file->line_num : -1);
+    }
+    for (i = 0; i < 7; i++)
+        g((TP_OP_PFIX << 4) | 0);
+    g((TP_OP_LDC << 4) | 0);
+}
+
 /* Emit code leaving the ADDRESS of a float operand's storage in AReg,
  * so an FPU non-local load (plain or fused add/mul) can read it
  * directly.  Handles every SValue
@@ -2370,12 +2256,7 @@ static int tp_emit_float_addr(SValue *sv) {
             abcreg_push(1);
         } else if (v == VT_CONST) {
             if (fr & VT_SYM) {
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                for (i = 0; i < 7; i++) {
-                    g((TP_OP_PFIX << 4) | 0);
-                }
-                g((TP_OP_LDC << 4) | 0);
+                tp_emit_sym_reloc(sv, NULL, 0);
                 abcreg_push(1);
                 if (sv->c.i)
                     Tp_ADC(sv->c.i);
@@ -2394,15 +2275,25 @@ static int tp_emit_float_addr(SValue *sv) {
                 tp_push_reg_or_cancel_stl(v, sv);
             }
         }
+        if (tp_word_unaligned(sv)) {
+            /* The FPU loads from an aligned address: copy the bytes to a
+             * frame temporary of the access's own, words at t and t+4,
+             * the address parked at t+8 (no scratch slot: this can run
+             * while a call's arguments are being staged). */
+            int t = tp_park_new(12);
+            tp_park_op(TP_OP_STL, -1, t + 8);
+            tp_bytes_load(-1, t + 8, 0);
+            tp_park_op(TP_OP_STL, -1, t);
+            if (use_db) {
+                tp_bytes_load(-1, t + 8, 4);
+                tp_park_op(TP_OP_STL, -1, t + 4);
+            }
+            emit_local_addr(t);
+        }
     } else {
         if (v == VT_CONST) {
             if (fr & VT_SYM) {
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                for (i = 0; i < 7; i++) {
-                    g((TP_OP_PFIX << 4) | 0);
-                }
-                g((TP_OP_LDC << 4) | 0);
+                tp_emit_sym_reloc(sv, NULL, 0);
                 abcreg_push(1);
                 if (sv->c.i)
                     Tp_ADC(sv->c.i);
@@ -2469,6 +2360,283 @@ static void tp_store_fpu_result_to_slot(int slot, int bt) {
     fpureg_pop(1);
 }
 
+/* load(): the value of a local variable.  On the transputer LDL loads
+ * the word straight from the workspace; narrower values and packed
+ * ones are read by address. */
+static void tp_load_local(int r, SValue *sv, int size, int is_unsigned)
+{
+    int byte_off;
+
+    if (tp_debug_check() && sv->sym && (sv->sym->type.t & VT_STATIC)) {
+        fprintf(stderr, "[STATIC_LOCAL_DEBUG] Static variable accessed as LOCAL: %s type=0x%x r=0x%x c.i=%ld\n",
+                get_tok_str(sv->sym->v, NULL), sv->sym->type.t, sv->r, (long)sv->c.i);
+    }
+    /* VT_LVAL | VT_LOCAL: Load value from local workspace slot.
+     * On Transputer, LDL loads the WORD directly from workspace.
+     * This is different from other architectures where locals are
+     * byte-addressed in memory. No dereference (LB/LDNL) needed.
+     * Only sign/zero extension for smaller types. */
+    byte_off = sv->c.i;
+    if (size == 1) {
+        emit_local_addr(byte_off);
+        if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
+            Tp_LBX();            /* load byte extended */
+        } else {
+            Tp_LB();                    /* zero-extends */
+            if (!is_unsigned)
+                tp_sign_extend(8, 1);
+        }
+        Tp_STL(r);
+        return;
+    } else if (size == 2 && tp_t9000_half_ok(byte_off, sv->r)) {
+        /* T9000: one instruction instead of two byte loads,
+           a shift, an OR and the extension dance. */
+        emit_local_addr(byte_off);
+        if (is_unsigned) Tp_LS(); else Tp_LSX();
+        Tp_STL(r);
+        return;
+    } else if (size == 2) {
+        tp_load_local_half(byte_off, is_unsigned);
+        Tp_STL(r);
+        return;
+    } else if (byte_off & 3) {
+        /* a member of a packed local: LDL would round the offset
+         * down to its word (tp_word_unaligned) */
+        int t = tp_park_new(4);
+        emit_local_addr(byte_off);
+        tp_park_op(TP_OP_STL, -1, t);
+        tp_bytes_load(-1, t, 0);
+        Tp_STL(r);
+        if (size == 8) {
+            tp_bytes_load(-1, t, 4);
+            Tp_STL(r + 1);
+        }
+        return;
+    }
+    emit_local_op(TP_OP_LDL, byte_off);
+    if (size == 8) {
+        Tp_STL(r); /* Save Low */
+        emit_local_op(TP_OP_LDL, byte_off + 4);  /* Load high word */
+        Tp_STL(r+1);
+        return;
+    }
+    Tp_STL(r);
+}
+
+/* load(): the value at an address - a global's, a spilled pointer's or
+ * one in a register. */
+static void tp_load_through(int r, SValue *sv, int bt, int size, int is_unsigned)
+{
+    int fr = sv->r;
+    int v = sv->r & VT_VALMASK;
+
+    if (v == VT_CONST) {
+        if (sv->r & VT_SYM) {
+            /* Use R_TRANSPUTER_LDC_ABS for loading absolute data addresses.
+             * Eight nibbles (7 PFIX + LDC) cover a full 32-bit address. */
+            tp_emit_sym_reloc(sv, "load_lval", bt);
+            /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
+            if (sv->c.i)
+                Tp_ADC(sv->c.i);
+        } else {
+            Tp_LDC(sv->c.i);
+        }
+    } else if (v == VT_LLOCAL) {
+        /* VT_LLOCAL: lvalue address was saved to local slot sv->c.i.
+         * This happens when an lvalue pointer needed to be spilled
+         * to make room for other operations (e.g., RHS evaluation).
+         * Load the saved address from the local slot. */
+        emit_local_op(TP_OP_LDL, sv->c.i);
+    } else {
+        /* Some lvalue addresses survive control-flow in both a
+         * workspace "register" copy and a canonical spilled local
+         * slot (sv->c.i). The spilled slot is the stable source after
+         * compare/jump chains; prefer it when present. */
+        if ((fr & VT_LVAL) && sv->c.i < 0) {
+            emit_local_op(TP_OP_LDL, sv->c.i);
+        } else {
+            /* Address is in register v (workspace slot). The address
+             * was typically just computed and parked there, so try to
+             * cancel that store rather than reload it — that is what
+             * turns `ADC k; STL r; LDL r; LDNL 0` into `ADC k; LDNL 0`,
+             * which the ADC fold then collapses to `LDNL k/4`: the
+             * T9000 idiom where the displacement rides on the
+             * address-calculation stage instead of the ALU. */
+            tp_push_reg_or_cancel_stl(v, sv);
+        }
+    }
+
+    /* A word or two of a packed member: from its bytes, the address
+     * parked as the halfword path below parks it. */
+    if ((size == 4 || size == 8) && (sv->r & VT_UNALIGNED)) {
+        int t = tp_park_new(4);
+        tp_park_op(TP_OP_STL, -1, t);
+        tp_bytes_load(-1, t, 0);
+        Tp_STL(r);
+        if (size == 8) {
+            tp_bytes_load(-1, t, 4);
+            Tp_STL(r + 1);
+        }
+        return;
+    }
+
+    /* Memory access - dereference the address */
+    switch (size) {
+    case 1:
+        if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
+            Tp_LBX();
+            break;
+        }
+        Tp_LB();                    /* zero-extends */
+        if (!is_unsigned)
+            tp_sign_extend(8, 1);
+        break;
+    case 2:
+        if (tp_t9000_half_ptr_ok(sv->r,
+                                 (v == VT_CONST) ? (long long)sv->c.i : 0)) {
+            if (is_unsigned) Tp_LS(); else Tp_LSX();
+            break;
+        }
+        /* Addresses are byte-addressed. A 16-bit field can sit at an
+         * arbitrary byte offset within a word (for example the kernel's
+         * struct printf_spec.s16 precision at offset 6). Rebuild the
+         * halfword from two byte loads instead of using LDNL 0. */
+        tp_load_half_bytes(FRAME_SLOT_SCRATCH);
+
+        /* two zero-extended bytes: already 0..0xFFFF */
+        if (!is_unsigned)
+            tp_sign_extend(16, 1);
+        break;
+    case 4:
+        Tp_LDNL(0);
+        break;
+    case 8:
+        /* T800 DUP: duplicate address before first dereference so we
+         * don't need to reload it (which costs 1-9 bytes) for the
+         * high word.  Stack: AReg=addr → DUP → AReg=addr, BReg=addr.
+         * After LDNL 0: AReg=low, BReg=addr.  STL r saves low,
+         * shifts addr back to AReg.  LDNLP 1; LDNL 0 loads high. */
+        if (tp_t414()) {
+            /* no dup: park the address in the high word's slot */
+            Tp_STL(r + 1);
+            Tp_LDL(r + 1);
+            Tp_LDNL(0);
+            Tp_STL(r);
+            Tp_LDL(r + 1);
+            Tp_LDNL(1);
+            Tp_STL(r + 1);
+            return;
+        }
+        Tp_DUP();                     /* AReg=addr, BReg=addr */
+        Tp_LDNL(0);                  /* AReg=low, BReg=addr */
+        Tp_STL(r);                    /* save low; AReg←addr (slid from BReg) */
+        Tp_LDNL(1);                  /* LDNL 1: load high word directly at offset */
+        Tp_STL(r+1);
+        return;
+    }
+    Tp_STL(r);
+}
+
+/* load(): not an lvalue - a constant, an address, a comparison or jump
+ * to turn into 0/1, or another register. */
+static void tp_load_value(int r, SValue *sv, int bt, int size)
+{
+    int v = sv->r & VT_VALMASK;
+
+    if (v == VT_CONST) {
+        if (size == 8 && !(sv->r & VT_SYM)) {
+            uint64_t bits;
+            if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+                union { double d; uint64_t u; } u;
+                u.d = sv->c.d;
+                bits = u.u;
+            } else {
+                bits = sv->c.i;
+            }
+            Tp_LDC((uint32_t)bits);
+            Tp_STL(r);
+            Tp_LDC((uint32_t)(bits >> 32));
+            Tp_STL(r + 1);
+            return;
+        }
+        if (sv->r & VT_SYM) {
+            /* Load absolute symbol value into Areg. Reserve full-width
+             * prefix space so the linker can patch large addresses. */
+            tp_emit_sym_reloc(sv, "load_imm", bt);
+            /* Add byte offset from symbol (e.g. &arr[1] has c.i=1) */
+            if (sv->c.i)
+                Tp_ADC(sv->c.i);
+        } else {
+            if (bt == VT_FLOAT) {
+                union { float f; uint32_t u; } bits;
+                bits.f = sv->c.f;
+                tp_ldc_pooled(bits.u);
+            } else {
+                tp_ldc_pooled(sv->c.i);
+            }
+        }
+        Tp_STL(r);
+    } else if (v == VT_LOCAL) {
+        /* VT_LOCAL without VT_LVAL is the ADDRESS of a local object
+         * (e.g. result of '&local'), not the local's stored value. */
+        if (tp_load_debug) {
+            fprintf(stderr, "[LOAD_VT_LOCAL_ADDR] offset=%ld (sv->c.i=%ld, sym->c=%d) func=%s r=%d sym=%p\n",
+                    (long)sv->c.i, (long)sv->c.i,
+                    sv->sym ? sv->sym->c : -999,
+                    funcname ? funcname : "<unknown>", r, sv->sym);
+        }
+        emit_local_addr(sv->c.i);
+        Tp_STL(r);
+    } else if (v == VT_LLOCAL) {
+        /* Address spilled in a local slot - load pointer value. */
+        emit_local_op(TP_OP_LDL, sv->c.i);
+        Tp_STL(r);
+    } else if (v == VT_CMP) {
+        /* VT_CMP means a prior comparison left a result in AReg.
+         * Some ops (GT, EQC) produce strict 0/1. Others (DIFF for
+         * TOK_NE) may produce arbitrary nonzero values.
+         * The cmp_op field tells us the comparison semantics:
+         *   cmp_op & 1 == 1 (odd, e.g. TOK_NE=0x95): non-zero=true
+         *   cmp_op & 1 == 0 (even, e.g. TOK_EQ=0x94): zero=true
+         * When materializing as a value, normalize to 0/1 with
+         * double EQC 0: nonzero→0→1, zero→1→0. */
+        if (sv->cmp_op >= 2 && !(sv->cmp_op & 1)) {
+            /* Even op (e.g. TOK_EQ): invert the 0/1 value.
+             * EQC 0: AReg = (AReg == 0) ? 1 : 0 */
+            emit_instr(TP_OP_EQC, 0);
+        } else {
+            /* Odd op (e.g. TOK_NE): normalize arbitrary nonzero to 1.
+             * Double EQC 0: nonzero→0→1, zero→1→0. */
+            emit_instr(TP_OP_EQC, 0);
+            emit_instr(TP_OP_EQC, 0);
+        }
+        Tp_STL(r);
+    } else if (v == VT_JMP || v == VT_JMPI) {
+        /* Convert pending jump-encoded boolean into 0/1 in register slot.
+         * Mirrors other backends: default value, skip, patch alt value. */
+        int t = v & 1;
+        int j;
+        Tp_LDC(t);
+        Tp_STL(r);
+        j = gjmp(0);
+        gsym(sv->c.i);
+        Tp_LDC(t ^ 1);
+        Tp_STL(r);
+        gsym(j);
+    } else if (v != r) {
+        Tp_LDL(v);
+        Tp_STL(r);
+        if (size == 8) {
+            /* Use r2 for the high-word source when available.
+             * After lbuild(), r2 may differ from v+1 (e.g. r=11, r2=9).
+             * Falling back to v+1 only when r2 is not a valid register. */
+            int hi_src = (sv->r2 < VT_CONST) ? sv->r2 : v + 1;
+            Tp_LDL(hi_src);
+            Tp_STL(r + 1);
+        }
+    }
+}
+
 ST_FUNC void load(int r, SValue *sv) {
     int fr = sv->r;
     int v = fr & VT_VALMASK;
@@ -2476,7 +2644,6 @@ ST_FUNC void load(int r, SValue *sv) {
     int size = get_primitive_type_size(bt);
     int is_unsigned = (sv->type.t & VT_UNSIGNED) != 0 || bt == VT_BF16 || bt == VT_F16
                       || bt == VT_FLOAT16;
-    int byte_off;
 
     static int load_counter = 0;
 
@@ -2494,291 +2661,12 @@ ST_FUNC void load(int r, SValue *sv) {
      * high word gv() splits off a 64-bit value, carries their bits.  Turning
      * such a "symbol" into a relocation crashed the compiler (`x && 2LL`) or
      * relocated a constant against whatever Sym the stale pointer hit. */
-    if (fr & VT_LVAL) {
-        if (v == VT_LOCAL) {
-            if (tp_debug_check() && sv->sym && (sv->sym->type.t & VT_STATIC)) {
-                fprintf(stderr, "[STATIC_LOCAL_DEBUG] Static variable accessed as LOCAL: %s type=0x%x r=0x%x c.i=%ld\n",
-                        get_tok_str(sv->sym->v, NULL), sv->sym->type.t, sv->r, (long)sv->c.i);
-            }
-            /* VT_LVAL | VT_LOCAL: Load value from local workspace slot.
-             * On Transputer, LDL loads the WORD directly from workspace.
-             * This is different from other architectures where locals are
-             * byte-addressed in memory. No dereference (LB/LDNL) needed.
-             * Only sign/zero extension for smaller types. */
-            byte_off = sv->c.i;
-            if (size == 1) {
-                emit_local_addr(byte_off);
-                if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
-                    Tp_LBX();            /* load byte extended */
-                } else {
-                    Tp_LB();                    /* zero-extends */
-                    if (!is_unsigned)
-                        tp_sign_extend(8, 1);
-                }
-                Tp_STL(r);
-                return;
-            } else if (size == 2 && tp_t9000_half_ok(byte_off, sv->r)) {
-                /* T9000: one instruction instead of two byte loads,
-                   a shift, an OR and the extension dance. */
-                emit_local_addr(byte_off);
-                if (is_unsigned) Tp_LS(); else Tp_LSX();
-                Tp_STL(r);
-                return;
-            } else if (size == 2) {
-                emit_local_addr(byte_off);
-                Tp_LB();
-                Tp_STL(FRAME_SLOT_SCRATCH);  /* low byte */
-
-                emit_local_addr(byte_off + 1);
-                Tp_LB();
-                Tp_LDC(8);
-                Tp_SHL();
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_OR();
-
-                /* two zero-extended bytes: already 0..0xFFFF */
-                if (!is_unsigned)
-                    tp_sign_extend(16, 1);
-                Tp_STL(r);
-                return;
-            }
-            emit_local_op(TP_OP_LDL, byte_off);
-            if (size == 8) {
-                Tp_STL(r); /* Save Low */
-                emit_local_op(TP_OP_LDL, byte_off + 4);  /* Load high word */
-                Tp_STL(r+1);
-                return;
-            }
-            Tp_STL(r);
-        } else {
-            /* VT_CONST or register: We have an ADDRESS that needs dereferencing */
-            if (v == VT_CONST) {
-                if (sv->r & VT_SYM) {
-                    /* Use R_TRANSPUTER_LDC_ABS for loading absolute data addresses.
-                     * Eight nibbles (7 PFIX + LDC) cover a full 32-bit address. */
-                    int i;
-                    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                    {
-                        if (tp_gen_sym_filter) {
-                            const char *name = get_tok_str(sv->sym->v, NULL);
-                            if (name && strstr(name, tp_gen_sym_filter)) {
-                                fprintf(stderr,
-                                        "GEN_RELOC: kind=load_lval sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                                        name, R_TRANSPUTER_LDC_ABS, bt,
-                                        file ? file->filename : "<unknown>",
-                                        file ? file->line_num : -1);
-                            }
-                        }
-                    }
-                    for (i = 0; i < 7; i++) {
-                        g((TP_OP_PFIX << 4) | 0);  /* 0x20 = PFIX 0 */
-                    }
-                    g((TP_OP_LDC << 4) | 0);  /* 0x40 = LDC 0 */
-                    /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
-                    if (sv->c.i)
-                        Tp_ADC(sv->c.i);
-                } else {
-                    Tp_LDC(sv->c.i);
-                }
-            } else if (v == VT_LLOCAL) {
-                /* VT_LLOCAL: lvalue address was saved to local slot sv->c.i.
-                 * This happens when an lvalue pointer needed to be spilled
-                 * to make room for other operations (e.g., RHS evaluation).
-                 * Load the saved address from the local slot. */
-                emit_local_op(TP_OP_LDL, sv->c.i);
-            } else {
-                /* Some lvalue addresses survive control-flow in both a
-                 * workspace "register" copy and a canonical spilled local
-                 * slot (sv->c.i). The spilled slot is the stable source after
-                 * compare/jump chains; prefer it when present. */
-                if ((fr & VT_LVAL) && sv->c.i < 0) {
-                    emit_local_op(TP_OP_LDL, sv->c.i);
-                } else {
-                    /* Address is in register v (workspace slot). The address
-                     * was typically just computed and parked there, so try to
-                     * cancel that store rather than reload it — that is what
-                     * turns `ADC k; STL r; LDL r; LDNL 0` into `ADC k; LDNL 0`,
-                     * which the ADC fold then collapses to `LDNL k/4`: the
-                     * T9000 idiom where the displacement rides on the
-                     * address-calculation stage instead of the ALU. */
-                    tp_push_reg_or_cancel_stl(v, sv);
-                }
-            }
-
-            /* Memory access - dereference the address */
-            switch (size) {
-            case 1:
-                if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
-                    Tp_LBX();
-                    break;
-                }
-                Tp_LB();                    /* zero-extends */
-                if (!is_unsigned)
-                    tp_sign_extend(8, 1);
-                break;
-            case 2:
-                if (tp_t9000_half_ptr_ok(sv->r,
-                                         (v == VT_CONST) ? (long long)sv->c.i : 0)) {
-                    if (is_unsigned) Tp_LS(); else Tp_LSX();
-                    break;
-                }
-                /* Addresses are byte-addressed. A 16-bit field can sit at an
-                 * arbitrary byte offset within a word (for example the kernel's
-                 * struct printf_spec.s16 precision at offset 6). Rebuild the
-                 * halfword from two byte loads instead of using LDNL 0. */
-                Tp_STL(FRAME_SLOT_SCRATCH);  /* save base address */
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_LB();
-                Tp_STL(FRAME_SLOT_SCRATCH + 1);  /* low byte */
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_ADC(1);
-                Tp_LB();
-                Tp_LDC(8);
-                Tp_SHL();
-                Tp_LDL(FRAME_SLOT_SCRATCH + 1);
-                Tp_OR();
-
-                /* two zero-extended bytes: already 0..0xFFFF */
-                if (!is_unsigned)
-                    tp_sign_extend(16, 1);
-                break;
-            case 4:
-                Tp_LDNL(0);
-                break;
-            case 8:
-                /* T800 DUP: duplicate address before first dereference so we
-                 * don't need to reload it (which costs 1-9 bytes) for the
-                 * high word.  Stack: AReg=addr → DUP → AReg=addr, BReg=addr.
-                 * After LDNL 0: AReg=low, BReg=addr.  STL r saves low,
-                 * shifts addr back to AReg.  LDNLP 1; LDNL 0 loads high. */
-                if (tp_t414()) {
-                    /* no dup: park the address in the high word's slot */
-                    Tp_STL(r + 1);
-                    Tp_LDL(r + 1);
-                    Tp_LDNL(0);
-                    Tp_STL(r);
-                    Tp_LDL(r + 1);
-                    Tp_LDNL(1);
-                    Tp_STL(r + 1);
-                    return;
-                }
-                Tp_DUP();                     /* AReg=addr, BReg=addr */
-                Tp_LDNL(0);                  /* AReg=low, BReg=addr */
-                Tp_STL(r);                    /* save low; AReg←addr (slid from BReg) */
-                Tp_LDNL(1);                  /* LDNL 1: load high word directly at offset */
-                Tp_STL(r+1);
-                return;
-            }
-            Tp_STL(r);
-        }
-    } else {
-        /* Immediate / Register value */
-        if (v == VT_CONST) {
-            if (size == 8 && !(sv->r & VT_SYM)) {
-                uint64_t bits;
-                if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-                    union { double d; uint64_t u; } u;
-                    u.d = sv->c.d;
-                    bits = u.u;
-                } else {
-                    bits = sv->c.i;
-                }
-                Tp_LDC((uint32_t)bits);
-                Tp_STL(r);
-                Tp_LDC((uint32_t)(bits >> 32));
-                Tp_STL(r + 1);
-                return;
-            }
-            if (sv->r & VT_SYM) {
-                /* Load absolute symbol value into Areg. Reserve full-width
-                 * prefix space so the linker can patch large addresses. */
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                {
-                    if (tp_gen_sym_filter) {
-                        const char *name = get_tok_str(sv->sym->v, NULL);
-                        if (name && strstr(name, tp_gen_sym_filter)) {
-                            fprintf(stderr,
-                                    "GEN_RELOC: kind=load_imm sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                                    name, R_TRANSPUTER_LDC_ABS, bt,
-                                    file ? file->filename : "<unknown>",
-                                    file ? file->line_num : -1);
-                        }
-                    }
-                }
-                for (i = 0; i < 7; i++) {
-                    g((TP_OP_PFIX << 4) | 0);  /* 0x20 = PFIX 0 */
-                }
-                g((TP_OP_LDC << 4) | 0);  /* 0x40 = LDC 0 */
-                /* Add byte offset from symbol (e.g. &arr[1] has c.i=1) */
-                if (sv->c.i)
-                    Tp_ADC(sv->c.i);
-            } else {
-                tp_ldc_pooled(sv->c.i);
-            }
-            Tp_STL(r);
-        } else if (v == VT_LOCAL) {
-            /* VT_LOCAL without VT_LVAL is the ADDRESS of a local object
-             * (e.g. result of '&local'), not the local's stored value. */
-            if (tp_load_debug) {
-                fprintf(stderr, "[LOAD_VT_LOCAL_ADDR] offset=%ld (sv->c.i=%ld, sym->c=%d) func=%s r=%d sym=%p\n",
-                        (long)sv->c.i, (long)sv->c.i,
-                        sv->sym ? sv->sym->c : -999,
-                        funcname ? funcname : "<unknown>", r, sv->sym);
-            }
-            emit_local_addr(sv->c.i);
-            Tp_STL(r);
-        } else if (v == VT_LLOCAL) {
-            /* Address spilled in a local slot - load pointer value. */
-            emit_local_op(TP_OP_LDL, sv->c.i);
-            Tp_STL(r);
-        } else if (v == VT_CMP) {
-            /* VT_CMP means a prior comparison left a result in AReg.
-             * Some ops (GT, EQC) produce strict 0/1. Others (DIFF for
-             * TOK_NE) may produce arbitrary nonzero values.
-             * The cmp_op field tells us the comparison semantics:
-             *   cmp_op & 1 == 1 (odd, e.g. TOK_NE=0x95): non-zero=true
-             *   cmp_op & 1 == 0 (even, e.g. TOK_EQ=0x94): zero=true
-             * When materializing as a value, normalize to 0/1 with
-             * double EQC 0: nonzero→0→1, zero→1→0. */
-            if (sv->cmp_op >= 2 && !(sv->cmp_op & 1)) {
-                /* Even op (e.g. TOK_EQ): invert the 0/1 value.
-                 * EQC 0: AReg = (AReg == 0) ? 1 : 0 */
-                emit_instr(TP_OP_EQC, 0);
-            } else {
-                /* Odd op (e.g. TOK_NE): normalize arbitrary nonzero to 1.
-                 * Double EQC 0: nonzero→0→1, zero→1→0. */
-                emit_instr(TP_OP_EQC, 0);
-                emit_instr(TP_OP_EQC, 0);
-            }
-            Tp_STL(r);
-        } else if (v == VT_JMP || v == VT_JMPI) {
-            /* Convert pending jump-encoded boolean into 0/1 in register slot.
-             * Mirrors other backends: default value, skip, patch alt value. */
-            int t = v & 1;
-            int j;
-            Tp_LDC(t);
-            Tp_STL(r);
-            j = gjmp(0);
-            gsym(sv->c.i);
-            Tp_LDC(t ^ 1);
-            Tp_STL(r);
-            gsym(j);
-        } else if (v != r) {
-            Tp_LDL(v);
-            Tp_STL(r);
-            if (size == 8) {
-                /* Use r2 for the high-word source when available.
-                 * After lbuild(), r2 may differ from v+1 (e.g. r=11, r2=9).
-                 * Falling back to v+1 only when r2 is not a valid register. */
-                int hi_src = (sv->r2 < VT_CONST) ? sv->r2 : v + 1;
-                Tp_LDL(hi_src);
-                Tp_STL(r + 1);
-            }
-        }
-    }
+    if (!(fr & VT_LVAL))
+        tp_load_value(r, sv, bt, size);
+    else if (v == VT_LOCAL)
+        tp_load_local(r, sv, size, is_unsigned);
+    else
+        tp_load_through(r, sv, bt, size, is_unsigned);
 }
 
 /* ---- store-side address displacement ------------------------------------
@@ -2948,7 +2836,6 @@ static int tp_store_swap_addr_value(int r, SValue *v, int vr, int is_lval)
     cur_text_section->data_offset = ind;
     tp_drop_local_patches_from(roll_to);
     tp_hist_clear();
-    tp_stl_track_clear();
     tp_areg_invalidate();
 
     /* Value first: STNL wants AReg = address, BReg = value, and pushing the
@@ -2980,8 +2867,7 @@ static int tp_store_addr_cancels_stl(SValue *v, int vr, int is_lval)
     if (is_lval && v->c.i < 0)
         return 0;
     return !nocode_wanted
-        && tp_last_stl_reg == vr && tp_last_stl_end == ind
-        && tp_last_stl_off >= 0 && tp_last_stl_off >= func_start_ind
+        && tp_hist_last_stl(vr) >= 0 && tp_hist_last_stl(vr) >= func_start_ind
         && !tp_reg_live_on_vstack(vr, v);
 }
 
@@ -2990,24 +2876,7 @@ static void gen_store_addr(SValue *v, int bt, int vr, int is_lval)
     if (vr == VT_CONST) {
         if (v->r & VT_SYM) {
             /* Absolute data address: emit LDC with relocation. */
-            int i;
-            greloc(cur_text_section, v->sym, ind, R_TRANSPUTER_LDC_ABS);
-            {
-                if (tp_gen_sym_filter) {
-                    const char *name = get_tok_str(v->sym->v, NULL);
-                    if (name && strstr(name, tp_gen_sym_filter)) {
-                        fprintf(stderr,
-                                "GEN_RELOC: kind=store_addr sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                                name, R_TRANSPUTER_LDC_ABS, bt,
-                                file ? file->filename : "<unknown>",
-                                file ? file->line_num : -1);
-                    }
-                }
-            }
-            for (i = 0; i < 7; i++) {
-                g((TP_OP_PFIX << 4) | 0);  /* 0x20 = PFIX 0 */
-            }
-            g((TP_OP_LDC << 4) | 0);  /* 0x40 = LDC 0 */
+            tp_emit_sym_reloc(v, "store_addr", bt);
             /* Add byte offset from symbol (e.g. arr[1] has c.i=1) */
             if (v->c.i)
                 Tp_ADC(v->c.i);
@@ -3063,26 +2932,47 @@ static void gen_store_addr(SValue *v, int bt, int vr, int is_lval)
     }
 }
 
-ST_FUNC void store(int r, SValue *v) {
-    int bt = v->type.t & VT_BTYPE;
-    int vr = v->r & VT_VALMASK;
-    int is_lval = (v->r & VT_LVAL) != 0;
-    int size = get_primitive_type_size(bt);
-    int value_in_areg = 0;
-
-    if (tp_store_debug) {
-        fprintf(stderr, "[STORE] r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld sym=%p r_flags=0x%x\n",
-                r, vr, is_lval, size, bt, (long)v->c.i,
-                (v->r & VT_SYM) ? (void*)v->sym : NULL, v->r);
+/* A word of a packed member, or of a local at a misaligned offset
+ * (tp_word_unaligned): four byte stores.  Like the paths below this
+ * writes the one word in r - a long long's second word comes in a second
+ * call at +4 - except a value still on the FPU stack, written whole as
+ * the FPU path below writes it. */
+static int tp_store_unaligned(int r, SValue *v, int bt, int vr, int is_lval, int size)
+{
+    if (is_lval && (size == 4 || size == 8) && tp_word_unaligned(v)) {
+        int t = tp_park_new(12);            /* address t+8, value t, t+4 */
+        int vslot = r, voff = 0, two = 0;
+        if (r == TREG_FA && tp_is_float_bt(bt) && fpureg_stack_depth > 0) {
+            emit_local_addr(t);             /* to an aligned temporary first */
+            emit_instr(TP_OP_OPR, size == 8 ? TP_FPU_STNLDB : TP_FPU_STNLSN);
+            abcreg_pop(1);
+            fpureg_pop(1);
+            vslot = -1;
+            voff = t;
+            two = size == 8;
+        } else if (r == TREG_A || r == TREG_B || r == TREG_C) {
+            tp_park_op(TP_OP_STL, -1, t);
+            vslot = -1;
+            voff = t;
+        }
+        if ((v->r & VT_VALMASK) == VT_CONST && v->sym && !(v->r & VT_SYM)) {
+            v->r |= VT_SYM;
+            vr = v->r & VT_VALMASK;
+        }
+        gen_store_addr(v, bt, vr, is_lval);
+        tp_park_op(TP_OP_STL, -1, t + 8);
+        tp_bytes_store(-1, t + 8, 0, vslot, voff);
+        if (two)
+            tp_bytes_store(-1, t + 8, 4, -1, voff + 4);
+        abcreg_stack_depth = 0;
+        return 1;
     }
-    if (tp_trace_func_active() && size <= 2) {
-        fprintf(stderr,
-                "[tcc] store_trace func=%s r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld depth=%d flags=0x%x\n",
-                funcname ? funcname : "<unknown>",
-                r, vr, is_lval, size, bt, (long)v->c.i, abcreg_stack_depth, v->r);
-    }
+    return 0;
+}
 
-    /* Float registers are stack-like; write through to memory explicitly. */
+/* Float registers are stack-like; write through to memory explicitly. */
+static int tp_store_fpu(int r, SValue *v, int bt, int vr, int is_lval)
+{
     if ((r == TREG_FA || r == TREG_FB || r == TREG_FC) && tp_is_float_bt(bt)) {
         int is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
         if (r == TREG_FA && fpureg_stack_depth > 0) {
@@ -3090,7 +2980,7 @@ ST_FUNC void store(int r, SValue *v) {
             emit_instr(TP_OP_OPR, is_db ? TP_FPU_STNLDB : TP_FPU_STNLSN);
             fpureg_pop(1);
             abcreg_stack_depth = 0;
-            return;
+            return 1;
         }
         if (is_db) {
             /* Fallback: value already materialized in workspace slot(s).
@@ -3118,45 +3008,33 @@ ST_FUNC void store(int r, SValue *v) {
             gen_store_addr(v, bt, vr, is_lval);
             Tp_STNL(0);
             abcreg_stack_depth = 0;
-            return;
+            return 1;
         }
         /* float32 in a workspace slot: fall through to the generic
          * word-store path below — a float reg is a workspace slot like any
          * other, and that path pushes the value first (no REV) and can fold
          * an ADC into the STNL displacement. */
     }
+    return 0;
+}
 
-    /* Check if value is on hardware evaluation stack.
-     * TREG_A/B/C are explicit eval-stack registers. In practice, gv()
-     * often leaves the current single-word RHS in AReg even when the
-     * associated pseudo-register slot has not been synchronized yet.
-     * Narrow non-local stores are especially sensitive to reloading a
-     * stale workspace slot after control-flow-heavy RHS evaluation. */
-    if (r == TREG_A || r == TREG_B || r == TREG_C) {
-        value_in_areg = 1;
-    }
-
-    if ((v->r & VT_VALMASK) == VT_CONST && v->sym && !(v->r & VT_SYM)) {
-        /* Ensure symbol constants reserve full LDC placeholder space. */
-        v->r |= VT_SYM;
-        vr = v->r & VT_VALMASK;
-    }
-
-    /*
-     * Local scalar lvalues live in workspace words. Storing them through
-     * LDLP+SB/halfword sequences can corrupt temporaries and upper bytes:
-     * SB only writes 1 byte, leaving upper bytes as garbage. Later LDL
-     * loads the full 32-bit word including garbage, corrupting values
-     * passed as function arguments.
-     * Store directly with STL for ALL local scalars (byte, short, int).
-     * AReg already contains the properly promoted int value.
-     */
+/*
+ * Local scalar lvalues live in workspace words. Storing them through
+ * LDLP+SB/halfword sequences can corrupt temporaries and upper bytes:
+ * SB only writes 1 byte, leaving upper bytes as garbage. Later LDL
+ * loads the full 32-bit word including garbage, corrupting values
+ * passed as function arguments.
+ * Store directly with STL for ALL local scalars (byte, short, int).
+ * AReg already contains the properly promoted int value.
+ */
+static int tp_store_local(int r, SValue *v, int vr, int is_lval, int size, int value_in_areg)
+{
     if (is_lval && vr == VT_LOCAL && size == 4 && ((v->c.i & 3) == 0)) {
         if (!value_in_areg)
             Tp_LDL(r);
         emit_local_op(TP_OP_STL, v->c.i);
         abcreg_pop(1);
-        return;
+        return 1;
     }
     /* 64-bit local stores: only store the one word in register r.
      * The caller (save_reg_upstack, vstore) handles the second word
@@ -3170,27 +3048,31 @@ ST_FUNC void store(int r, SValue *v) {
             emit_local_op(TP_OP_STL, v->c.i);        /* store word */
         }
         abcreg_stack_depth = 0;
-        return;
+        return 1;
     }
+    return 0;
+}
 
-    /* Word store, value still in a workspace slot: STNL wants AReg=address,
-     * BReg=value. Pushing the value *before* the address produces exactly that
-     * order; emitting the address first forces a REV to swap them, which cost
-     * 47.5k instructions across the kernel. Every gen_store_addr path is a
-     * single push (optionally followed by a unary ADC), so a value parked in
-     * BReg is left undisturbed. */
+/* Word store, value still in a workspace slot: STNL wants AReg=address,
+ * BReg=value. Pushing the value *before* the address produces exactly that
+ * order; emitting the address first forces a REV to swap them, which cost
+ * 47.5k instructions across the kernel. Every gen_store_addr path is a
+ * single push (optionally followed by a unary ADC), so a value parked in
+ * BReg is left undisturbed. */
+static int tp_store_value_first(int r, SValue *v, int bt, int vr, int is_lval, int size, int value_in_areg)
+{
     if (size == 4 && !value_in_areg) {
         /* First try to swap the address computation past the value so the
          * field offset can ride on the STNL displacement instead of an ADC. */
         static int swap_off = -1;
         if (swap_off < 0)
-            swap_off = getenv("TP_NO_STORE_SWAP") ? 1 : 0;
+            swap_off = tp_knob(TPK_TP_NO_STORE_SWAP) ? 1 : 0;
         if (!swap_off && tp_store_swap_addr_value(r, v, vr, is_lval))
-            return;
+            return 1;
         Tp_LDL(r);
         gen_store_addr(v, bt, vr, is_lval);
         Tp_STNL(0);
-        return;
+        return 1;
     }
 
     /* sb and ss want AReg = address, BReg = value.  When the value is still
@@ -3219,10 +3101,14 @@ ST_FUNC void store(int r, SValue *v) {
             Tp_SB();
         else
             Tp_SS();
-        return;
+        return 1;
     }
+    return 0;
+}
 
-    /* Generate Destination Address - pushes address onto stack */
+/* Generate Destination Address - pushes address onto stack */
+static void tp_store_addr_first(int r, SValue *v, int bt, int vr, int is_lval, int size, int value_in_areg)
+{
     gen_store_addr(v, bt, vr, is_lval);
 
     /* Store logic */
@@ -3326,6 +3212,77 @@ ST_FUNC void store(int r, SValue *v) {
         }
         break;
     }
+}
+
+/* Store the word in register r to the lvalue v.  A two-word value comes
+ * as two calls.  Each case below returns 1 if the store was its own. */
+ST_FUNC void store(int r, SValue *v) {
+    int bt = v->type.t & VT_BTYPE;
+    int vr = v->r & VT_VALMASK;
+    int is_lval = (v->r & VT_LVAL) != 0;
+    int size = get_primitive_type_size(bt);
+    int value_in_areg = 0;
+
+    if (tp_store_debug) {
+        fprintf(stderr, "[STORE] r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld sym=%p r_flags=0x%x\n",
+                r, vr, is_lval, size, bt, (long)v->c.i,
+                (v->r & VT_SYM) ? (void*)v->sym : NULL, v->r);
+    }
+    if (tp_trace_func_active() && size <= 2) {
+        fprintf(stderr,
+                "[tcc] store_trace func=%s r=%d vr=0x%x is_lval=%d size=%d bt=0x%x c.i=%ld depth=%d flags=0x%x\n",
+                funcname ? funcname : "<unknown>",
+                r, vr, is_lval, size, bt, (long)v->c.i, abcreg_stack_depth, v->r);
+    }
+
+    if (tp_store_unaligned(r, v, bt, vr, is_lval, size) ||
+        tp_store_fpu(r, v, bt, vr, is_lval))
+        return;
+
+    /* Check if value is on hardware evaluation stack.
+     * TREG_A/B/C are explicit eval-stack registers. In practice, gv()
+     * often leaves the current single-word RHS in AReg even when the
+     * associated pseudo-register slot has not been synchronized yet.
+     * Narrow non-local stores are especially sensitive to reloading a
+     * stale workspace slot after control-flow-heavy RHS evaluation. */
+    if (r == TREG_A || r == TREG_B || r == TREG_C) {
+        value_in_areg = 1;
+    }
+
+    if ((v->r & VT_VALMASK) == VT_CONST && v->sym && !(v->r & VT_SYM)) {
+        /* Ensure symbol constants reserve full LDC placeholder space. */
+        v->r |= VT_SYM;
+        vr = v->r & VT_VALMASK;
+    }
+
+    if (tp_store_local(r, v, vr, is_lval, size, value_in_areg) ||
+        tp_store_value_first(r, v, bt, vr, is_lval, size, value_in_areg))
+        return;
+    tp_store_addr_first(r, v, bt, vr, is_lval, size, value_in_areg);
+}
+
+/* The source words have already been loaded and parked by gv. Keep those
+ * slots as the assignment's value, and address both stores from the same
+ * parked pointer. The second STNL can name its word directly. */
+ST_FUNC int tp_store_double_copy(const SValue *src, const SValue *dst)
+{
+    int lo = src->r, hi = src->r2;
+    int addr = dst->r & VT_VALMASK;
+
+    if (dst->r != (addr | VT_LVAL) || addr < TREG_W0 || addr >= NB_REGS ||
+        dst->c.i < 0 || lo < TREG_FA || lo >= NB_REGS || hi < TREG_FA ||
+        hi >= NB_REGS || lo == hi || addr == lo || addr == hi)
+        return 0;
+
+    Tp_LDL(lo);
+    Tp_LDL(addr);
+    Tp_STNL(0);
+    Tp_LDL(hi);
+    Tp_LDL(addr);
+    Tp_STNL(1);
+    if (!nocode_wanted)
+        tp_hist[0].double_copy = 1;
+    return 1;
 }
 
 /* NOTE: greloc() is defined in tccgen.c (generic implementation) */
@@ -3492,7 +3449,6 @@ ST_FUNC void gsym_addr(int t, int a)
     struct jump_patch_meta *meta;
 
     /* Code at `a` is now a branch target; nothing may be rolled back over it. */
-    tp_stl_track_clear();
     tp_hist_clear();
 
     /* Control-flow joins cannot safely rely on the previous virtual ABC/FPU
@@ -3646,8 +3602,10 @@ ST_FUNC void gsym_addr(int t, int a)
         ind = saved_ind;  /* Restore ind */
         nocode_wanted = saved_nocode;  /* Restore nocode_wanted */
 
-        /* Move to next jump in chain */
+        /* Move to next jump in chain.  Look the entry up again rather than
+         * trust `meta` across the emission: the array moves when it grows. */
         if (meta) {
+            meta = jump_patch_find(t);
             meta->patched = 1;
             meta->target_addr = a;
             meta->instr_len = instr_len;
@@ -3682,7 +3640,7 @@ ST_FUNC void gen_fill_nops(int bytes) {
  * local is an ldl/stl at a fixed offset from it, so moving Wptr re-bases
  * every later local access (and the array lands on top of locals 0..N).
  * Wptr therefore never moves.  VLAs come from the running process's arena
- * (lib/transputer-vla.c), and the stack-pointer save, adjust and restore
+ * (lib/transputer/transputer-vla.c), and the stack-pointer save, adjust and restore
  * that tccgen asks for operate on the arena's top instead:
  *
  *   gen_vla_sp_save     before a scope's first VLA: slot = __tp_vla_mark()
@@ -3770,7 +3728,28 @@ ST_FUNC void gen_struct_copy(int size) {
         }
     }
 
-    /* Use T800 MOVE for all struct copies.
+    /* A one-word struct whose two addresses are word aligned - a union of an
+     * int and a float, say - is a load and a store: `ldl s; ldnl k; ldl d;
+     * stnl k`, 8 cycles where `ldc 4; move` with its two addresses costs
+     * about 18.  The ray tracer's shadeNode copies such a W seven times a
+     * call.  vstore() only retyped the operands as pointers, so type.ref is
+     * still the struct, whose alignment is ref->r; VT_UNALIGNED marks a
+     * member that a packed or #pragma pack container could leave short of
+     * it. */
+    if (size == 4 &&
+        sv_src.type.ref && sv_src.type.ref->r >= 4 &&
+        sv_dest.type.ref && sv_dest.type.ref->r >= 4 &&
+        !(sv_src.r & VT_UNALIGNED) && !(sv_dest.r & VT_UNALIGNED)) {
+        tp_push_sv(&sv_src);
+        Tp_LDNL(0);
+        tp_push_sv(&sv_dest);
+        Tp_STNL(0);
+        abcreg_stack_depth = 0;
+        vtop -= 2;
+        return;
+    }
+
+    /* Otherwise T800 MOVE.
      * TCWG defines MOVE as a byte-counted block transfer, so it is safe for
      * packed and unaligned struct fields where LDNL/STNL are not.
      * Struct assignment guarantees non-overlapping source and destination. */
@@ -3789,7 +3768,7 @@ ST_FUNC void gen_struct_copy(int size) {
 
 /* -mt425/-mt414 soft float.  The T425 and T414 have no FPU, so every
  * floating-point operation becomes a call to the libgcc-named helper that
- * lib/transputer-softfp.c (in transputer-libtcc1-t425.a and -t414.a)
+ * lib/transputer/transputer-softfp.c (in transputer-libtcc1-t425.a and -t414.a)
  * provides.  Float values already live in workspace words, and a float or
  * double is passed and returned exactly like an int or a long long, so
  * these are ordinary calls.  Call `name` on the top `nargs` vstack entries
@@ -3912,9 +3891,10 @@ ST_FUNC void gen_cvt_itof(int t) {
     int dbt = t & VT_BTYPE;
     int is_db = (dbt == VT_DOUBLE || dbt == VT_LDOUBLE);
     int sbt = vtop->type.t & (VT_BTYPE | VT_UNSIGNED);
+    int store_off;
     SValue sv;
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_itof(t);
         return;
     }
@@ -3974,13 +3954,28 @@ ST_FUNC void gen_cvt_itof(int t) {
     sv = vtop[0];
     abcreg_stack_depth = 0;
     fpureg_stack_depth = 0;
-    tp_push_sv(&sv);
-    Tp_STL(FRAME_SLOT_SCRATCH);
+    /* The FPU reads memory itself.  A word-aligned local lvalue or an
+     * already materialized workspace value needs no scratch copy. */
+    {
+        int v = sv.r & VT_VALMASK;
+        if ((sbt & VT_BTYPE) == VT_INT && !(sv.r & VT_MUSTCAST) &&
+            (sv.r & VT_LVAL) && v == VT_LOCAL &&
+            !(sv.r & VT_UNALIGNED) && !(sv.c.i & 3)) {
+            emit_local_addr(sv.c.i);
+        } else if ((sbt & VT_BTYPE) == VT_INT &&
+                   !(sv.r & (VT_LVAL | VT_MUSTCAST)) &&
+                   v >= 0 && v < VT_CONST) {
+            Tp_LDLP(v);
+        } else {
+            tp_push_sv(&sv);
+            Tp_STL(FRAME_SLOT_SCRATCH);
+            Tp_LDLP(FRAME_SLOT_SCRATCH);
+        }
+    }
 
     if (sbt == (VT_INT | VT_UNSIGNED)) {
         /* fpi32tor* would read bit 31 as a sign.  fpb32tor64 loads the
          * word as unsigned, exactly; a float result is rounded once. */
-        Tp_LDLP(FRAME_SLOT_SCRATCH);
         emit_instr(TP_OP_OPR, TP_OPR_FPB32TOR64);
         abcreg_pop(1);
         fpureg_push(1);
@@ -3992,14 +3987,18 @@ ST_FUNC void gen_cvt_itof(int t) {
     /* T800 integer->float converters load INT32 from address in AReg.  They
      * round to nearest: every FP instruction resets the rounding mode to
      * that (ISM 11.6), so no fpurn is needed first. */
-    Tp_LDLP(FRAME_SLOT_SCRATCH);
     emit_instr(TP_OP_OPR, is_db ? TP_FPU_I32TOR64 : TP_FPU_I32TOR32);
     abcreg_pop(1);
     fpureg_push(1);
 
 store:
     /* Keep float values workspace-backed like the rest of the backend. */
+    store_off = ind;
     tp_store_fpu_result_to_slot(REG_FRET, dbt);
+    /* A signed word converts exactly to REAL64. Let a single consumer
+     * take back this store under the usual FP history and liveness checks. */
+    if (sbt == VT_INT && dbt == VT_DOUBLE)
+        tp_fpr_note(REG_FRET, store_off, ind, 1);
     vtop->r = REG_FRET;
     vtop->r2 = is_db ? (REG_FRET + 1) : VT_CONST;
     abcreg_stack_depth = 0;
@@ -4009,7 +4008,7 @@ store:
 ST_FUNC void gen_cvt_ftoi(int t) {
     SValue sv = vtop[0];
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_ftoi(t);
         return;
     }
@@ -4039,6 +4038,11 @@ ST_FUNC void gen_cvt_ftoi(int t) {
             abcreg_pop(1);
         }
         emit_instr(TP_OP_OPR, TP_OPR_FPINT);
+        /* The T9000's fprz holds until fprn (the T800's fpurz governs the
+         * next FP instruction only): put round-to-nearest back for the
+         * code after the conversion. */
+        if (tp_have_t9000_feat(TP_T9K_FPU))
+            emit_instr(TP_OP_OPR, TP_OPR_FPRN);
         if (is_ll) {
             emit_instr(TP_OP_OPR, TP_OPR_FPDUP);
             fpureg_push(1);
@@ -4093,13 +4097,16 @@ ST_FUNC void gen_cvt_ftoi(int t) {
         abcreg_pop(1);
     }
     emit_instr(TP_OP_OPR, TP_OPR_FPRTOI32); /* round and convert to int32 */
+    /* The T800's fpurz applies to fprtoi32 alone, but the T9000's fprz
+     * holds until fprn: without this every FP operation after an (int)
+     * conversion rounded toward zero. */
+    if (tp_have_t9000_feat(TP_T9K_FPU))
+        emit_instr(TP_OP_OPR, TP_OPR_FPRN);
     Tp_LDLP(FRAME_SLOT_SCRATCH);
     emit_instr(TP_OP_OPR, TP_OPR_FPSTNLI32);
     abcreg_pop(1);
     fpureg_pop(1);
     Tp_LDL(FRAME_SLOT_SCRATCH);
-    /* fpurz applied to fprtoi32 alone: the mode is back to round-to-nearest
-     * after any FP instruction (ISM 11.6), so nothing to restore. */
     Tp_STL(REG_IRET);
     vtop->r = REG_IRET;
     vtop->r2 = VT_CONST;
@@ -4113,7 +4120,7 @@ ST_FUNC void gen_cvt_ftof(int t) {
     int dst_is_db = (dbt == VT_DOUBLE || dbt == VT_LDOUBLE);
     SValue sv = vtop[0];
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         tp_softfp_ftof(t);
         return;
     }
@@ -4213,10 +4220,11 @@ ST_FUNC void gen_expr32(ExprValue *pe) {
      */
     if (pe->sym) {
         /* Emit relocation for symbol reference */
-        greloc(cur_text_section, pe->sym, ind, R_TRANSPUTER_32);
+        greloc(cur_text_section, pe->sym, ind,
+               pe->pcrel ? R_TRANSPUTER_PC_RELATIVE : R_TRANSPUTER_32);
     }
     /* Always emit 4 bytes and advance instruction pointer */
-    gen_le32(pe->v);
+    gen_le32(pe->v + (pe->pcrel ? ind : 0));
 }
 
 ST_FUNC void ggoto(void) {
@@ -4344,70 +4352,14 @@ ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str) {
  * gv(RC_INT) loads vtop into AReg (emitting LDL/LDC), pushing previous A->B->C
  */
 
-void gen_builtin_in(void) {
-    /* Channel Input: __in(length, chan, buf)
-     * eval: C=buf(2), B=chan(1), A=length(0) */
-    tp_emit_3op(TP_OPR_IN, 2, 1, 0);
-}
-
-void gen_builtin_out(void) {
-    /* Channel Output: __out(length, chan, buf)
-     * eval: C=buf(2), B=chan(1), A=length(0) */
-    tp_emit_3op(TP_OPR_OUT, 2, 1, 0);
-}
-
-void gen_builtin_tin(void) {
-    /* Timer Input: __tin(time) - block until the current-priority clock
-     * is after `time`.  Leaves a result in AReg. */
-    tp_emit_1op(TP_OPR_TIN);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_outbyte(void) {
+static void gen_builtin_outbyte(void) {
     /* __outbyte(chan, byte): A=byte(1), B=chan(0) */
     tp_emit_2op(TP_OPR_OUTBYTE, 0, 1);
 }
 
-void gen_builtin_outword(void) {
+static void gen_builtin_outword(void) {
     /* __outword(chan, word): A=word(1), B=chan(0) */
     tp_emit_2op(TP_OPR_OUTWORD, 0, 1);
-}
-
-/* ALT operations - using correct TCWG opcodes */
-void gen_builtin_alt(void) {
-    /* ALT START - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_ALT);
-}
-
-void gen_builtin_altwt(void) {
-    /* ALT WAIT - returns selected index */
-    emit_instr(TP_OP_OPR, TP_OPR_ALTWT);
-    abcreg_push(1);  /* Result in A */
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_altend(void) {
-    /* ALT END - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_ALTEND);
-}
-
-void gen_builtin_talt(void) {
-    /* TIMED ALT - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_TALT);
-}
-
-void gen_builtin_taltwt(void) {
-    /* TIMED ALT WAIT - returns selected index */
-    emit_instr(TP_OP_OPR, TP_OPR_TALTWT);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
 }
 
 /* ALT guard enable/disable.
@@ -4433,118 +4385,9 @@ void gen_builtin_taltwt(void) {
  * enable the wrong thing.  That is why link multiplexing could not be
  * expressed here.
  */
-void gen_builtin_enbs(void) {
-    /* ENABLE SKIP: __enbs(guard) - AReg=guard */
-    tp_emit_1op(TP_OPR_ENBS);
-}
-
-void gen_builtin_enbc(void) {
-    /* ENABLE CHANNEL: __enbc(guard, chan) - AReg=guard, BReg=chan */
-    tp_emit_2op(TP_OPR_ENBC, 1, 0);
-}
-
-void gen_builtin_enbt(void) {
-    /* ENABLE TIMER: __enbt(guard, time) - AReg=guard, BReg=time */
-    tp_emit_2op(TP_OPR_ENBT, 1, 0);
-}
-
-void gen_builtin_disc(void) {
-    /* DISABLE CHANNEL: __disc(code, guard, chan) -> selected
-     * vstack: [-2]=code, [-1]=guard, [0]=chan
-     * eval:   C=chan(2), B=guard(1), A=code(0) */
-    tp_emit_3op(TP_OPR_DISC, 2, 1, 0);
-    abcreg_push(1);   /* tp_emit_3op popped 3; disc leaves 1 -> net pop 2 */
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_dist(void) {
-    /* DISABLE TIMER: __dist(code, guard, time) -> selected
-     * eval: C=time(2), B=guard(1), A=code(0) */
-    tp_emit_3op(TP_OPR_DIST, 2, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_diss(void) {
-    /* DISABLE SKIP: __diss(code, guard) -> selected
-     * eval: B=guard(1), A=code(0) */
-    tp_emit_2op(TP_OPR_DISS, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/* Process operations */
-void gen_builtin_resetch(void) {
-    /* RESET CHANNEL: __resetch(chan) -> previous channel word
-     *
-     * resetch consumes the address in AReg and leaves the word the channel
-     * held in its place - NotProcess_p if idle, otherwise the descriptor of
-     * the process that was blocked on it.  That value is what tells an
-     * aborted ChanIn/ChanOut whether the transfer had already started, so
-     * it is returned rather than dropped. */
-    tp_emit_1op(TP_OPR_RESETCH);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_startp(void) {
-    /* START PROCESS: __startp(workspace, entry)
-     * eval: A=entry(1), B=workspace(0).
-     * Note `entry` is an offset relative to the *next* IPtr, not an
-     * address - see PSetup in lib/transputer-conc.c, which uses runp
-     * instead for exactly that reason. */
-    tp_emit_2op(TP_OPR_STARTP, 0, 1);
-}
-
-void gen_builtin_endp(void) {
-    /* END PROCESS - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_ENDP);
-}
-
-void gen_builtin_runp(void) {
-    /* RUN PROCESS: __runp(descriptor) - AReg = Wptr | priority */
-    tp_emit_1op(TP_OPR_RUNP);
-}
-
-void gen_builtin_stopp(void) {
-    /* STOP PROCESS - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_STOPP);
-}
-
-void gen_builtin_ldpri(void) {
-    /* LOAD PRIORITY - no args, returns priority level */
-    emit_instr(TP_OP_OPR, TP_OPR_LDPRI);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/* Timer operations */
-void gen_builtin_ldtimer(void) {
-    /* LOAD TIMER - no args, returns current timer value */
-    emit_instr(TP_OP_OPR, TP_OPR_LDTIMER);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_sttimer(void) {
-    /* STORE TIMER: __sttimer(value) - AReg=value */
-    tp_emit_1op(TP_OPR_STTIMER);
-}
 
 /* Memory operations */
-void gen_builtin_move(void) {
+static void gen_builtin_move(void) {
     /* MOVE: __move(dest, src, length)
      * vstack: vtop[0]=length, vtop[-1]=src, vtop[-2]=dest
      * MOVE expects eval stack: CReg=src, BReg=dest, AReg=length
@@ -4631,7 +4474,7 @@ static void tp_builtin_push(SValue *sv)
         tp_push_sym_addr(sv);
 }
 
-void tp_emit_1op(int opcode) {
+static void tp_emit_1op(int opcode) {
     if (!tp_builtin_arg_direct(vtop))
         gv(RC_INT);
     tp_builtin_push(&vtop[0]);
@@ -4648,7 +4491,7 @@ void tp_emit_1op(int opcode) {
  * vstack layout:  vtop[0]=arg1, vtop[-1]=arg0
  * Eval stack result:  BReg=first pushed, AReg=second pushed
  */
-void tp_emit_2op(int opcode, int b_idx, int a_idx) {
+static void tp_emit_2op(int opcode, int b_idx, int a_idx) {
     SValue sv[2];
 
     /* Materialize arg1 (vtop), then arg0 - each only if it cannot be
@@ -4673,7 +4516,7 @@ void tp_emit_2op(int opcode, int b_idx, int a_idx) {
     abcreg_pop(2);
 }
 
-void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
+static void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
     SValue sv[3];
 
     /* Materialize arg2 (vtop), arg1, arg0 as before, skipping those that
@@ -4705,163 +4548,39 @@ void tp_emit_3op(int opcode, int c_idx, int b_idx, int a_idx) {
     abcreg_pop(3);
 }
 
-/* 2D Block move operations (T800/T805) */
-void gen_builtin_move2dinit(void) {
-    /* MOVE2DINIT: __move2dinit(length, dest_stride, src_stride)
-     * vstack: vtop[0]=src_stride, vtop[-1]=dest_stride, vtop[-2]=length
-     * Eval stack: C=src_stride, B=dest_stride, A=length (rows) */
-    tp_emit_3op(TP_OPR_MOVE2DINIT, 2, 1, 0);
-}
-
-void gen_builtin_move2dall(void) {
-    /* MOVE2DALL: __move2dall(width, dest, src)
-     * vstack: vtop[0]=src, vtop[-1]=dest, vtop[-2]=width
-     * Eval stack: C=src, B=dest, A=width (bytes per row) */
-    tp_emit_3op(TP_OPR_MOVE2DALL, 2, 1, 0);
-}
-
-void gen_builtin_move2dnonzero(void) {
-    /* MOVE2DNONZERO: __move2dnonzero(length, dest, src) */
-    tp_emit_3op(TP_OPR_MOVE2DNONZERO, 2, 1, 0);
-}
-
-void gen_builtin_move2dzero(void) {
-    /* MOVE2DZERO: __move2dzero(length, dest, src) */
-    tp_emit_3op(TP_OPR_MOVE2DZERO, 2, 1, 0);
-}
-
-/* T805 CRC operations */
-void gen_builtin_crcbyte(void) {
-    /* CRCBYTE: __crcbyte(byte, crc, poly) -> new crc
-     * eval: C=poly(2), B=crc(1), A=byte(0) */
-    tp_emit_3op(TP_OPR_CRCBYTE, 2, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_crcword(void) {
-    /* CRCWORD: __crcword(word, crc, poly) -> new crc
-     * eval: C=poly(2), B=crc(1), A=word(0) */
-    tp_emit_3op(TP_OPR_CRCWORD, 2, 1, 0);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_wcnt(void) {
-    /* WORD COUNT - no args from frontend, returns value
-     * Note: This is WCNT opcode which returns word count info
-     */
-    emit_instr(TP_OP_OPR, TP_OPR_WCNT);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_mint(void) {
-    /* MIN INTEGER constant: returns 0x80000000 (most negative int) */
-    emit_instr(TP_OP_OPR, TP_OPR_MINT);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/*
- * Scheduler queue registers.
- *
- * saveh/savel take a two-word buffer in AReg and write the front and back
- * pointers of the high/low priority run queue into buf[0] and buf[1].
- * sthf/sthb/stlf/stlb set one queue register each from AReg.
- *
- * The two functions here previously emitted OPR 0x28/0x29, which are not
- * sthf/stlf at all (those are 0x18 and 0x1C - see TP_OPR_STHF/TP_OPR_STLF
- * and the assembler table in transputer-asm.c).  They were unreachable, so
- * the wrong encodings never fired; they are correct now that the tokens
- * exist.
- */
-static void tp_gen_queue_store(int opr) { tp_emit_1op(opr); }
-
-void gen_builtin_saveh(void) { tp_gen_queue_store(TP_OPR_SAVEH); }
-void gen_builtin_savel(void) { tp_gen_queue_store(TP_OPR_SAVEL); }
-void gen_builtin_sthf(void)  { tp_gen_queue_store(TP_OPR_STHF);  }
-void gen_builtin_sthb(void)  { tp_gen_queue_store(TP_OPR_STHB);  }
-void gen_builtin_stlf(void)  { tp_gen_queue_store(TP_OPR_STLF);  }
-void gen_builtin_stlb(void)  { tp_gen_queue_store(TP_OPR_STLB);  }
-
-/* Workspace operations */
-void gen_builtin_gajw(void) {
-    /* GENERAL AJW: __gajw(new_wptr) -> old Wptr */
-    tp_emit_1op(TP_OPR_GAJW);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-/* Error handling */
-void gen_builtin_testerr(void) {
-    /* TEST ERROR - no args, returns error flag */
-    emit_instr(TP_OP_OPR, TP_OPR_TESTERR);
-    abcreg_push(1);
-    vpushi(0);
-    vtop->r = REG_IRET;
-    Tp_STL(REG_IRET);
-}
-
-void gen_builtin_seterr(void) {
-    /* SET ERROR - no args, sets error flag */
-    emit_instr(TP_OP_OPR, TP_OPR_SETERR);
-}
-
-void gen_builtin_sethalterr(void) {
-    /* SET HALT ON ERROR - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_SETHALTERR);
-}
-
-void gen_builtin_clrhalterr(void) {
-    /* CLEAR HALT ON ERROR - no args */
-    emit_instr(TP_OP_OPR, TP_OPR_CLRHALTERR);
-}
-
-/* testhalterr: the HaltOnError flag; testpranal: whether the processor
- * was analysed (it booted after Analyse, not Reset). */
+/* Emit a zero-operand instruction whose result is returned as a word. */
 static void tp_gen_flag_result(int opr)
 {
     emit_instr(TP_OP_OPR, opr);
+    tp_builtin_word_result();
+}
+
+static void tp_builtin_word_result(void)
+{
     abcreg_push(1);
     vpushi(0);
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
 }
-void gen_builtin_testhalterr(void) { tp_gen_flag_result(TP_OPR_TESTHALTERR); }
-void gen_builtin_testpranal(void)  { tp_gen_flag_result(TP_OPR_TESTPRANAL); }
-
-/* stoperr: deschedule the process for good if the Error flag is set. */
-void gen_builtin_stoperr(void) { emit_instr(TP_OP_OPR, TP_OPR_STOPERR); }
 
 /* The FPU error flag, which the FPU sets on an invalid operation,
  * overflow, division by zero or a non-finite fpint.  T800 and later. */
 static void tp_need_fpu(int tok)
 {
-    if (tp_t425())
+    if (tp_soft_float())
         tcc_error("%s is an FPU instruction, not available with -m%s",
                   get_tok_str(tok, NULL), tp_target_name(tcc_state));
 }
 
 /* fpchkerr: copy the FP error flag into the Error flag */
-void gen_builtin_fpchkerr(void)
+static void gen_builtin_fpchkerr(void)
 {
     tp_need_fpu(TOK___fpchkerr);
     emit_instr(TP_OP_OPR, TP_FPU_CHKERR);
 }
 
 /* fptesterr: 1 if the FP error flag was clear, 0 if set; clears it */
-void gen_builtin_fptesterr(void)
+static void gen_builtin_fptesterr(void)
 {
     tp_need_fpu(TOK___fptesterr);
     tp_gen_flag_result(TP_OPR_FPTESTERR);
@@ -4880,11 +4599,11 @@ static void tp_gen_fp_errflag(int tok, int t9k_opr, int fpentry_code)
         abcreg_pop(1);
     }
 }
-void gen_builtin_fpseterr(void)
+static void gen_builtin_fpseterr(void)
 {
     tp_gen_fp_errflag(TOK___fpseterr, TP_OPR_FPSETERR, TP_FPENTRY_USETERR);
 }
-void gen_builtin_fpclrerr(void)
+static void gen_builtin_fpclrerr(void)
 {
     tp_gen_fp_errflag(TOK___fpclrerr, TP_OPR_FPCLRERR, TP_FPENTRY_UCLRERR);
 }
@@ -4893,7 +4612,7 @@ void gen_builtin_fpclrerr(void)
  * Bit manipulation builtins (T800)
  * ------------------------------------------------------------------ */
 
-void gen_builtin_norm(void) {
+static void gen_builtin_norm(void) {
     /* NORM normalizes a 64-bit value BReg:AReg.
      * For 32-bit CLZ: put value in BReg, 0 in AReg.
      * Input:  BReg=high32 (our value), AReg=low32 (0)
@@ -4916,7 +4635,7 @@ void gen_builtin_norm(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_bitcnt(void) {
+static void gen_builtin_bitcnt(void) {
     /* BITCNT: AReg = popcount(AReg) + BReg.
      * We want popcount(x), so load 0 into BReg first (accumulator). */
     if (tp_t414()) {
@@ -4935,7 +4654,7 @@ void gen_builtin_bitcnt(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_bitrevword(void) {
+static void gen_builtin_bitrevword(void) {
     /* BITREVWORD: AReg = bit-reversed AReg (all 32 bits) */
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
@@ -4944,7 +4663,67 @@ void gen_builtin_bitrevword(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_bitrevnbits(void) {
+static void tp_gen_rotate32(int right)
+{
+    const int const_mask = VT_VALMASK | VT_LVAL | VT_SYM;
+    int immediate = (vtop[0].r & const_mask) == VT_CONST;
+    unsigned count = immediate ? (unsigned)vtop[0].c.i & 31 : 0;
+    int result_reg;
+
+    if (immediate && (vtop[-1].r & const_mask) == VT_CONST) {
+        uint32_t word = vtop[-1].c.i;
+        unsigned n = right ? -count & 31 : count;
+
+        vpop();
+        vpop();
+        vpushi((word << n) | (word >> (-n & 31)));
+        vtop->type.t = VT_INT | VT_UNSIGNED;
+        return;
+    }
+    if (!immediate)
+        gv(RC_INT);
+    vswap();
+    if (!tp_builtin_arg_direct(vtop))
+        gv(RC_INT);
+    result_reg = get_reg(RC_INT);
+    abcreg_stack_depth = 0;
+    tp_builtin_push(vtop);
+
+    if (!immediate || count) {
+        /* Shift a long word with two identical halves. The result half
+           that crosses the join is the rotated word. */
+        if (tp_t414()) {
+            Tp_STL(FRAME_SLOT_SCRATCH);
+            Tp_LDL(FRAME_SLOT_SCRATCH);
+            Tp_LDL(FRAME_SLOT_SCRATCH);
+        } else {
+            Tp_DUP();
+        }
+        if (immediate) {
+            if (count > 16 || (count == 16 && !right)) {
+                count = 32 - count;
+                right = !right;
+            }
+            Tp_LDC(count);
+        } else {
+            tp_builtin_push(vtop - 1);
+            Tp_LDC(31);
+            Tp_AND();
+        }
+        Tp_OPR_BINARY(right ? TP_OPR_LSHR : TP_OPR_LSHL);
+        if (!right)
+            Tp_REV();
+    }
+    vpop();
+    vpop();
+    vpushi(0);
+    vtop->r = result_reg;
+    vtop->type.t = VT_INT | VT_UNSIGNED;
+    Tp_STL(result_reg);
+    abcreg_stack_depth = 0; /* The other long-shift result is dead. */
+}
+
+static void gen_builtin_bitrevnbits(void) {
     /* BITREVNBITS: reverse bottom N bits of AReg.
      * Args: __bitrevnbits(value, nbits) → BReg=value, AReg=nbits */
     gv2(RC_INT, RC_INT);
@@ -4957,14 +4736,8 @@ void gen_builtin_bitrevnbits(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_lddevid(void) {
-    /* LDDEVID: Load device identification word.
-     * Executed as fpentry 0x17C: LDC 0x17C; OPR 0xAB.
-     * Returns product ID in AReg (T414=0, T800=5, T805=6, T806=0x806). */
-    /* LDDEVID is OPR 0x17C (NOT fpentry — it's a direct OPR instruction).
-     * It pushes the device identity onto the eval stack.
-     * Store to REG_IRET workspace slot for reliable return. */
-    emit_instr(TP_OP_OPR, 0x17C);
+static void gen_builtin_lddevid(void) {
+    emit_instr(TP_OP_OPR, TP_OPR_LDDEVID);
     abcreg_push(1);
     Tp_STL(REG_IRET);
     vpushi(0);
@@ -4975,49 +4748,30 @@ void gen_builtin_lddevid(void) {
 /* TVX - Transputer Vector eXtension (MXFP4 / bfloat16)      */
 /*************************************************************/
 
-/* __bf16 -> binary32.  vtop holds the 16-bit pattern in an integer slot;
- * BF16TOR32 turns it into a binary32 bit pattern, which we then reinterpret
- * as a float by loading it through the FPU. */
+/* __bf16 -> binary32. Both the shift and BF16TOR32 produce the complete
+ * binary32 bit pattern on the integer stack. Store it directly in the
+ * float result slot; an FPU load/store roundtrip adds no conversion. */
 ST_FUNC void gen_cvt_bf16_to_float(void)
 {
     SValue sv = vtop[0];
 
-    if (!tp_tvx()) {
-        /* bfloat16 is the top half of a binary32 */
-        save_reg(REG_FRET);
-        abcreg_stack_depth = 0;
-        tp_push_sv(&sv);
-        Tp_LDC(16);
-        Tp_SHL();
-        Tp_STL(REG_FRET);
-        vtop->r = REG_FRET;
-        vtop->r2 = VT_CONST;
-        abcreg_stack_depth = 0;
-        return;
-    }
-
     save_reg(REG_FRET);
     abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
     tp_push_sv(&sv);
-    emit_instr(TP_OP_OPR, TP_OPR_BF16TOR32);
-    Tp_STL(FRAME_SLOT_SCRATCH);
-
-    Tp_LDLP(FRAME_SLOT_SCRATCH);
-    emit_instr(TP_OP_OPR, TP_FPU_LDNLSN);
-    abcreg_pop(1);
-    fpureg_push(1);
-
-    tp_store_fpu_result_to_slot(REG_FRET, VT_FLOAT);
+    if (tp_tvx()) {
+        emit_instr(TP_OP_OPR, TP_OPR_BF16TOR32);
+    } else {
+        /* bfloat16 is the top half of a binary32 */
+        Tp_LDC(16);
+        Tp_SHL();
+    }
+    Tp_STL(REG_FRET);
     vtop->r = REG_FRET;
     vtop->r2 = VT_CONST;
     abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
 }
 
-/* binary32 -> __bf16.  Spill FA to memory to get at the bit pattern, then
- * R32TOBF16 rounds it to nearest-even. */
+/* TVX binary16 widening also returns complete binary32 bits in AReg. */
 ST_FUNC void gen_cvt_f16_to_float(void)
 {
     SValue sv = vtop[0];
@@ -5030,78 +4784,73 @@ ST_FUNC void gen_cvt_f16_to_float(void)
 
     save_reg(REG_FRET);
     abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
     tp_push_sv(&sv);
     emit_instr(TP_OP_OPR, TP_OPR_F16TOR32);
-    Tp_STL(FRAME_SLOT_SCRATCH);
-
-    Tp_LDLP(FRAME_SLOT_SCRATCH);
-    emit_instr(TP_OP_OPR, TP_FPU_LDNLSN);
-    abcreg_pop(1);
-    fpureg_push(1);
-
-    tp_store_fpu_result_to_slot(REG_FRET, VT_FLOAT);
+    Tp_STL(REG_FRET);
     vtop->r = REG_FRET;
     vtop->r2 = VT_CONST;
     abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
+}
+
+/* TVX narrowing consumes binary32 bits on the integer stack. Load memory
+ * through the integer word/packed-byte paths, preserving volatile access
+ * and the canonical spilled-address convention. Constants retain FP staging.
+ * Never reuse an AReg tag here: a volatile local still requires a real load. */
+static void tp_gen_tvx_float_narrow(int operation)
+{
+    SValue sv;
+    int v;
+    save_reg(REG_IRET);
+    sv = vtop[0];
+    v = sv.r & VT_VALMASK;
+    abcreg_stack_depth = 0;
+    tp_areg_invalidate();
+    if ((sv.type.t & VT_BTYPE) == VT_FLOAT && (sv.r & VT_LVAL)) {
+        SValue word = sv;
+        word.type.t = (word.type.t & ~VT_BTYPE) | VT_INT | VT_UNSIGNED;
+        /* As in tp_emit_float_addr, negative c.i on a register lvalue
+         * identifies the stable saved address, not the register itself. */
+        if (v < VT_CONST && sv.c.i < 0)
+            word.r = (word.r & ~VT_VALMASK) | VT_LLOCAL;
+        tp_push_sv(&word);
+    } else if ((sv.type.t & VT_BTYPE) == VT_FLOAT &&
+        v == VT_LOCAL && !tp_word_unaligned(&sv)) {
+        emit_local_op(TP_OP_LDL, sv.c.i);
+        abcreg_push(1);
+    } else if ((sv.type.t & VT_BTYPE) == VT_FLOAT &&
+               !(sv.r & VT_LVAL) && v < VT_CONST) {
+        Tp_LDL(v);
+    } else {
+        fpureg_stack_depth = 0;
+        tp_push_float_sv(&sv);
+        tp_store_fpu_result_to_slot(FRAME_SLOT_SCRATCH, VT_FLOAT);
+        Tp_LDL(FRAME_SLOT_SCRATCH);
+        fpureg_stack_depth = 0;
+    }
+    emit_instr(TP_OP_OPR, operation);
+    Tp_STL(REG_IRET);
+    vtop->r = REG_IRET;
+    vtop->r2 = VT_CONST;
+    abcreg_stack_depth = 0;
 }
 
 ST_FUNC void gen_cvt_float_to_f16(void)
 {
-    SValue sv;
-
     if (!tp_tvx()) {
         tp_softfp_call("__truncsfhf2", 1, VT_INT);
         return;
     }
-
-    /* the result goes to REG_IRET: spill a pending call result there */
-    save_reg(REG_IRET);
-    sv = vtop[0];
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&sv);
-    tp_store_fpu_result_to_slot(FRAME_SLOT_SCRATCH, VT_FLOAT);
-
-    Tp_LDL(FRAME_SLOT_SCRATCH);
-    emit_instr(TP_OP_OPR, TP_OPR_R32TOF16);
-    Tp_STL(REG_IRET);
-
-    vtop->r = REG_IRET;
-    vtop->r2 = VT_CONST;
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
+    tp_gen_tvx_float_narrow(TP_OPR_R32TOF16);
 }
 
 ST_FUNC void gen_cvt_float_to_bf16(void)
 {
-    SValue sv;
-
     if (!tp_tvx()) {
         tp_softfp_call("__truncsfbf2", 1, VT_INT);
         return;
     }
 
-    /* the result goes to REG_IRET: spill a pending call result there */
-    save_reg(REG_IRET);
-    sv = vtop[0];
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&sv);
-    tp_store_fpu_result_to_slot(FRAME_SLOT_SCRATCH, VT_FLOAT);
-
-    Tp_LDL(FRAME_SLOT_SCRATCH);
-    emit_instr(TP_OP_OPR, TP_OPR_R32TOBF16);
-    Tp_STL(REG_IRET);
-
-    vtop->r = REG_IRET;
-    vtop->r2 = VT_CONST;
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
+    tp_gen_tvx_float_narrow(TP_OPR_R32TOBF16);
 }
 
 /* A TVX op's result is a word of its own, whatever the operand was: keeping
@@ -5123,7 +4872,8 @@ static void tp_gen_tvx_unary(int opr) {
     tp_tvx_word_result(VT_INT | VT_UNSIGNED);
 }
 
-/* Binary word,word->word TVX op: AReg = f(BReg, AReg). */
+/* Binary word,word->word TVX op: AReg = f(BReg, AReg).
+ * BF16PACK receives the high half in BReg and the low half in AReg. */
 static void tp_gen_tvx_binary(int opr) {
     gv2(RC_INT, RC_INT);
     tp_push_sv(&vtop[-1]);  /* first arg  -> BReg */
@@ -5203,7 +4953,7 @@ static void tp_gen_fpu_unary(int t9k_opr, int fpentry_code, int is_sqrt)
     int bt = vtop->type.t & VT_BTYPE;
     int is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
 
-    if (tp_t425()) {
+    if (tp_soft_float()) {
         int hi;
 
         if (is_sqrt) {
@@ -5225,7 +4975,18 @@ static void tp_gen_fpu_unary(int t9k_opr, int fpentry_code, int is_sqrt)
         return;
     }
 
-    tp_fpu_operands(1);
+    /* A single-use arithmetic result can still be in FA.  Take back its
+     * unobserved store before save_reg() turns the operand into a spill.
+     * Other live return-slot values must still go through the normal path:
+     * the unary result will overwrite REG_FRET (and its high word). */
+    if (is_sqrt && !tp_reg_live_on_vstack(REG_FRET, vtop) &&
+        (!is_db || !tp_reg_live_on_vstack(REG_FRET + 1, vtop)) &&
+        tp_fpu_take_resident(vtop, is_db)) {
+        abcreg_stack_depth = 0;
+        fpureg_stack_depth = 1;
+    } else {
+        tp_fpu_operands(1);
+    }
 
     if (tp_have_t9000_feat(TP_T9K_FPU)) {
         emit_instr(TP_OP_OPR, t9k_opr);
@@ -5243,8 +5004,8 @@ static void tp_gen_fpu_unary(int t9k_opr, int fpentry_code, int is_sqrt)
     tp_fpu_result(bt);
 }
 
-void gen_builtin_fpsqrt(void) { tp_gen_fpu_unary(TP_OPR_FPSQRT, TP_FPENTRY_SQRTLAST, 1); }
-void gen_builtin_fpabs(void)  { tp_gen_fpu_unary(TP_OPR_FPABS,  TP_FPENTRY_ABS,      0); }
+static void gen_builtin_fpsqrt(void) { tp_gen_fpu_unary(TP_OPR_FPSQRT, TP_FPENTRY_SQRTLAST, 1); }
+static void gen_builtin_fpabs(void)  { tp_gen_fpu_unary(TP_OPR_FPABS,  TP_FPENTRY_ABS,      0); }
 
 /* Round to an integer value, keeping the precision: __fpint (to nearest,
  * like rint), __fpintrp (toward +inf, ceil), __fpintrm (toward -inf,
@@ -5279,17 +5040,17 @@ static void tp_gen_fpu_round(int tok, int t9k_mode, int fpentry_mode)
         tp_fpu_result(bt);
     }
 }
-void gen_builtin_fpint(void)   { tp_gen_fpu_round(TOK___fpint, 0, 0); }
-void gen_builtin_fpintrp(void) { tp_gen_fpu_round(TOK___fpintrp, TP_OPR_FPRP, TP_FPENTRY_RP); }
-void gen_builtin_fpintrm(void) { tp_gen_fpu_round(TOK___fpintrm, TP_OPR_FPRM, TP_FPENTRY_RM); }
-void gen_builtin_fpintrz(void) { tp_gen_fpu_round(TOK___fpintrz, TP_OPR_FPRZ, TP_FPENTRY_RZ); }
+static void gen_builtin_fpint(void)   { tp_gen_fpu_round(TOK___fpint, 0, 0); }
+static void gen_builtin_fpintrp(void) { tp_gen_fpu_round(TOK___fpintrp, TP_OPR_FPRP, TP_FPENTRY_RP); }
+static void gen_builtin_fpintrm(void) { tp_gen_fpu_round(TOK___fpintrm, TP_OPR_FPRM, TP_FPENTRY_RM); }
+static void gen_builtin_fpintrz(void) { tp_gen_fpu_round(TOK___fpintrz, TP_OPR_FPRZ, TP_FPENTRY_RZ); }
 
 /* __fprem(x, y): the IEEE remainder x REM y, exact, in double unless both
  * are float.  One instruction on the T9000; on the T800 the TCWG 7.5.4
  * loop, each step leaving "done" in A for the cj:
  *      fpremfirst; eqc 0; cj next; loop: fpremstep; cj loop; next:
  * It uses all three FPU registers and destroys the integer stack. */
-void gen_builtin_fprem(void)
+static void gen_builtin_fprem(void)
 {
     CType t;
     int bt;
@@ -5331,7 +5092,7 @@ static void tp_soft_tvx_unary(const char *helper)
 }
 
 /* Software TVX.  Without -mt9000tvx, a TVX builtin with a C version in
- * lib/transputer-tvx*.c (every runtime archive has them) becomes a call to
+ * lib/transputer/transputer-tvx*.c (every runtime archive has them) becomes a call to
  * it, which gives the instruction's result bit for bit; the others stay
  * compile errors.  One letter per argument and for the result: u a word (an
  * unsigned or a pointer), i an int, f a float, v nothing. */
@@ -5402,7 +5163,7 @@ static void tp_soft_tvx_call(const struct tp_soft_tvx_desc *s)
     }
 }
 
-void gen_builtin_bf16tof32(void)
+static void gen_builtin_bf16tof32(void)
 {
     if (!tp_tvx()) {            /* bfloat16 is the top half of a binary32 */
         gv(RC_INT);
@@ -5415,27 +5176,15 @@ void gen_builtin_bf16tof32(void)
     tp_gen_tvx_unary(TP_OPR_BF16TOR32);
 }
 
-void gen_builtin_f32tobf16(void)
+static void gen_builtin_f32tobf16(void)
 {
     if (!tp_tvx())
         tp_soft_tvx_unary("__truncsfbf2");
     else
         tp_gen_tvx_unary(TP_OPR_R32TOBF16);
 }
-void gen_builtin_bf16unpkh(void)   { tp_gen_tvx_unary(TP_OPR_BF16UNPKH); }
-void gen_builtin_mxfp4tof32(void)  { tp_gen_tvx_unary(TP_OPR_MXFP4TOR32); }
-void gen_builtin_f32tomxfp4(void)  { tp_gen_tvx_unary(TP_OPR_R32TOMXFP4); }
-void gen_builtin_mxe8m0tof32(void) { tp_gen_tvx_unary(TP_OPR_MXE8M0TOR32); }
-void gen_builtin_mxe8m0of(void)    { tp_gen_tvx_unary(TP_OPR_MXE8M0OF); }
 
-void gen_builtin_bf16pack(void) {
-    /* __bf16pack(hi, lo) -> (bf16(hi) << 16) | bf16(lo)
-     * BF16PACK computes (bf16(BReg) << 16) | bf16(AReg), so `hi` must be
-     * pushed first (it sinks to BReg) and `lo` second. */
-    tp_gen_tvx_binary(TP_OPR_BF16PACK);
-}
-
-/* Shared tail for the two accumulating dot products: the result is left in
+/* Shared tail for accumulating dot products: the result is left in
  * FAreg, which we spill to the float return slot like every other float value
  * in this backend. */
 static void tp_gen_tvx_dot_finish(int nb_args) {
@@ -5449,7 +5198,7 @@ static void tp_gen_tvx_dot_finish(int nb_args) {
     fpureg_stack_depth = 0;
 }
 
-void gen_builtin_mxfp4dot(void) {
+static void gen_builtin_mxfp4dot(void) {
     /* float __mxfp4dot(const void *block, const float *act, float acc)
      * MXFP4DOT wants AReg = block pointer, BReg = activation pointer, and the
      * accumulator on top of the FPU stack. */
@@ -5470,32 +5219,9 @@ void gen_builtin_mxfp4dot(void) {
     tp_gen_tvx_dot_finish(3);
 }
 
-void gen_builtin_bf16dot(void) {
-    /* float __bf16dot(const void *x, const void *y, int n, float acc)
-     * BF16DOT wants AReg = x, BReg = y, CReg = n, accumulator in FAreg. */
-    SValue xp = vtop[-3];
-    SValue yp = vtop[-2];
-    SValue n  = vtop[-1];
-    SValue acc = vtop[0];
-
-    save_reg(REG_FRET);
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&acc);   /* FAreg = acc */
-    tp_push_sv(&n);           /* n -> CReg */
-    tp_push_sv(&yp);          /* y -> BReg */
-    tp_push_sv(&xp);          /* x -> AReg */
-    emit_instr(TP_OP_OPR, TP_OPR_BF16DOT);
-    abcreg_pop(3);
-
-    tp_gen_tvx_dot_finish(4);
-}
-
-void gen_builtin_mxfp4gemv(void) {
-    /* float __mxfp4gemv(const void *blocks, const float *act, int n, float acc)
-     * MXFP4GEMV wants AReg = block array, BReg = activations, CReg = block
-     * count, accumulator in FAreg.  Defined as n chained MXFP4DOTs. */
+/* Four-argument dots take the accumulator in FA, argument 0 in A,
+ * argument 1 in B and argument 2 in C. */
+static void tp_gen_tvx_dot4(int opr) {
     SValue blk = vtop[-3];
     SValue act = vtop[-2];
     SValue n   = vtop[-1];
@@ -5505,18 +5231,18 @@ void gen_builtin_mxfp4gemv(void) {
     abcreg_stack_depth = 0;
     fpureg_stack_depth = 0;
 
-    tp_push_float_sv(&acc);   /* FAreg = acc */
-    tp_push_sv(&n);           /* n      -> CReg */
-    tp_push_sv(&act);         /* act    -> BReg */
-    tp_push_sv(&blk);         /* blocks -> AReg */
-    emit_instr(TP_OP_OPR, TP_OPR_MXFP4GEMV);
+    tp_push_float_sv(&acc);
+    tp_push_sv(&n);
+    tp_push_sv(&act);
+    tp_push_sv(&blk);
+    emit_instr(TP_OP_OPR, opr);
     abcreg_pop(3);
 
     tp_gen_tvx_dot_finish(4);
 }
 
 /* void __mxfp4unpk8(unsigned packed, float *dst) - 8 lanes, one instruction */
-void gen_builtin_mxfp4unpk8(void) {
+static void gen_builtin_mxfp4unpk8(void) {
     gv2(RC_INT, RC_INT);
     tp_push_sv(&vtop[0]);   /* dst    -> BReg */
     tp_push_sv(&vtop[-1]);  /* packed -> AReg */
@@ -5525,15 +5251,8 @@ void gen_builtin_mxfp4unpk8(void) {
     vtop -= 2;
 }
 
-/* unsigned __f32tomxfp4x8(const float *src) - quantise 8 lanes at once */
-void gen_builtin_f32tomxfp4x8(void) { tp_gen_tvx_unary(TP_OPR_R32TOMXFP4X8); }
-
-/* unsigned __bf16mul2/__bf16add2(unsigned a, unsigned b) - 2 packed lanes */
-void gen_builtin_bf16mul2(void) { tp_gen_tvx_binary(TP_OPR_BF16MUL2); }
-void gen_builtin_bf16add2(void) { tp_gen_tvx_binary(TP_OPR_BF16ADD2); }
-
 /* void __vsetlen(int n) - set the length for subsequent vector ops */
-void gen_builtin_vsetlen(void) {
+static void gen_builtin_vsetlen(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_VSETLEN);
@@ -5566,11 +5285,6 @@ static void tp_gen_vec2(int opr) {
     abcreg_stack_depth = 0;
 }
 
-void gen_builtin_vadd(void)     { tp_gen_vec3(TP_OPR_VADDSN); }
-void gen_builtin_vmul(void)     { tp_gen_vec3(TP_OPR_VMULSN); }
-void gen_builtin_vrmsnorm(void) { tp_gen_vec3(TP_OPR_VRMSNORM); }
-void gen_builtin_vsilu(void)    { tp_gen_vec2(TP_OPR_VSILUSN); }
-void gen_builtin_vsoftmax(void) { tp_gen_vec2(TP_OPR_VSOFTMAXSN); }
 
 /* Block rotation (BRQ).  All three take (dst, src, sign_mask) and get their
  * element count from __vsetlen(), like the other vector kernels.  The sign
@@ -5581,9 +5295,6 @@ void gen_builtin_vsoftmax(void) { tp_gen_vec2(TP_OPR_VSOFTMAXSN); }
  *   void __mxqrot  (tvx_mxfp4_block *dst,   const float *src,    unsigned m);
  *   void __mxqrotbf(tvx_mxfp4_block *dst,   const unsigned short *src, unsigned m);
  */
-void gen_builtin_vhad32(void)   { tp_gen_vec3(TP_OPR_VHAD32); }
-void gen_builtin_mxqrot(void)   { tp_gen_vec3(TP_OPR_MXQROT); }
-void gen_builtin_mxqrotbf(void) { tp_gen_vec3(TP_OPR_MXQROTBF); }
 
 /* TVX-GFX - transform & project (T&L geometry).  See transputer/t4/tvx_gfx.h.
  * Like tp_gen_vec3 but the instruction leaves a result (the outcode) in
@@ -5606,31 +5317,26 @@ static void tp_gen_vec3_ret(int opr) {
  *                                     (vertex count from __vsetlen)
  * void __fsincos(float *dst, unsigned bams)        dst = {sin, cos}
  * unsigned __frsqrtb(unsigned bits)                bit-domain 1/sqrt   */
-void gen_builtin_ftsetvp(void) {
+static void gen_builtin_ftsetvp(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_FTSETVP);
     abcreg_pop(1);
     vtop--;
 }
-void gen_builtin_ftransp(void)  { tp_gen_vec3_ret(TP_OPR_FTRANSP); }
-void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
-void gen_builtin_fsincos(void)  { tp_gen_vec2(TP_OPR_FSINCOS); }
-void gen_builtin_frsqrtb(void)  { tp_gen_tvx_unary(TP_OPR_FRSQRT); }
+static void gen_builtin_ftransp(void)  { tp_gen_vec3_ret(TP_OPR_FTRANSP); }
+static void gen_builtin_ftranspb(void) { tp_gen_vec3_ret(TP_OPR_FTRANSPB); }
 /* unsigned __frecipb(unsigned bits);
  * void __fsincosb(float *dst_pairs, const unsigned short *bams)
  *                                        (angle count from __vsetlen) */
-void gen_builtin_frecipb(void)  { tp_gen_tvx_unary(TP_OPR_FRECIP); }
-void gen_builtin_fsincosb(void) { tp_gen_vec2(TP_OPR_FSINCOSB); }
 /* void __vsetstride(unsigned stride_bytes, unsigned stream_mask);
  * int  __ftcull(unsigned char *dst, const float *xyz, const void *param)
  * int  __tskin(float *dst, const void *joints, const void *param)
  *                                        (vertex count from __vsetlen) */
-void gen_builtin_vsetstride(void) { tp_gen_vec2(TP_OPR_VSETSTRIDE); }
-void gen_builtin_ftcull(void)   { tp_gen_vec3_ret(TP_OPR_FTCULL); }
-void gen_builtin_tskin(void)    { tp_gen_vec3_ret(TP_OPR_TSKIN); }
+static void gen_builtin_ftcull(void)   { tp_gen_vec3_ret(TP_OPR_FTCULL); }
+static void gen_builtin_tskin(void)    { tp_gen_vec3_ret(TP_OPR_TSKIN); }
 /* void __vsetfmt(unsigned fmt);  0 = f32 xyz, 1 = bf16, 2 = f16 */
-void gen_builtin_vsetfmt(void) {
+static void gen_builtin_vsetfmt(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_VSETFMT);
@@ -5642,16 +5348,15 @@ void gen_builtin_vsetfmt(void) {
  * int  __qgemm(float *dst, const void *param, unsigned nblocks_per_row)
  *                       param = {acts ptr, weights ptr}; rows = __vsetlen
  * void __vblend8(unsigned *dst, const unsigned *src, unsigned alpha_ctl) */
-void gen_builtin_ftsetlit(void) {
+static void gen_builtin_ftsetlit(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_FTSETLIT);
     abcreg_pop(1);
     vtop--;
 }
-void gen_builtin_flitb(void)   { tp_gen_vec3_ret(TP_OPR_FLITB); }
-void gen_builtin_qgemm(void)   { tp_gen_vec3_ret(TP_OPR_QGEMM); }
-void gen_builtin_vblend8(void) { tp_gen_vec3(TP_OPR_VBLEND8); }
+static void gen_builtin_flitb(void)   { tp_gen_vec3_ret(TP_OPR_FLITB); }
+static void gen_builtin_qgemm(void)   { tp_gen_vec3_ret(TP_OPR_QGEMM); }
 /* void __vfill(void *dst, unsigned pattern, unsigned nbytes)
  * void __vfill2d(void *dst, unsigned pattern, unsigned width_bytes)
  *                          (rows/stride latched by __move2dinit)
@@ -5660,10 +5365,7 @@ void gen_builtin_vblend8(void) { tp_gen_vec3(TP_OPR_VBLEND8); }
  *                          (rows/strides from __move2dinit, px/row
  *                           from __vsetlen)
  * void __stvxstate(void *save15words) */
-void gen_builtin_vfill(void)    { tp_gen_vec3(TP_OPR_VFILL); }
-void gen_builtin_vfill2d(void)  { tp_gen_vec3(TP_OPR_VFILL2D); }
-void gen_builtin_csumb(void)    { tp_gen_vec3_ret(TP_OPR_CSUM); }
-void gen_builtin_vblend2d(void) { tp_gen_vec3(TP_OPR_VBLEND2D); }
+static void gen_builtin_csumb(void)    { tp_gen_vec3_ret(TP_OPR_CSUM); }
 /* unsigned __csumcpy(void *dst, const void *src, unsigned nbytes)
  * void __vq8k(void *dst_q8_K_blocks, const void *src)
  * void __vq80(void *dst_q8_0_blocks, const void *src)
@@ -5677,11 +5379,7 @@ void gen_builtin_vblend2d(void) { tp_gen_vec3(TP_OPR_VBLEND2D); }
  *                    (n VCP transfers started at once, one deschedule
  *                     until all are done; each input's length comes back
  *                     in its entry - see include/t9000.h) */
-void gen_builtin_csumcpy(void)  { tp_gen_vec3_ret(TP_OPR_CSUMCPY); }
-void gen_builtin_vq8k(void)     { tp_gen_vec2(TP_OPR_VQ8K); }
-void gen_builtin_vq80(void)     { tp_gen_vec2(TP_OPR_VQ80); }
-void gen_builtin_vcvt(void)     { tp_gen_vec3(TP_OPR_VCVT); }
-void gen_builtin_vxfer(void)    { tp_gen_vec2(TP_OPR_VXFER); }
+static void gen_builtin_csumcpy(void)  { tp_gen_vec3_ret(TP_OPR_CSUMCPY); }
 
 /* T9000 configuration space and virtual channel processor (ISM 12.8-12.9,
  * HRM 11 and 15).  `chan` is a virtual channel word - input #80000040+8n,
@@ -5702,23 +5400,15 @@ static void tp_t9k_result(void)
     vpushi(0);
     tp_tvx_word_result(VT_INT | VT_UNSIGNED);
 }
-void gen_builtin_ldconf(void)     { tp_emit_1op(TP_OPR_LDCONF); tp_t9k_result(); }
-void gen_builtin_stconf(void)     { tp_emit_2op(TP_OPR_STCONF, 1, 0); }
-void gen_builtin_initvlcb(void)   { tp_emit_2op(TP_OPR_INITVLCB, 1, 0); }
-void gen_builtin_sethdr(void)     { tp_emit_3op(TP_OPR_SETHDR, 2, 1, 0); }
-void gen_builtin_writehdr(void)   { tp_emit_3op(TP_OPR_WRITEHDR, 2, 1, 0); }
-void gen_builtin_readhdr(void)    { tp_emit_3op(TP_OPR_READHDR, 2, 1, 0); }
-void gen_builtin_setchmode(void)  { tp_emit_2op(TP_OPR_SETCHMODE, 1, 0); }
-void gen_builtin_stopch(void)     { tp_emit_1op(TP_OPR_STOPCH); }
-void gen_builtin_swapbfr(void)
+static void gen_builtin_ldconf(void)     { tp_emit_1op(TP_OPR_LDCONF); tp_t9k_result(); }
+static void gen_builtin_swapbfr(void)
 {
     tp_emit_2op(TP_OPR_SWAPBFR, 1, 0);
     tp_t9k_result();
     vtop->type.t = VT_PTR;
     vtop->type.ref = char_pointer_type.ref;
 }
-void gen_builtin_vout(void)       { tp_emit_3op(TP_OPR_VOUT, 2, 1, 0); }
-void gen_builtin_vin(void)
+static void gen_builtin_vin(void)
 {
     /* vin may deschedule; ldcnt then reads the count it left in the
      * process's workspace */
@@ -5726,8 +5416,8 @@ void gen_builtin_vin(void)
     emit_instr(TP_OP_OPR, TP_OPR_LDCNT);
     tp_t9k_result();
 }
-void gen_builtin_ldchstatus(void) { tp_emit_1op(TP_OPR_LDCHSTATUS); tp_t9k_result(); }
-void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(); }
+static void gen_builtin_ldchstatus(void) { tp_emit_1op(TP_OPR_LDCHSTATUS); tp_t9k_result(); }
+static void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(); }
 
 /* T9000 semaphores (ISM 8.6).  A semaphore is three words: a count, then
  * the front and back of the queue of processes waiting on it.
@@ -5750,13 +5440,7 @@ void gen_builtin_chantype(void)   { tp_emit_1op(TP_OPR_CHANTYPE); tp_t9k_result(
  *                                  its back through *back
  *   unsigned __ldresptr(chan)      read rc.Ptr; __stresptr(chan, v) write it
  * They take a T9000 (the descriptor table puts them after __vxfer). */
-void gen_builtin_semwait(void)    { tp_emit_1op(TP_OPR_WAIT); }
-void gen_builtin_semsignal(void)  { tp_emit_1op(TP_OPR_SIGNAL); }
-void gen_builtin_mkrc(void)       { tp_emit_3op(TP_OPR_MKRC, 2, 1, 0); }
-void gen_builtin_unmkrc(void)     { tp_emit_1op(TP_OPR_UNMKRC); }
-void gen_builtin_grant(void)      { tp_emit_2op(TP_OPR_GRANT, 1, 0); }
-void gen_builtin_enbg(void)       { tp_emit_2op(TP_OPR_ENBG, 1, 0); }
-void gen_builtin_disg(void)
+static void gen_builtin_disg(void)
 {
     /* as __disc: A=code(0), B=guard(1), C=rds(2) -> selected */
     tp_emit_3op(TP_OPR_DISG, 2, 1, 0);
@@ -5765,8 +5449,7 @@ void gen_builtin_disg(void)
     vtop->r = REG_IRET;
     Tp_STL(REG_IRET);
 }
-void gen_builtin_irdsq(void)      { tp_emit_3op(TP_OPR_IRDSQ, 2, 1, 0); }
-void gen_builtin_erdsq(void)
+static void gen_builtin_erdsq(void)
 {
     /* erdsq leaves the queue's front in A and its back in B.  Park the
      * front in a scratch slot while the back is stored, since the vstack
@@ -5789,9 +5472,8 @@ void gen_builtin_erdsq(void)
     tp_tvx_word_result(VT_PTR);
     vtop->type.ref = char_pointer_type.ref;
 }
-void gen_builtin_ldresptr(void)   { tp_emit_1op(TP_OPR_LDRESPTR); tp_t9k_result(); }
-void gen_builtin_stresptr(void)   { tp_emit_2op(TP_OPR_STRESPTR, 1, 0); }
-void gen_builtin_stvxstate(void) {
+static void gen_builtin_ldresptr(void)   { tp_emit_1op(TP_OPR_LDRESPTR); tp_t9k_result(); }
+static void gen_builtin_stvxstate(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_STVXSTATE);
@@ -5799,29 +5481,7 @@ void gen_builtin_stvxstate(void) {
     vtop--;
 }
 
-void gen_builtin_mxfp4gemvbf(void) {
-    /* float __mxfp4gemvbf(const void *blocks, const void *bf16_act,
-     *                     int n, float acc) */
-    SValue blk = vtop[-3];
-    SValue act = vtop[-2];
-    SValue n   = vtop[-1];
-    SValue acc = vtop[0];
-
-    save_reg(REG_FRET);
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&acc);
-    tp_push_sv(&n);
-    tp_push_sv(&act);
-    tp_push_sv(&blk);
-    emit_instr(TP_OP_OPR, TP_OPR_MXFP4GEMVBF);
-    abcreg_pop(3);
-
-    tp_gen_tvx_dot_finish(4);
-}
-
-void gen_builtin_f16tof32(void)
+static void gen_builtin_f16tof32(void)
 {
     if (!tp_tvx())
         tp_soft_tvx_unary("__extendhfsf2");
@@ -5829,41 +5489,13 @@ void gen_builtin_f16tof32(void)
         tp_gen_tvx_unary(TP_OPR_F16TOR32);
 }
 
-void gen_builtin_f32tof16(void)
+static void gen_builtin_f32tof16(void)
 {
     if (!tp_tvx())
         tp_soft_tvx_unary("__truncsfhf2");
     else
         tp_gen_tvx_unary(TP_OPR_R32TOF16);
 }
-
-/* float __q8dot(const void *blocks, const void *act, int n, float acc) */
-static void tp_gen_q8dot(int opr) {
-    SValue blk = vtop[-3];
-    SValue act = vtop[-2];
-    SValue n   = vtop[-1];
-    SValue acc = vtop[0];
-
-    save_reg(REG_FRET);
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    tp_push_float_sv(&acc);
-    tp_push_sv(&n);
-    tp_push_sv(&act);
-    tp_push_sv(&blk);
-    emit_instr(TP_OP_OPR, opr);
-    abcreg_pop(3);
-
-    tp_gen_tvx_dot_finish(4);
-}
-
-void gen_builtin_q8dot(void)   { tp_gen_q8dot(TP_OPR_Q8DOT); }
-void gen_builtin_q8dotbf(void) { tp_gen_q8dot(TP_OPR_Q8DOTBF); }
-void gen_builtin_iq1mdot(void)   { tp_gen_q8dot(TP_OPR_IQ1MDOT); }
-void gen_builtin_iq2xxsdot(void) { tp_gen_q8dot(TP_OPR_IQ2XXSDOT); }
-void gen_builtin_iq3xxsdot(void) { tp_gen_q8dot(TP_OPR_IQ3XXSDOT); }
-void gen_builtin_qdot(void)      { tp_gen_q8dot(TP_OPR_QDOT); }
 
 /* ---------------------------------------------------------------------
  * T9 FPU Temps T0-T7.
@@ -5911,7 +5543,7 @@ static void tp_gen_temp_idx_op(int opr, int idx)
 }
 
 /* void __tclr(int i)   -- mark T[i] empty */
-void gen_builtin_tclr(void) {
+static void gen_builtin_tclr(void) {
     int idx = tp_temp_index_const(&vtop[0], "__tclr");
     abcreg_stack_depth = 0;
     tp_gen_temp_idx_op(TP_OPR_TCLR, idx);
@@ -5920,7 +5552,7 @@ void gen_builtin_tclr(void) {
 }
 
 /* void __tst(float v, int i)  -- T[i] <- v  (v is pushed to FA first) */
-void gen_builtin_tst(void) {
+static void gen_builtin_tst(void) {
     SValue v = vtop[-1];
     int idx = tp_temp_index_const(&vtop[0], "__tst");
     abcreg_stack_depth = 0;
@@ -5935,7 +5567,7 @@ void gen_builtin_tst(void) {
 }
 
 /* float __tld(int i)  -- FA <- T[i], spilled to the float return slot */
-void gen_builtin_tld(void) {
+static void gen_builtin_tld(void) {
     int idx = tp_temp_index_const(&vtop[0], "__tld");
     save_reg(REG_FRET);
     abcreg_stack_depth = 0;
@@ -5974,13 +5606,13 @@ static void tp_gen_temp_fill(int opr)
  * next Temps-class instruction fences on it (is_fp_fill_fence).  Issue it
  * as far ahead of the consuming __tld/__fmvmul4 as the source allows or it
  * degenerates into a plain __f2ldm plus a stall. */
-void gen_builtin_f2ldm(void)  { tp_gen_temp_fill(TP_OPR_F2LDM); }
-void gen_builtin_f4ldm(void)  { tp_gen_temp_fill(TP_OPR_F4LDM); }
-void gen_builtin_f2ldma(void) { tp_gen_temp_fill(TP_OPR_F2LDMA); }
+static void gen_builtin_f2ldm(void)  { tp_gen_temp_fill(TP_OPR_F2LDM); }
+static void gen_builtin_f4ldm(void)  { tp_gen_temp_fill(TP_OPR_F4LDM); }
+static void gen_builtin_f2ldma(void) { tp_gen_temp_fill(TP_OPR_F2LDMA); }
 
 /* void __f2stm(void *p, int i)   {p[1], p[0]} <- T[i]
  * Mirrors __f2ldm's operand order.  This one really does pop both A and B. */
-void gen_builtin_f2stm(void) {
+static void gen_builtin_f2stm(void) {
     SValue p = vtop[-1];
     int idx = tp_temp_index_const(&vtop[0], "__f2stm");
     abcreg_stack_depth = 0;
@@ -6013,7 +5645,7 @@ static void tp_gen_mvmul4(int opr, int rowbase, int vbase)
     tp_gen_temp_idx_op(opr, rowbase & 7);
 }
 
-void gen_builtin_fmvmul4(void) {
+static void gen_builtin_fmvmul4(void) {
     int rowbase = tp_temp_index_const(&vtop[-1], "__fmvmul4");
     int vbase   = tp_temp_index_const(&vtop[0],  "__fmvmul4");
     save_reg(REG_FRET);
@@ -6039,7 +5671,7 @@ void gen_builtin_fmvmul4(void) {
  * transform is eight workspace touches per vertex - the exact traffic the
  * Temps are supposed to remove.  This form keeps the result on FA until it
  * reaches memory. */
-void gen_builtin_fmvmul4st(void) {
+static void gen_builtin_fmvmul4st(void) {
     SValue dst  = vtop[0];
     int rowbase = tp_temp_index_const(&vtop[-2], "__fmvmul4st");
     int vbase   = tp_temp_index_const(&vtop[-1], "__fmvmul4st");
@@ -6055,7 +5687,7 @@ void gen_builtin_fmvmul4st(void) {
 }
 
 /* float __fpoly3(float x, int cbase)  -- Horner with c0..c2 in T[cbase..+2] */
-void gen_builtin_fpoly3(void) {
+static void gen_builtin_fpoly3(void) {
     SValue x = vtop[-1];
     int cbase = tp_temp_index_const(&vtop[0], "__fpoly3");
     save_reg(REG_FRET);
@@ -6075,7 +5707,7 @@ void gen_builtin_fpoly3(void) {
 }
 
 /* void __qsetfmt(int ggml_type_id) */
-void gen_builtin_qsetfmt(void) {
+static void gen_builtin_qsetfmt(void) {
     gv(RC_INT);
     tp_push_sv(&vtop[0]);
     emit_instr(TP_OP_OPR, TP_OPR_QSETFMT);
@@ -6083,7 +5715,7 @@ void gen_builtin_qsetfmt(void) {
     vtop--;
 }
 
-void gen_builtin_csub0(void) {
+static void gen_builtin_csub0(void) {
     /* CSUB0: Check subscript from 0.
      * __csub0(index, bound) → sets error flag if index >= bound (unsigned).
      * Returns index (unchanged). Useful for array bounds checking.
@@ -6099,7 +5731,7 @@ void gen_builtin_csub0(void) {
     Tp_STL(REG_IRET);
 }
 
-void gen_builtin_fmul(void) {
+static void gen_builtin_fmul(void) {
     /* FMUL: Fractional multiply.
      * __fmul(a, b) → (a * b) >> 31 (signed, round-to-nearest).
      * Operands interpreted as fractions in [-1, +1).
@@ -6390,6 +6022,301 @@ static int tp_try_inline_local_zero_memset(int nb_args)
 // }
 
 /*************************************************************/
+/* Builtin dispatch: the one entry tccgen.c calls.  Every generator above
+ * is reached only through this table. */
+/*************************************************************/
+
+typedef void (*tp_builtin_gen_fn)(void);
+enum {
+    TP_BUILTIN_ANY,
+    TP_BUILTIN_T425,
+    TP_BUILTIN_T805,
+    TP_BUILTIN_FPU,
+    TP_BUILTIN_TVX,
+    TP_BUILTIN_T9000
+};
+
+struct tp_builtin_desc {
+    int tok;
+    const char *args;
+    tp_builtin_gen_fn gen;
+    unsigned char returns_void;
+    short simple_op; /* simple instruction */
+    short vector_op; /* TVX vector instruction */
+    unsigned char cpu;
+    short scalar_op; /* TVX word or four-argument accumulating instruction */
+};
+
+static const struct tp_builtin_desc *tp_find_builtin_desc(int tok)
+{
+    static const struct tp_builtin_desc descs[] = {
+        { TOK___out,         "eee", NULL, 1, TP_OPR_OUT, 0, TP_BUILTIN_ANY },
+        { TOK___in,          "eee", NULL, 1, TP_OPR_IN, 0, TP_BUILTIN_ANY },
+        { TOK___outbyte,     "ee",  gen_builtin_outbyte,     1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___outword,     "ee",  gen_builtin_outword,     1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___tin,         "e",   NULL, 1, TP_OPR_TIN, 0, TP_BUILTIN_ANY },
+        /* RESETCH returns the previous channel word: NotProcess_p if idle,
+         * otherwise the descriptor of the process blocked on it. */
+        { TOK___resetch,     "e",   NULL,     0, TP_OPR_RESETCH, 0, TP_BUILTIN_ANY },
+        { TOK___move,        "eee", gen_builtin_move,        1, 0, 0, TP_BUILTIN_ANY },
+        { TOK___move2dinit,    "eee", NULL, 1, TP_OPR_MOVE2DINIT, 0, TP_BUILTIN_T425 },
+        { TOK___move2dall,     "eee", NULL, 1, TP_OPR_MOVE2DALL, 0, TP_BUILTIN_T425 },
+        { TOK___move2dnonzero, "eee", NULL, 1, TP_OPR_MOVE2DNONZERO, 0, TP_BUILTIN_T425 },
+        { TOK___move2dzero,    "eee", NULL, 1, TP_OPR_MOVE2DZERO, 0, TP_BUILTIN_T425 },
+        { TOK___crcbyte,     "eee", NULL,     0, TP_OPR_CRCBYTE, 0, TP_BUILTIN_T425 },
+        { TOK___crcword,     "eee", NULL,     0, TP_OPR_CRCWORD, 0, TP_BUILTIN_T425 },
+        { TOK___ldtimer,     "",    NULL,     0, TP_OPR_LDTIMER, 0, TP_BUILTIN_ANY },
+        { TOK___sttimer,     "e",   NULL, 1, TP_OPR_STTIMER, 0, TP_BUILTIN_ANY },
+        { TOK___mint,        "",    NULL,        0, TP_OPR_MINT, 0, TP_BUILTIN_ANY },
+        { TOK___ldpri,       "",    NULL,       0, TP_OPR_LDPRI, 0, TP_BUILTIN_ANY },
+        { TOK___startp,      "ee",  NULL, 1, TP_OPR_STARTP, 0, TP_BUILTIN_ANY },
+        { TOK___endp,        "e",   NULL, 1, TP_OPR_ENDP, 0, TP_BUILTIN_ANY },
+        { TOK___runp,        "e",   NULL, 1, TP_OPR_RUNP, 0, TP_BUILTIN_ANY },
+        { TOK___stopp, "", NULL, 1, TP_OPR_STOPP, 0, TP_BUILTIN_ANY },
+        { TOK___alt, "", NULL, 1, TP_OPR_ALT, 0, TP_BUILTIN_ANY },
+        { TOK___altwt, "", NULL, 1, TP_OPR_ALTWT, 0, TP_BUILTIN_ANY },
+        { TOK___altend, "", NULL, 1, TP_OPR_ALTEND, 0, TP_BUILTIN_ANY },
+        { TOK___talt, "", NULL, 1, TP_OPR_TALT, 0, TP_BUILTIN_ANY },
+        { TOK___taltwt, "", NULL, 1, TP_OPR_TALTWT, 0, TP_BUILTIN_ANY },
+        { TOK___enbc,        "ee",  NULL, 1, TP_OPR_ENBC, 0, TP_BUILTIN_ANY },
+        { TOK___enbs,        "e",   NULL, 1, TP_OPR_ENBS, 0, TP_BUILTIN_ANY },
+        { TOK___enbt,        "ee",  NULL, 1, TP_OPR_ENBT, 0, TP_BUILTIN_ANY },
+        { TOK___disc,        "eee", NULL,        0, TP_OPR_DISC, 0, TP_BUILTIN_ANY },
+        { TOK___diss,        "ee",  NULL,        0, TP_OPR_DISS, 0, TP_BUILTIN_ANY },
+        { TOK___dist,        "eee", NULL,        0, TP_OPR_DIST, 0, TP_BUILTIN_ANY },
+        /* saveh/savel write two queue pointers; the st* forms set one. */
+        { TOK___saveh,       "e",   NULL, 1, TP_OPR_SAVEH, 0, TP_BUILTIN_ANY },
+        { TOK___savel,       "e",   NULL, 1, TP_OPR_SAVEL, 0, TP_BUILTIN_ANY },
+        { TOK___sthf,        "e",   NULL, 1, TP_OPR_STHF, 0, TP_BUILTIN_ANY },
+        { TOK___sthb,        "e",   NULL, 1, TP_OPR_STHB, 0, TP_BUILTIN_ANY },
+        { TOK___stlf,        "e",   NULL, 1, TP_OPR_STLF, 0, TP_BUILTIN_ANY },
+        { TOK___stlb,        "e",   NULL, 1, TP_OPR_STLB, 0, TP_BUILTIN_ANY },
+        /* GAJW returns the old workspace; WCNT returns the word offset. */
+        { TOK___gajw,        "e",   NULL,        0, TP_OPR_GAJW, 0, TP_BUILTIN_ANY },
+        { TOK___wcnt,        "e",   NULL,        0, TP_OPR_WCNT, 0, TP_BUILTIN_ANY },
+        { TOK___seterr, "", NULL, 1, TP_OPR_SETERR, 0, TP_BUILTIN_ANY },
+        { TOK___testerr,     "",    NULL,     0, TP_OPR_TESTERR, 0, TP_BUILTIN_ANY },
+        { TOK___sethalterr, "", NULL, 1, TP_OPR_SETHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___clrhalterr, "", NULL, 1, TP_OPR_CLRHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___testhalterr, "",    NULL, 0, TP_OPR_TESTHALTERR, 0, TP_BUILTIN_ANY },
+        { TOK___stoperr, "", NULL, 1, TP_OPR_STOPERR, 0, TP_BUILTIN_ANY },
+        { TOK___testpranal,  "",    NULL,  0, TP_OPR_TESTPRANAL, 0, TP_BUILTIN_ANY },
+        { TOK___norm,        "e",   gen_builtin_norm,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bitcnt,      "e",   gen_builtin_bitcnt,      0, 0, 0, TP_BUILTIN_ANY },
+        { TOK_builtin_popcount,  "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK_builtin_popcountl, "e", gen_builtin_bitcnt,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bitrevword,  "e",   gen_builtin_bitrevword,  0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___bitrevnbits, "ee",  gen_builtin_bitrevnbits, 0, 0, 0, TP_BUILTIN_T425 },
+        { TOK___csub0,       "ee",  gen_builtin_csub0,       0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___fmul,        "ee",  gen_builtin_fmul,        0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___lddevid,     "",    gen_builtin_lddevid,     0, 0, 0, TP_BUILTIN_T805 },
+        { TOK___fpchkerr,    "",    gen_builtin_fpchkerr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fptesterr,   "",    gen_builtin_fptesterr,   0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___ldflags, "", NULL, 0, TP_OPR_LDFLAGS, 0, TP_BUILTIN_T9000 },
+        { TOK___stflags, "e", NULL, 1, TP_OPR_STFLAGS, 0, TP_BUILTIN_T9000 },
+        { TOK___fpseterr,    "",    gen_builtin_fpseterr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpclrerr,    "",    gen_builtin_fpclrerr,    1, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpint,       "e",   gen_builtin_fpint,       0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrp,     "e",   gen_builtin_fpintrp,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrm,     "e",   gen_builtin_fpintrm,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpintrz,     "e",   gen_builtin_fpintrz,     0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fprem,       "ee",  gen_builtin_fprem,       0, 0, 0, TP_BUILTIN_FPU },
+        { TOK___fpsqrt,      "e",   gen_builtin_fpsqrt,      0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___fpabs,       "e",   gen_builtin_fpabs,       0, 0, 0, TP_BUILTIN_ANY },
+        /* TVX (MXFP4 / bfloat16) */
+        { TOK___bf16tof32,   "e",   gen_builtin_bf16tof32,   0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___f32tobf16,   "e",   gen_builtin_f32tobf16,   0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___bf16pack,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16PACK },
+        { TOK___bf16unpkh,   "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16UNPKH },
+        { TOK___mxfp4tof32,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4TOR32 },
+        { TOK___f32tomxfp4,  "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4 },
+        { TOK___mxe8m0tof32, "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0TOR32 },
+        { TOK___mxe8m0of,    "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXE8M0OF },
+        { TOK___mxfp4dot,    "eee", gen_builtin_mxfp4dot,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___bf16dot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16DOT },
+        { TOK___mxfp4gemv,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMV },
+        { TOK___mxfp4unpk8,  "ee",  gen_builtin_mxfp4unpk8,  1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___f32tomxfp4x8,"e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_R32TOMXFP4X8 },
+        { TOK___bf16mul2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16MUL2 },
+        { TOK___bf16add2,    "ee",  NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_BF16ADD2 },
+        { TOK___vsetlen,     "e",   gen_builtin_vsetlen,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___mxfp4gemvbf, "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_MXFP4GEMVBF },
+        { TOK___vadd,        "eee", NULL, 1, 0, TP_OPR_VADDSN, TP_BUILTIN_TVX },
+        { TOK___vmul,        "eee", NULL, 1, 0, TP_OPR_VMULSN, TP_BUILTIN_TVX },
+        { TOK___vsilu,       "ee",  NULL, 1, 0, TP_OPR_VSILUSN, TP_BUILTIN_TVX },
+        { TOK___vrmsnorm,    "eee", NULL, 1, 0, TP_OPR_VRMSNORM, TP_BUILTIN_TVX },
+        { TOK___vsoftmax,    "ee",  NULL, 1, 0, TP_OPR_VSOFTMAXSN, TP_BUILTIN_TVX },
+        { TOK___f16tof32,    "e",   gen_builtin_f16tof32,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___f32tof16,    "e",   gen_builtin_f32tof16,    0, 0, 0, TP_BUILTIN_ANY },
+        { TOK___q8dot,       "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOT },
+        { TOK___q8dotbf,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_Q8DOTBF },
+        { TOK___iq1mdot,     "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ1MDOT },
+        { TOK___iq2xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ2XXSDOT },
+        { TOK___iq3xxsdot,   "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_IQ3XXSDOT },
+        { TOK___qsetfmt,     "e",   gen_builtin_qsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qdot,        "eeee", NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_QDOT },
+        { TOK___vhad32,      "eee", NULL, 1, 0, TP_OPR_VHAD32, TP_BUILTIN_TVX },
+        { TOK___mxqrot,      "eee", NULL, 1, 0, TP_OPR_MXQROT, TP_BUILTIN_TVX },
+        { TOK___mxqrotbf,    "eee", NULL, 1, 0, TP_OPR_MXQROTBF, TP_BUILTIN_TVX },
+        { TOK___ftsetvp,     "e",   gen_builtin_ftsetvp,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftransp,     "eee", gen_builtin_ftransp,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftranspb,    "eee", gen_builtin_ftranspb,    0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___fsincos,     "ee",  NULL, 1, 0, TP_OPR_FSINCOS, TP_BUILTIN_TVX },
+        { TOK___frsqrtb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRSQRT },
+        { TOK___frecipb,     "e",   NULL, 0, 0, 0, TP_BUILTIN_TVX, TP_OPR_FRECIP },
+        { TOK___fsincosb,    "ee",  NULL, 1, 0, TP_OPR_FSINCOSB, TP_BUILTIN_TVX },
+        { TOK___vsetstride,  "ee",  NULL, 1, 0, TP_OPR_VSETSTRIDE, TP_BUILTIN_TVX },
+        { TOK___ftcull,      "eee", gen_builtin_ftcull,      0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___tskin,       "eee", gen_builtin_tskin,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vsetfmt,     "e",   gen_builtin_vsetfmt,     1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___ftsetlit,    "e",   gen_builtin_ftsetlit,    1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___flitb,       "eee", gen_builtin_flitb,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___qgemm,       "eee", gen_builtin_qgemm,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vblend8,     "eee", NULL, 1, 0, TP_OPR_VBLEND8, TP_BUILTIN_TVX },
+        { TOK___vfill,       "eee", NULL, 1, 0, TP_OPR_VFILL, TP_BUILTIN_TVX },
+        { TOK___vfill2d,     "eee", NULL, 1, 0, TP_OPR_VFILL2D, TP_BUILTIN_TVX },
+        { TOK___csumb,       "eee", gen_builtin_csumb,       0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vblend2d,    "eee", NULL, 1, 0, TP_OPR_VBLEND2D, TP_BUILTIN_TVX },
+        { TOK___stvxstate,   "e",   gen_builtin_stvxstate,   1, 0, 0, TP_BUILTIN_TVX },
+        { TOK___csumcpy,     "eee", gen_builtin_csumcpy,     0, 0, 0, TP_BUILTIN_TVX },
+        { TOK___vq8k,        "ee",  NULL, 1, 0, TP_OPR_VQ8K, TP_BUILTIN_TVX },
+        { TOK___vq80,        "ee",  NULL, 1, 0, TP_OPR_VQ80, TP_BUILTIN_TVX },
+        { TOK___vcvt,        "eee", NULL, 1, 0, TP_OPR_VCVT, TP_BUILTIN_TVX },
+        { TOK___vxfer,       "ee",  NULL, 1, 0, TP_OPR_VXFER, TP_BUILTIN_TVX },
+        /* T9000 configuration space and VCP */
+        { TOK___ldconf,      "e",   gen_builtin_ldconf,      0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___stconf,        "ee",   NULL, 1, TP_OPR_STCONF, 0, TP_BUILTIN_T9000 },
+        { TOK___initvlcb,      "ee",   NULL, 1, TP_OPR_INITVLCB, 0, TP_BUILTIN_T9000 },
+        { TOK___sethdr,        "eee",  NULL, 1, TP_OPR_SETHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___writehdr,      "eee",  NULL, 1, TP_OPR_WRITEHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___readhdr,       "eee",  NULL, 1, TP_OPR_READHDR, 0, TP_BUILTIN_T9000 },
+        { TOK___setchmode,     "ee",   NULL, 1, TP_OPR_SETCHMODE, 0, TP_BUILTIN_T9000 },
+        { TOK___stopch,        "e",    NULL, 1, TP_OPR_STOPCH, 0, TP_BUILTIN_T9000 },
+        { TOK___swapbfr,     "ee",  gen_builtin_swapbfr,     0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___vin,         "eee", gen_builtin_vin,         0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___vout,          "eee",  NULL, 1, TP_OPR_VOUT, 0, TP_BUILTIN_T9000 },
+        { TOK___ldchstatus,  "e",   gen_builtin_ldchstatus,  0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___chantype,    "e",   gen_builtin_chantype,    0, 0, 0, TP_BUILTIN_T9000 },
+        /* T9000 semaphores and resource channels */
+        { TOK___semwait,       "e",    NULL, 1, TP_OPR_WAIT, 0, TP_BUILTIN_T9000 },
+        { TOK___semsignal,     "e",    NULL, 1, TP_OPR_SIGNAL, 0, TP_BUILTIN_T9000 },
+        { TOK___mkrc,          "eee",  NULL, 1, TP_OPR_MKRC, 0, TP_BUILTIN_T9000 },
+        { TOK___unmkrc,        "e",    NULL, 1, TP_OPR_UNMKRC, 0, TP_BUILTIN_T9000 },
+        { TOK___grant,         "ee",   NULL, 1, TP_OPR_GRANT, 0, TP_BUILTIN_T9000 },
+        { TOK___enbg,          "ee",   NULL, 1, TP_OPR_ENBG, 0, TP_BUILTIN_T9000 },
+        { TOK___disg,        "eee", gen_builtin_disg,        0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___irdsq,         "eee",  NULL, 1, TP_OPR_IRDSQ, 0, TP_BUILTIN_T9000 },
+        { TOK___erdsq,       "ee",  gen_builtin_erdsq,       0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___ldresptr,    "e",   gen_builtin_ldresptr,    0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___stresptr,      "ee",   NULL, 1, TP_OPR_STRESPTR, 0, TP_BUILTIN_T9000 },
+        /* T9 FPU Temps T0-T7 */
+        { TOK___tld,         "e",   gen_builtin_tld,         0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___tst,         "ee",  gen_builtin_tst,         1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___tclr,        "e",   gen_builtin_tclr,        1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2ldm,       "ee",  gen_builtin_f2ldm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f4ldm,       "ee",  gen_builtin_f4ldm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2ldma,      "ee",  gen_builtin_f2ldma,      1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___f2stm,       "ee",  gen_builtin_f2stm,       1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fmvmul4,     "ee",  gen_builtin_fmvmul4,     0, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fmvmul4st,   "eee", gen_builtin_fmvmul4st,   1, 0, 0, TP_BUILTIN_T9000 },
+        { TOK___fpoly3,      "ee",  gen_builtin_fpoly3,      0, 0, 0, TP_BUILTIN_T9000 },
+        { 0,                 NULL,  NULL,                    0 }
+    };
+    const struct tp_builtin_desc *desc;
+    static int lo, hi;
+
+    /* unary() asks this of every name it does not know, so turn away what
+       cannot be here without a search: the builtins are predefined tokens,
+       below every identifier a program brings. */
+    if (!hi) {
+        lo = hi = descs[0].tok;
+        for (desc = descs; desc->tok != 0; ++desc) {
+            if (desc->tok < lo)
+                lo = desc->tok;
+            if (desc->tok > hi)
+                hi = desc->tok;
+        }
+    }
+    if (tok < lo || tok > hi)
+        return NULL;
+    for (desc = descs; desc->tok != 0; ++desc) {
+        if (desc->tok == tok)
+            return desc;
+    }
+    return NULL;
+}
+
+ST_FUNC int gen_transputer_builtin_call(int tok)
+{
+    const struct tp_builtin_desc *desc;
+
+    if (tok == TOK_builtin_rotateleft32 || tok == TOK_builtin_rotateright32) {
+        parse_builtin_params(0, "ii");
+        tp_gen_rotate32(tok == TOK_builtin_rotateright32);
+        return 1;
+    }
+    desc = tp_find_builtin_desc(tok);
+    if (!desc)
+        return 0;
+    /* FPU-only generators diagnose after parsing their operands. */
+    if (desc->cpu == TP_BUILTIN_TVX && !tp_tvx()) {
+        const struct tp_soft_tvx_desc *soft = tp_find_soft_tvx(tok);
+        if (!soft)
+            tcc_error("%s is a TVX instruction with no software "
+                      "version, not available without -mt9000tvx",
+                      get_tok_str(tok, NULL));
+        parse_builtin_params(0, desc->args);
+        save_reg(REG_IRET);
+        tp_soft_tvx_call(soft);
+        return 1;
+    }
+    if (desc->cpu == TP_BUILTIN_T9000 && !tp_isa_has(TP_EF_T9000))
+        tcc_error("%s is a T9000 instruction, not available with -m%s",
+                  get_tok_str(tok, NULL), tp_target_name(tcc_state));
+    if ((desc->cpu == TP_BUILTIN_T425 || desc->cpu == TP_BUILTIN_T805) &&
+        tp_t414())
+        tcc_error("%s is a T425 instruction, not available with -mt414",
+                  get_tok_str(tok, NULL));
+    if (desc->cpu == TP_BUILTIN_T805 && tp_no_t805_ops())
+        tcc_error("%s is a T805 instruction, not available with -mt800",
+                  get_tok_str(tok, NULL));
+
+    parse_builtin_params(0, desc->args);
+    /* Integer results land in REG_IRET, which may still hold a pending
+     * call result on the vstack (`icall() + __ldtimer()`); without a spill
+     * both operands would name the builtin's result.  Spilling after the
+     * arguments are parsed also covers an argument that is that result. */
+    save_reg(REG_IRET);
+    if (desc->scalar_op && strlen(desc->args) == 4)
+        tp_gen_tvx_dot4(desc->scalar_op);
+    else if (desc->scalar_op && !desc->args[1])
+        tp_gen_tvx_unary(desc->scalar_op);
+    else if (desc->scalar_op)
+        tp_gen_tvx_binary(desc->scalar_op);
+    else if (desc->vector_op && !desc->args[2])
+        tp_gen_vec2(desc->vector_op);
+    else if (desc->vector_op)
+        tp_gen_vec3(desc->vector_op);
+    else if (desc->simple_op && !desc->args[0] && !desc->returns_void)
+        tp_gen_flag_result(desc->simple_op);
+    else if (desc->simple_op && !desc->args[0])
+        emit_instr(TP_OP_OPR, desc->simple_op);
+    else if (desc->simple_op && !desc->args[1])
+        tp_emit_1op(desc->simple_op);
+    else if (desc->simple_op && !desc->args[2])
+        tp_emit_2op(desc->simple_op, 1, 0);
+    else if (desc->simple_op)
+        tp_emit_3op(desc->simple_op, 2, 1, 0);
+    else
+        desc->gen();
+    if (desc->simple_op && desc->args[0] && !desc->returns_void)
+        tp_builtin_word_result();
+    if (desc->returns_void)
+        tp_builtin_return_void();
+    return 1;
+}
+
+/*************************************************************/
 /* Function Prologue/Epilogue */
 /*************************************************************/
 
@@ -6404,7 +6331,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
     }
 
     /* This output now holds code for the target (its e_flags). */
-    tcc_state->tp_isa_used |= tp_target_flags(tcc_state);
+    tcc_state->tp_isa_used |= tcc_state->tp_isa;
     transputer_func_reset();
     func_start_ind = ind;
     func_start_sym = func_sym;
@@ -6508,7 +6435,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
             n += sz / 4;
         }
     } else {
-        /* Non-variadic: spill params in descending order (original behavior) */
+        /* Non-variadic: home parameters unless incoming storage is reused. */
         while ((sym = sym->next) != NULL) {
             int align = 4, size, words, w;
             int param_addr;
@@ -6529,7 +6456,21 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
                 size = 4;
             words = size / 4;
 
-            /* Always spill incoming words into callee-local storage. */
+            /* CALL's saved A/B/C words and the stacked words form one
+             * ascending, word-aligned argument area.  A double may straddle
+             * its third/fourth words, but its halves are still contiguous.
+             * As for named variadic parameters above, this storage belongs
+             * to the callee's by-value parameter and survives nested calls.
+             * Use it directly instead of homing two words only to load them
+             * into the FPU again.  Keep volatile initialization unchanged. */
+            if (size == 8 && (bt == VT_DOUBLE || bt == VT_LDOUBLE) &&
+                !(sym->type.t & VT_VOLATILE)) {
+                gfunc_set_param(sym, 4 + 4 * n, 0);
+                n += words;
+                continue;
+            }
+
+            /* Other parameters retain their callee-local homes. */
             loc -= size;
             param_addr = loc;
 
@@ -6553,6 +6494,8 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
 
                 emit_local_op(TP_OP_LDL, src_off);
                 emit_local_op(TP_OP_STL, loc + (w * 4));
+                if (bt == VT_PTR && !(sym->type.t & VT_VOLATILE) && !w && !nocode_wanted)
+                    local_patches->incoming_pointer = incoming_word + 1;
             }
 
             /* Tell TCC where this parameter is stored */
@@ -6561,1706 +6504,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym) {
         }
     }
 }
-/*************************************************************/
-/* Function-level branch relaxation                          */
-/*************************************************************/
-
-/* Every local access is emitted as a fixed 3-byte placeholder (PFIX 0; PFIX 0;
- * OP 0) because the frame size is not known until the function has been fully
- * parsed. gfunc_epilog then patches the real operand in, left-padded with
- * PFIX 0 bytes — which decode as no-ops. Jump placeholders and the prologue AJW
- * are padded the same way. Measured over 112 real kernel translation units,
- * that padding is 11.3% of .text (a further 11% sits in CALL/LDC relocation
- * placeholders, which only a link-time pass could shrink).
- *
- * This pass rewrites the finished function with minimal encodings. It does not
- * trust any of the emit-time bookkeeping for instruction boundaries: prefix
- * encoding is self-describing, so the byte range is decoded linearly and every
- * instruction re-derived. That avoids the whole class of bugs where a stale
- * instr_offset/instr_len causes the re-encoder to overwrite an unrelated byte.
- *
- * An instruction is pinned at its current size when a relocation points into
- * it (the linker patches those in place and assumes the reserved width), and
- * the whole function is skipped when it contains anything else that records
- * absolute code offsets.
- */
-
-#define TP_RELAX_MAX_INSNS 65536
-
-struct tp_relax_insn {
-    int old_off;      /* offset from func_start_ind, before relaxation */
-    int new_off;      /* offset after relaxation */
-    int old_len;
-    int new_len;
-    int opcode;       /* high nibble, or -1 for a raw/unknown byte run */
-    int operand;
-    int is_branch;    /* J, CJ or a near CALL: operand is a displacement */
-    int target_old;   /* branch target, as an old offset */
-    int ext;          /* target is before the function and does not move */
-    int pinned;       /* relocation points into this instruction */
-};
-
-/* A branch's target after relaxation, as a new offset. */
-static int tp_relax_newt(const struct tp_relax_insn *ins, int i,
-                         const int *tidx, int size, int outlen)
-{
-    int t = ins[i].target_old;
-
-    if (ins[i].ext)
-        return t;
-    if (t >= 0 && t < size && tidx[t] >= 0)
-        return ins[tidx[t]].new_off;
-    return outlen;
-}
-
-/* Decode one instruction starting at code[p]; returns its length. */
-static int tp_relax_decode(const uint8_t *code, int p, int end,
-                           int *opcode, int *operand)
-{
-    int oreg = 0;
-    int len = 0;
-
-    while (p + len < end) {
-        uint8_t b = code[p + len];
-        int f = b >> 4;
-        int n = b & 0xF;
-        len++;
-        if (f == TP_ENC_PFIX) {
-            oreg = (oreg | n) << 4;
-            continue;
-        }
-        if (f == TP_ENC_NFIX) {
-            oreg = (~(oreg | n)) << 4;
-            continue;
-        }
-        *opcode = f;
-        *operand = (oreg >= 0) ? (oreg | n) : (oreg + n);
-        return len;
-    }
-    return 0;   /* ran off the end mid-prefix: malformed */
-}
-
-/* Why the last function could not be relaxed, for the frame-size error. */
-static const char *tp_relax_why;
-
-/* Diagnostic for why a function could not be relaxed; set TP_RELAX_STATS=1. */
-static int tp_relax_bail(const char *why)
-{
-    static int stats = -1;
-    if (stats < 0)
-        stats = getenv("TP_RELAX_STATS") ? 1 : 0;
-    if (stats)
-        fprintf(stderr, "[RELAXBAIL] %s\n", why);
-    tp_relax_why = why;
-    return 0;
-}
-
-/*************************************************************/
-/* Evaluation-stack scheduling                               */
-/*************************************************************/
-/*
- * The register allocator maps every TCC pseudo-register onto a workspace
- * slot, so each intermediate value is written out with STL and read back
- * with LDL.  On a T9000 that is the most expensive habit in the emitted
- * code: stage 5 issues one write per cycle, so every STL closes its
- * instruction group, and a store also consumes one of the two stage-2
- * address-calculation slots.  Measured over 458 kernel objects, ldl+stl are
- * 58% of all instructions and 71% of instruction groups are closed by a
- * write.
- *
- * The hardware already has a three-deep evaluation stack (AReg/BReg/CReg),
- * and the left-to-right evaluation order the front end uses puts operands
- * into exactly the registers the ALU instructions expect.  This pass
- * recognises the round trips the always-STL strategy leaves behind and
- * deletes them, letting values stay where they already are.
- *
- * It runs on the finished function, after local slots and jump
- * displacements have been patched, so it sees the real instruction stream
- * rather than the emitter's intent.  That side-steps the reason the earlier
- * emit-time attempt (tp_pending_stl_slot, since removed)
- * was abandoned: no code path can touch a workspace slot behind this pass's
- * back, because there is no "back" - every instruction is in front of it.
- * The one reader outside the function, a callee taking its stacked arguments
- * from Wptr[0..n-1], is charged to the call instruction (tps_ann.uses).
- *
- * Patterns, hardware stack written bottom-to-top as [C, B, A]:
- *
- *   S1   STL a ; LDL a                  -> (nothing)
- *   S2   STL a ; STL b ; LDL b ; LDL a  -> (nothing)
- *   S3   STL a ; STL b ; LDL a ; LDL b  -> REV
- *   S4   STL a ; <e> ; LDL a            -> <e>          (<e> net 0)
- *   S5   STL a ; <e> ; LDL a            -> <e> ; REV    (<e> net +1)
- *   S6   LDL x / LDC k ; STL y          -> (nothing)    (y never read)
- *   S7   STL a ; STL b ; LDL a          -> REV ; STL b
- *   S9   CALL ; STL a                   -> CALL         (a never read)
- *
- * (S8 counts the REV deletions further down.)
- *
- * S1..S3, S6 and S7 are exact identities at any stack depth.  S4/S5 carry one
- * extra value underneath <e>, so they also require that
- *
- *   - <e> never reads deeper than it has pushed, otherwise it would consume
- *     the carried value instead of its own operand;
- *   - the deepest point of <e>, plus the carried value, still fits in the
- *     three-deep stack.
- *
- * Every pattern additionally requires the slots it stops writing to be dead
- * afterwards, decided by a backward liveness fixpoint over the function's
- * own control-flow graph.  The matcher iterates, because deleting one round
- * trip frequently exposes the next: S4 turns
- *     stl 9; ldl y; ldc 3; shl; stl 10; ldl 9; ldl 10; or
- * into
- *     ldl y; ldc 3; shl; stl 10; ldl 10; or
- * whose tail is then an S1.
- *
- * Functions the pass declines to touch: anything with a mid-function AJW or
- * a GAJW (the indirect-call and computed-goto trampolines build a temporary
- * frame, which renumbers every workspace slot, and a VLA moves Wptr), and
- * anything that takes the address of a pseudo-register slot in a shape other
- * than the outgoing-argument LDLP/STNL pair (the FPU paths do this).  Over
- * 200 kernel translation units that is 382 functions, essentially all of
- * them indirect callers.
- */
-
-/* Upper bound on the pseudo-register slots; the actual count for a function is
- * min(func_frame_reserved, NB_REGS), computed as `nslot` in
- * tp_sched_function(), because the reserved region can now be smaller than the
- * register file and locals then live in low slot numbers. */
-#define TPS_NSLOT   NB_REGS
-#define TPS_MAXWIN  24            /* instructions scanned for an S4/S5 tail */
-#define TPS_ROUNDS  6
-
-struct tps_ann {
-    int depth;              /* eval-stack depth before this insn, -1 unknown */
-    int delta;              /* stack effect, valid when known */
-    int succ1;              /* fall-through/target successor, -1 = none */
-    int succ2;              /* second successor (CJ), -1 = none */
-    short use;              /* pseudo-register slot read, -1 = none */
-    short def;              /* pseudo-register slot written, -1 = none */
-    unsigned int uses;      /* more slots read: a call's stacked arguments */
-    int reads;              /* stack cells consumed */
-    unsigned int liveout;
-    unsigned char known;    /* delta/reads are trustworthy */
-    unsigned char head;     /* branch target: the emitter treats depth as 0 */
-    unsigned char dead;     /* marked for deletion */
-};
-
-/*
- * Stack behaviour of a decoded instruction: how many cells it reads and how
- * the depth changes.  Anything not listed here is a barrier - the pass will
- * not reason about the evaluation stack across it.  Being absent from this
- * table is always safe; being present with the wrong numbers is not, so it
- * only lists opcodes this back end actually emits, taken from the emulator's
- * case labels in transputer/t4/p.c.
- */
-static int tps_effect(int opc, int opd, int *delta, int *reads)
-{
-    switch (opc) {
-    case -1:                                  /* PFIX 0 padding: a no-op */
-    case TP_ENC_J:
-        *reads = 0; *delta = 0;  return 1;
-    case TP_ENC_AJW:                          /* moves Wptr, not the stack */
-        *reads = 0; *delta = 0;  return 1;
-    case TP_ENC_LDL: case TP_ENC_LDLP: case TP_ENC_LDC:
-        *reads = 0; *delta = 1;  return 1;
-    case TP_ENC_LDNL: case TP_ENC_LDNLP:
-    case TP_ENC_ADC:  case TP_ENC_EQC:
-        *reads = 1; *delta = 0;  return 1;
-    case TP_ENC_STL:
-        *reads = 1; *delta = -1; return 1;
-    case TP_ENC_CJ:                           /* the not-taken edge pops */
-        *reads = 1; *delta = -1; return 1;
-    case TP_ENC_STNL:
-        *reads = 2; *delta = -2; return 1;
-    case TP_ENC_OPR:
-        switch (opd) {
-        case TP_OPR_MINT:
-            *reads = 0; *delta = 1;  return 1;
-        case TP_OPR_DUP:
-            *reads = 1; *delta = 1;  return 1;
-        case TP_OPR_NOT: case TP_OPR_LB:
-        /* T9000 unary narrow loads / sign extends (only reachable
-           under -mt9000; harmless to describe unconditionally). */
-        case TP_OPR_LS:  case TP_OPR_LSX: case TP_OPR_LBX:
-        case TP_OPR_XSWORD: case TP_OPR_XBWORD:
-            *reads = 1; *delta = 0;  return 1;
-        case TP_OPR_REV:
-            *reads = 2; *delta = 0;  return 1;
-        case TP_OPR_POP:
-            *reads = 1; *delta = -1; return 1;
-        case TP_OPR_ADD:  case TP_OPR_SUB:   case TP_OPR_MUL:
-        case TP_OPR_DIV:  case TP_OPR_REM:   case TP_OPR_SUM:
-        case TP_OPR_DIFF: case TP_OPR_PROD:  case TP_OPR_AND:
-        case TP_OPR_OR:   case TP_OPR_XOR:   case TP_OPR_SHL:
-        case TP_OPR_SHR:  case TP_OPR_GT:    case TP_OPR_GTU:
-        case TP_OPR_WSUB: case TP_OPR_BSUB:  case TP_OPR_WSUBDB:
-        case TP_OPR_CSUB0: case TP_OPR_SSUB:
-        case TP_OPR_XWORD:                    /* B sign-extended at mask A */
-            *reads = 2; *delta = -1; return 1;
-        case TP_OPR_SB: case TP_OPR_SS:
-            *reads = 2; *delta = -2; return 1;
-        }
-        return 0;
-    }
-    return 0;
-}
-
-/* Per-pattern hit counts, printed with TP_SCHED_STATS=1. */
-static int tps_stats[9];   /* S1..S9 hit counts */
-static int tps_stats_on = -1;
-
-/* Bitmask of enabled patterns (bit 0 = S1 ... bit 6 = S7, bit 8 = S9), for
- * bisecting a suspected miscompile: TP_SCHED_MASK=0x13f disables S7, and so
- * on.  S8 has no switch. */
-static int tps_mask = -1;
-static int tps_on(int which)
-{
-    if (tps_mask < 0) {
-        const char *e = getenv("TP_SCHED_MASK");
-        tps_mask = (e && *e) ? (int)strtol(e, NULL, 0) : 0x17f;
-    }
-    return (tps_mask >> which) & 1;
-}
-
-static void tps_note(int which)
-{
-    if (tps_stats_on < 0)
-        tps_stats_on = getenv("TP_SCHED_STATS") ? 1 : 0;
-    if (tps_stats_on)
-        tps_stats[which]++;
-}
-
-static void tps_bail(const char *why)
-{
-    if (tps_stats_on < 0)
-        tps_stats_on = getenv("TP_SCHED_STATS") ? 1 : 0;
-    if (tps_stats_on)
-        fprintf(stderr, "[SCHEDBAIL] %s %s\n", why, funcname ? funcname : "?");
-}
-
-/* Next instruction that still exists, skipping padding and deletions. */
-static int tps_next(struct tp_relax_insn *ins, struct tps_ann *an, int n, int i)
-{
-    for (++i; i < n; i++)
-        if (ins[i].opcode != -1 && !an[i].dead)
-            return i;
-    return -1;
-}
-
-/* Can [lo,hi] be rewritten?  Nothing pinned by a relocation, and nothing but
- * the first instruction may be a branch target.  Instructions already deleted
- * by an earlier round contribute no code and are simply skipped - that is
- * what lets a second round see through the hole an S4 left behind. */
-static int tps_free(struct tp_relax_insn *ins, struct tps_ann *an,
-                    int lo, int hi)
-{
-    int k;
-    for (k = lo; k <= hi; k++) {
-        if (an[k].dead)
-            continue;
-        if (ins[k].pinned)
-            return 0;
-        if (k > lo && an[k].head)
-            return 0;
-    }
-    return 1;
-}
-
-/*
- * Mark the redundant workspace round trips in a decoded function.
- * Returns the number of instructions removed.
- */
-static int tp_sched_function(struct tp_relax_insn *ins, int n, int size)
-{
-    struct tps_ann *an;
-    int *idx;               /* byte offset -> instruction index */
-    int i, pass, round, removed = 0;
-    static int sched_off = -1;
-    /* Slots this pass is allowed to treat as pseudo-registers.  The frame's
-     * reserved region can now be smaller than NB_REGS, in which case locals
-     * occupy low slot numbers; an LDLP of one of *these* must disqualify the
-     * whole function. */
-    const int nreg = (func_frame_reserved < NB_REGS)
-                     ? func_frame_reserved : NB_REGS;
-    /* Slots the pass reasons about at all.  Every word of the function's own
-     * frame qualifies, not just the register file:
-     *
-     *   ajw -12 ; ldl 13 ; stl 11 ; ldl 11 ; lb        (a one-parameter leaf)
-     *
-     * Slot 13 is the incoming argument the caller left above the frame, and
-     * slot 11 is the home TCC gives that parameter.  The store and the reload
-     * are a pure round trip - `ldl 13 ; lb` computes the same thing - but slot
-     * 11 sits above the reserved register region, so the pass used to classify
-     * it as untouchable memory and walk past.  Measured over a kernel corpus
-     * that shape and its copy-chain relatives were the largest single group of
-     * surviving stores.
-     *
-     * Two things make locals as safe to reason about as pseudo-registers:
-     *
-     *   - the frame is private.  The only instruction that can name a
-     *     workspace word by address is LDLP, and the pre-scan below finds
-     *     every one of them; if any escapes, the local range is abandoned and
-     *     the pass falls back to exactly its previous behaviour.
-     *   - incoming arguments live *above* the frame (slot 13 in the example),
-     *     so limiting the range to the frame's own words keeps the caller's
-     *     workspace out of it.
-     *
-     * Capped at 32 because `liveout` is a 32-bit mask - which happens to be
-     * the T9000 workspace-cache size as well. */
-    int nslot = func_frame_words;
-    /* No LDLP hands out the address of a workspace word, and there is no
-     * inline assembly, so nothing outside this function can write one. */
-    int frame_private;
-
-    if (sched_off < 0) {
-        sched_off = getenv("TP_NO_SCHED") ? 1 : 0;
-    }
-    if (sched_off || n <= 0 || size <= 0)
-        return 0;
-
-    if (nslot > 32)
-        nslot = 32;
-    if (nslot < nreg)
-        nslot = nreg;
-
-    /* Pre-scan: does any LDLP hand out the address of a frame word in a shape
-     * this pass cannot follow?  The recognised form is LDLP immediately
-     * followed by STNL or LDNL, which is the back end staging an outgoing call
-     * argument or reading one back - a plain access to a known slot.  Anything
-     * else (`&local` passed to a callee, the FPU's `ldlp s ; fpldnlsn`) puts
-     * the word beyond this pass's sight, so give up the widened range and
-     * reason about the register file alone, as before.
-     *
-     * Inline assembly is opaque for the same reason and gets the same
-     * treatment. */
-    {
-        int escapes_local = 0;
-
-        frame_private = !func_uses_inline_asm;
-        for (i = 0; i < n; i++) {
-            int j, opd = ins[i].operand;
-            if (ins[i].opcode != TP_ENC_LDLP)
-                continue;
-            for (j = i + 1; j < n; j++)
-                if (ins[j].opcode != -1)
-                    break;
-            if (j < n && (ins[j].opcode == TP_ENC_STNL ||
-                          ins[j].opcode == TP_ENC_LDNL))
-                continue;                   /* recognised staging form */
-            /* Nothing may hold the address of *any* workspace word for copy
-             * propagation to re-materialise a value from a slot the def/use
-             * annotations do not cover - an incoming argument, mainly. */
-            frame_private = 0;
-            if (opd >= 0 && opd < nslot)
-                escapes_local = 1;          /* also disqualifies the local range */
-        }
-        if (escapes_local || func_uses_inline_asm)
-            nslot = nreg;
-    }
-
-    an = tcc_mallocz(sizeof(*an) * n);
-    idx = tcc_malloc(sizeof(int) * (size + 1));
-    for (i = 0; i <= size; i++)
-        idx[i] = -1;
-    for (i = 0; i < n; i++)
-        idx[ins[i].old_off] = i;
-    idx[size] = -1;                       /* a branch past the last byte */
-
-    /* ---- 1. annotate, and refuse anything this model cannot describe ---- */
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode, opd = ins[i].operand;
-        int rd = 0, dl = 0;
-
-        an[i].known = tps_effect(opc, opd, &dl, &rd);
-        an[i].delta = dl;
-        an[i].reads = rd;
-        an[i].use = an[i].def = -1;
-        an[i].succ1 = (i + 1 < n) ? i + 1 : -1;
-        an[i].succ2 = -1;
-        an[i].depth = -1;
-
-        if (opc == TP_ENC_LDL && opd >= 0 && opd < nslot) {
-            an[i].use = opd;
-        } else if (opc == TP_ENC_STL && opd >= 0 && opd < nslot) {
-            an[i].def = opd;
-        } else if (opc == TP_ENC_LDLP) {
-            /* Taking the address of a workspace word escapes it.  For a
-             * pseudo-register slot the back end only ever emits LDLP with an
-             * immediately following STNL (staging outgoing call arguments) or
-             * LDNL; anything else - the FPU paths do LDLP slot; fpldnlsn -
-             * could reach a slot in a way this pass cannot see, so the whole
-             * function is left alone. */
-            int j, indirect = 0;
-            for (j = i + 1; j < n; j++)
-                if (ins[j].opcode != -1)
-                    break;
-            if (j < n && (ins[j].opcode == TP_ENC_STNL ||
-                          ins[j].opcode == TP_ENC_LDNL)) {
-                int t = opd + ins[j].operand;
-                indirect = 1;
-                /* Out of range means the access lands below Wptr or above the
-                 * register file (staging an outgoing argument at Wptr[-1], for
-                 * instance) and so cannot disturb a pseudo-register. */
-                if (t >= 0 && t < nslot) {
-                    if (ins[j].opcode == TP_ENC_STNL)
-                        an[i].def = t;
-                    else
-                        an[i].use = t;
-                }
-            }
-            /* Only a pseudo-register escaping is fatal.  A local escaping has
-             * already been handled: the pre-scan shrank nslot back to nreg, so
-             * the local range is not being reasoned about at all. */
-            if (!indirect && opd >= 0 && opd < nreg) {
-                tps_bail("ldlp-escape");
-                tcc_free(idx); tcc_free(an);
-                return 0;
-            }
-        } else if (opc == TP_ENC_AJW) {
-            /* AJW moves Wptr, so a slot number means something different on
-             * either side of it.  Only the prologue and epilogue AJWs are
-             * expected here, an epilogue's directly before its RET (VLAs use
-             * GAJW, handled below). */
-            int j, first;
-            for (first = 0; first < n; first++)
-                if (ins[first].opcode != -1)
-                    break;
-            for (j = i + 1; j < n; j++)
-                if (ins[j].opcode != -1)
-                    break;
-            if (i != first && !(j < n && ins[j].opcode == TP_ENC_OPR &&
-                                ins[j].operand == TP_OPR_RET)) {
-                tps_bail("ajw-midfunction");
-                tcc_free(idx); tcc_free(an);
-                return 0;
-            }
-        } else if (opc == TP_ENC_OPR && opd == TP_OPR_GAJW) {
-            tps_bail("gajw");
-            tcc_free(idx); tcc_free(an);
-            return 0;
-        } else if (opc == TP_ENC_CALL ||
-                   (opc == TP_ENC_OPR && opd == TP_OPR_GCALL)) {
-            /* The callee reads its stacked arguments from Wptr[0..n-1],
-             * where they were staged with plain STLs.  Without this those
-             * stores look dead.  Every call is charged with the largest n
-             * in the function: a slot that really is dead at a call with
-             * fewer stacked words only keeps a store it could have lost. */
-            int w = func_max_stack_words < nslot ? func_max_stack_words : nslot;
-            an[i].uses = w >= 32 ? ~0u : (1u << w) - 1;
-        }
-
-        if (opc == TP_ENC_J) {
-            an[i].succ1 = (ins[i].target_old >= 0 && ins[i].target_old <= size)
-                          ? idx[ins[i].target_old] : -1;
-        } else if (opc == TP_ENC_CJ) {
-            an[i].succ2 = (ins[i].target_old >= 0 && ins[i].target_old <= size)
-                          ? idx[ins[i].target_old] : -1;
-        } else if (opc == TP_ENC_OPR && opd == TP_OPR_RET) {
-            /* Treating RET as a terminator - nothing is live past it - is
-             * only sound for an epilogue.  The back end also uses RET as an
-             * indirect-jump trampoline (ggoto builds a fake frame with
-             * AJW -4 and RETs into it), and control does come back from
-             * those.  So a RET before the end of the function must be an
-             * early return's own epilogue (gfunc_leave), the one directly
-             * after an AJW +frame; refuse the function for any other.  The
-             * AJW guard above already covers today's trampolines; this is
-             * the independent check that keeps the assumption honest if
-             * another one is ever added. */
-            int j, p;
-            for (j = i + 1; j < n; j++)
-                if (ins[j].opcode != -1)
-                    break;
-            for (p = i - 1; p >= 0; p--)
-                if (ins[p].opcode != -1)
-                    break;
-            if (j < n && !(p >= 0 && ins[p].opcode == TP_ENC_AJW &&
-                           ins[p].operand >= 0)) {
-                tps_bail("ret-midfunction");
-                tcc_free(idx); tcc_free(an);
-                return 0;
-            }
-            an[i].succ1 = -1;
-        }
-    }
-
-    /* ---- 2. branch targets.  The emitter zeroes its evaluation-stack
-     * bookkeeping at every label, so a target is a point where the depth is
-     * known to be zero. ---- */
-    an[0].head = 1;
-    for (i = 0; i < n; i++) {
-        int k;
-        if (!ins[i].is_branch)
-            continue;
-        if (ins[i].target_old < 0 || ins[i].target_old > size)
-            continue;
-        k = idx[ins[i].target_old];
-        if (k >= 0)
-            an[k].head = 1;
-    }
-
-    /* ---- 3. evaluation-stack depth within each block ---- */
-    for (i = 0; i < n; i++) {
-        int prev_call = i > 0 && ((ins[i - 1].opcode == TP_ENC_CALL) ||
-                                  (ins[i - 1].opcode == TP_ENC_OPR &&
-                                   ins[i - 1].operand == TP_OPR_GCALL));
-        if (an[i].head) {
-            an[i].depth = 0;
-        } else if (prev_call) {
-            /* A call leaves the ABI result words in AReg (and BReg for a
-             * 64-bit return); gfunc_call always captures both, so two is the
-             * depth the emitter itself assumes here. Without this the whole
-             * post-call sequence has an unknown depth and none of the
-             * return-value round trips can be reasoned about. */
-            an[i].depth = 2;
-        } else if (i > 0 && an[i - 1].depth >= 0 && an[i - 1].known) {
-            int d = an[i - 1].depth + an[i - 1].delta;
-            an[i].depth = (d >= 0) ? d : -1;
-        } else {
-            an[i].depth = -1;
-        }
-    }
-
-    /* ---- 4. backward liveness over the pseudo-register slots ---- */
-    for (pass = 0; pass < 128; pass++) {
-        int changed = 0;
-        for (i = n - 1; i >= 0; i--) {
-            unsigned int out = 0;
-            int s;
-            for (s = 0; s < 2; s++) {
-                int t = s ? an[i].succ2 : an[i].succ1;
-                unsigned int in;
-                if (t < 0 || t >= n)
-                    continue;
-                in = an[t].liveout;
-                if (an[t].def >= 0)
-                    in &= ~(1u << an[t].def);
-                if (an[t].use >= 0)
-                    in |= 1u << an[t].use;
-                in |= an[t].uses;
-                out |= in;
-            }
-            if (out != an[i].liveout) {
-                an[i].liveout = out;
-                changed = 1;
-            }
-        }
-        if (!changed)
-            break;
-    }
-    if (pass == 128) {                    /* did not settle: do not risk it */
-        tps_bail("liveness");
-        tcc_free(idx); tcc_free(an);
-        return 0;
-    }
-
-    /* ---- 4a. call results nobody reads (S9) ----
-     *
-     * gfunc_call() stores the result words of every non-void call whether or
-     * not the caller uses them, and a call whose value is discarded - most of
-     * them, in the kernel - leaves that store dead: 34k of the 62k `stl 7`
-     * in vmlinux.  Dropping it leaves the word on the stack, underneath
-     * everything pushed afterwards, where nothing reads it, because the
-     * emitter treats the stack as empty once the results are captured.
-     *
-     * Two things keep that true.  Only a dead *suffix* of the capture run
-     * may go, as an STL left after a deleted one would pop the wrong word.
-     * And it runs here, on the emitter's own stream: once the rules below
-     * start carrying values on the stack, a later instruction may read below
-     * its own pushes, and the instruction after the run is required to read
-     * nothing at all.  Removing a dead store changes no other slot's
-     * liveness, so the annotations stay valid for the passes that follow. */
-    if (tps_on(8)) {
-        for (i = 0; i < n; i++) {
-            int j, k, last = -1;
-
-            if (ins[i].opcode != TP_ENC_CALL &&
-                !(ins[i].opcode == TP_ENC_OPR && ins[i].operand == TP_OPR_GCALL))
-                continue;
-            for (j = tps_next(ins, an, n, i);
-                 j >= 0 && ins[j].opcode == TP_ENC_STL &&
-                 !an[j].head && !ins[j].pinned;
-                 j = tps_next(ins, an, n, j))
-                last = j;
-            if (last < 0)
-                continue;
-            k = tps_next(ins, an, n, last);
-            if (k >= 0 && !an[k].head && !(an[k].known && an[k].reads == 0))
-                continue;
-            for (j = last; j > i; j--) {
-                int a = ins[j].operand;
-                if (ins[j].opcode != TP_ENC_STL)
-                    continue;               /* PFIX 0 padding */
-                if (a < 0 || a >= nslot || (an[j].liveout & (1u << a)))
-                    break;
-                an[j].dead = 1;
-                removed++;
-                tps_note(8);
-            }
-        }
-    }
-
-    /* ---- 4b. copy propagation ----
-     *
-     * `LDL x ; STL y` copies one workspace word to another.  The peephole
-     * rules above can only remove it when y turns out to be dead (S6) or when
-     * the reload happens to sit within reach of the evaluation stack (S1, S4,
-     * S5) - and even then S5 pays a REV for the privilege:
-     *
-     *     ldl 11 ; stl 9 ; ldc 0 ; ldl 9      ->   ldl 11 ; ldc 0 ; rev
-     *
-     * If instead every reader of y loads x directly, the copy simply goes
-     * away, and nothing is added:
-     *
-     *                                         ->   ldc 0 ; ldl 11
-     *
-     * This is the shape TCC's prologue leaves behind for every parameter, and
-     * over a kernel corpus `ldl ; stl` pairs were the largest class of stores
-     * still standing after everything above.
-     *
-     * The rewrite is valid without any reaching-definitions machinery when two
-     * things hold:
-     *
-     *   - y has exactly one definition in the whole function, this one, so
-     *     every `LDL y` anywhere reads this copy (or reads y before it is
-     *     ever written, which was already undefined and stays that way);
-     *   - x is never written in the function at all, so `LDL x` yields the
-     *     same value at every point.
-     *
-     * "Never written" has to account for what the pass cannot see directly:
-     * a store through a pointer (excluded by frame_private) and a callee
-     * writing back through its own stacked parameters, which land in this
-     * function's outgoing-argument area - hence the func_max_outgoing_words
-     * floor on x.
-     *
-     * A proper must-availability dataflow was written and measured as the
-     * general replacement for those two tests, on the strength of a ceiling
-     * measurement: of 17,374 `LDL x ; STL y` pairs in the kernel corpus these
-     * rules take 49.8%, with 18.9% blocked only by x being written somewhere
-     * (often after the last use of y) and 3.8% only by y having several
-     * definitions.  It came out 2,003 instructions and 1,036 groups *worse*:
-     * batching 32 copies into one fixpoint, and forbidding two committed
-     * copies from sharing a slot, together lose more instances than the extra
-     * generality wins - the simple rules here re-read the instruction stream
-     * as they go, so a chain like `ldl 15; stl 13 ... ldl 13; stl 11` folds
-     * end to end, which the batched version cannot see.  Revisit only with a
-     * per-commit refresh, and measure.
-     *
-     * x is also required to stay inside the T9000 workspace cache and to
-     * encode no wider than y, so that no use site gets slower or longer.
-     *
-     * Runs before the peephole rounds: where both could fire, this is strictly
-     * the better outcome, and it exposes further round trips for them. */
-    if (frame_private) {
-        for (i = 0; i < n; i++) {
-            int x, y, j, k, ok = 1;
-
-            if (an[i].dead || ins[i].pinned || ins[i].opcode != TP_ENC_LDL)
-                continue;
-            /* `LDC k ; STL y` was tried as a second source form and measured:
-             * 326 instructions and 76 groups over the whole kernel corpus,
-             * 0.09%.  Almost no constant copy survives, and the ones that do
-             * are already caught by S1/S4/S5/S6, so it was removed again. */
-            x = ins[i].operand;
-            if (x < 0 || x >= 32)           /* stays in the workspace cache */
-                continue;
-            if (x < func_max_outgoing_words)
-                continue;                   /* a callee can write it back */
-            j = tps_next(ins, an, n, i);
-            if (j < 0 || ins[j].pinned || an[j].head)
-                continue;
-            if (ins[j].opcode != TP_ENC_STL)
-                continue;
-            y = ins[j].operand;
-            if (y < 0 || y >= nslot || y == x)
-                continue;
-            /* A stacked argument has a reader that is not an LDL: the
-             * callee.  Every other store to y is a second definition, so
-             * this loses nothing the rule below would have taken. */
-            if (y < func_max_stack_words)
-                continue;
-            if (tp_encode_len(TP_ENC_LDL, x) > tp_encode_len(TP_ENC_LDL, y))
-                continue;
-
-            /* Is anything other than this copy allowed to write x or y? */
-            for (k = 0; k < n && ok; k++) {
-                if (k == j || an[k].dead || ins[k].opcode == -1)
-                    continue;
-                if (ins[k].opcode == TP_ENC_STL &&
-                    (ins[k].operand == x || ins[k].operand == y)) {
-                    ok = 0;
-                } else if (ins[k].opcode == TP_ENC_LDLP) {
-                    int m, t;
-                    for (m = k + 1; m < n; m++)
-                        if (ins[m].opcode != -1)
-                            break;
-                    if (m < n && ins[m].opcode == TP_ENC_STNL) {
-                        t = ins[k].operand + ins[m].operand;
-                        if (t == x || t == y)
-                            ok = 0;
-                    }
-                } else if (ins[k].pinned && ins[k].opcode == TP_ENC_LDL &&
-                           ins[k].operand == y) {
-                    ok = 0;                 /* a reader that cannot be rewritten */
-                }
-            }
-            if (!ok)
-                continue;
-
-            /* Commit: every reader of y takes its value from x instead. */
-            for (k = 0; k < n; k++) {
-                if (k == i || k == j || an[k].dead || ins[k].pinned)
-                    continue;
-                if (ins[k].opcode != TP_ENC_LDL || ins[k].operand != y)
-                    continue;
-                ins[k].operand = x;
-                an[k].use = (x < nslot) ? x : -1;
-            }
-            an[i].dead = an[j].dead = 1;
-            removed += 2;
-            i = j;
-        }
-    }
-
-    /* ---- 5. pattern matching, iterated ---- */
-    for (round = 0; round < TPS_ROUNDS; round++) {
-        int changed = 0;
-
-        for (i = 0; i < n; i++) {
-            int a, b, i1, i2, i3, j, r, maxr;
-
-            if (an[i].dead || ins[i].pinned || ins[i].opcode == -1)
-                continue;
-
-            if (ins[i].opcode != TP_ENC_STL)
-                goto try_copy;
-            a = ins[i].operand;
-            if (a < 0 || a >= nslot)
-                continue;
-            i1 = tps_next(ins, an, n, i);
-            if (i1 < 0)
-                continue;
-
-            /* S1 */
-            if (tps_on(0) &&
-                ins[i1].opcode == TP_ENC_LDL && ins[i1].operand == a &&
-                !(an[i1].liveout & (1u << a)) && tps_free(ins, an, i, i1)) {
-                an[i].dead = an[i1].dead = 1;
-                removed += 2; changed = 1; tps_note(0);
-                i = i1;
-                continue;
-            }
-
-            /* S2 / S3 */
-            if (ins[i1].opcode == TP_ENC_STL &&
-                ins[i1].operand >= 0 && ins[i1].operand < nslot &&
-                ins[i1].operand != a) {
-                b = ins[i1].operand;
-                i2 = tps_next(ins, an, n, i1);
-                i3 = i2 >= 0 ? tps_next(ins, an, n, i2) : -1;
-                if (i3 >= 0 && ins[i2].opcode == TP_ENC_LDL &&
-                    ins[i3].opcode == TP_ENC_LDL &&
-                    !(an[i3].liveout & ((1u << a) | (1u << b))) &&
-                    tps_free(ins, an, i, i3)) {
-                    if (tps_on(1) &&
-                        ins[i2].operand == b && ins[i3].operand == a) {
-                        an[i].dead = an[i1].dead = 1;
-                        an[i2].dead = an[i3].dead = 1;
-                        removed += 4; changed = 1; tps_note(1);
-                        i = i3;
-                        continue;
-                    }
-                    if (tps_on(2) &&
-                        ins[i2].operand == a && ins[i3].operand == b) {
-                        /* The pair comes back swapped: that is exactly REV. */
-                        ins[i].opcode = TP_ENC_OPR;
-                        ins[i].operand = TP_OPR_REV;
-                        ins[i].is_branch = 0;
-                        an[i].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
-                                                 &an[i].delta, &an[i].reads);
-                        an[i].use = an[i].def = -1;
-                        an[i1].dead = an[i2].dead = an[i3].dead = 1;
-                        removed += 3; changed = 1; tps_note(2);
-                        i = i3;
-                        continue;
-                    }
-                }
-                /* S7: STL a ; STL b ; LDL a  ->  REV ; STL b.
-                 * REV brings the second value to the top so the surviving
-                 * store can take it, leaving the first where LDL a would
-                 * have put it back.  Trades a store for an ALU operation and
-                 * drops an instruction; this is the shape gfunc_call leaves
-                 * after every call that captures both ABI result words. */
-                if (tps_on(6) && i2 >= 0 && ins[i2].opcode == TP_ENC_LDL &&
-                    ins[i2].operand == a &&
-                    !(an[i2].liveout & (1u << a)) &&
-                    tps_free(ins, an, i, i2)) {
-                    ins[i].opcode = TP_ENC_OPR;
-                    ins[i].operand = TP_OPR_REV;
-                    ins[i].is_branch = 0;
-                    an[i].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
-                                             &an[i].delta, &an[i].reads);
-                    an[i].use = an[i].def = -1;
-                    an[i2].dead = 1;
-                    removed += 1; changed = 1; tps_note(6);
-                    i = i2;
-                    continue;
-                }
-            }
-
-            /* S4 / S5: carry the value across a balanced run of code.
-             * `r` is the stack depth relative to the point just after the
-             * STL, so the carried value sits at r == -1 and <e> must never
-             * try to read there. */
-            if (an[i].depth < 1 || an[i].depth > 3 || !an[i].known)
-                continue;
-            r = 0;
-            maxr = 0;
-            for (j = i1; j >= 0 && j - i < TPS_MAXWIN;
-                 j = tps_next(ins, an, n, j)) {
-                if (ins[j].pinned || an[j].head || !an[j].known ||
-                    ins[j].is_branch)
-                    break;             /* a branch would strand the carry */
-                if (ins[j].opcode == TP_ENC_LDL && ins[j].operand == a) {
-                    if (r > 1 || (an[j].liveout & (1u << a)) != 0)
-                        break;
-                    if (!tps_free(ins, an, i, j))
-                        break;
-                    if (r == 0) {
-                        if (!tps_on(3)) break;
-                        an[i].dead = an[j].dead = 1;
-                        removed += 2; tps_note(3);
-                    } else {
-                        if (!tps_on(4)) break;
-                        /* One value of <e> is stacked above the carry, so
-                         * they come back swapped: reuse the LDL slot as REV. */
-                        ins[j].opcode = TP_ENC_OPR;
-                        ins[j].operand = TP_OPR_REV;
-                        ins[j].is_branch = 0;
-                        an[j].known = tps_effect(TP_ENC_OPR, TP_OPR_REV,
-                                                 &an[j].delta, &an[j].reads);
-                        an[j].use = an[j].def = -1;
-                        an[i].dead = 1;
-                        removed += 1; tps_note(4);
-                    }
-                    /* Everything from here to the reload now runs one word
-                     * deeper; a later round must see that. The reload itself
-                     * is included because S5 keeps it (as REV). */
-                    for (b = i + 1; b <= j; b++)
-                        if (an[b].depth >= 0)
-                            an[b].depth++;
-                    changed = 1;
-                    break;
-                }
-                if (an[j].use == a || an[j].def == a)
-                    break;
-                if (an[j].reads > r)
-                    break;             /* would consume the carried value */
-                r += an[j].delta;
-                if (r < 0)
-                    break;
-                if (r > maxr)
-                    maxr = r;
-                if (an[i].depth + maxr > 3)
-                    break;             /* would not fit the 3-deep stack */
-            }
-            if (an[i].dead) {
-                i = (j > i) ? j : i;
-                continue;
-            }
-            continue;
-
-try_copy:
-            /* S6: a push straight into a slot nobody reads.  Deleting the
-             * pair is depth-neutral, and only ever leaves more of the stack
-             * intact than the original did. */
-            if (ins[i].opcode != TP_ENC_LDL && ins[i].opcode != TP_ENC_LDC)
-                continue;
-            i1 = tps_next(ins, an, n, i);
-            if (i1 < 0 || ins[i1].opcode != TP_ENC_STL)
-                continue;
-            b = ins[i1].operand;
-            if (b < 0 || b >= nslot)
-                continue;
-            if (!tps_on(5))
-                continue;
-            if (an[i1].liveout & (1u << b))
-                continue;
-            if (!tps_free(ins, an, i, i1))
-                continue;
-            an[i].dead = an[i1].dead = 1;
-            removed += 2; changed = 1; tps_note(5);
-            i = i1;
-        }
-
-        if (!changed)
-            break;
-    }
-
-    /* ---- 5a. delete a REV by swapping the two pure pushes that feed it ----
-     *
-     * `LDL a ; LDL b ; REV` and `LDL b ; LDL a` leave exactly the same stack:
-     * LDL and LDC are pure pushes that read no stack and have no side effect,
-     * so the REV only undoes the order they were emitted in. Emitting them the
-     * other way round removes the instruction outright — strictly better than
-     * the commutative-consumer rule below, which only applies when the
-     * consumer tolerates either order.
-     *
-     * This is the dominant shape: of the 17,808 `REV; STNL` sites measured
-     * across 462 kernel translation units, 84.6% are preceded by exactly two
-     * LDLs. STNL wants AReg=address, BReg=value, so those REVs are purely the
-     * scheduler having produced the pair the wrong way round.
-     *
-     * Both pushes must be reached together: if the second one is a branch
-     * target, control can arrive without having executed the first. */
-    for (i = 0; i < n; i++) {
-        int j0, j1, k;
-        if (an[i].dead || ins[i].pinned || an[i].head)
-            continue;
-        if (ins[i].opcode != TP_ENC_OPR || ins[i].operand != TP_OPR_REV)
-            continue;
-
-        j1 = -1;
-        for (k = i - 1; k >= 0; k--)
-            if (!an[k].dead) { j1 = k; break; }
-        if (j1 < 0 || ins[j1].pinned || an[j1].head)
-            continue;
-        j0 = -1;
-        for (k = j1 - 1; k >= 0; k--)
-            if (!an[k].dead) { j0 = k; break; }
-        if (j0 < 0 || ins[j0].pinned)
-            continue;
-
-        if ((ins[j0].opcode != TP_ENC_LDL && ins[j0].opcode != TP_ENC_LDC) ||
-            (ins[j1].opcode != TP_ENC_LDL && ins[j1].opcode != TP_ENC_LDC))
-            continue;
-        if (ins[j0].is_branch || ins[j1].is_branch)
-            continue;
-
-        {
-            int t_opc = ins[j0].opcode, t_opd = ins[j0].operand;
-            int t_old = ins[j0].old_len, t_new = ins[j0].new_len;
-            int t_use = an[j0].use;
-            ins[j0].opcode = ins[j1].opcode;
-            ins[j0].operand = ins[j1].operand;
-            /* The encoded widths must travel with the operands. The relaxation
-             * fixpoint only ever SHRINKS from new_len, so an instruction left
-             * holding a slot narrower than its new operand needs makes the
-             * encoder disagree at emit time and the whole function is
-             * abandoned — silently forfeiting the relaxation win. Swapping the
-             * pair keeps every (opcode, operand, length) triple consistent and
-             * leaves the total width unchanged. */
-            ins[j0].old_len = ins[j1].old_len;
-            ins[j0].new_len = ins[j1].new_len;
-            an[j0].use = an[j1].use;
-            ins[j1].opcode = t_opc;
-            ins[j1].operand = t_opd;
-            ins[j1].old_len = t_old;
-            ins[j1].new_len = t_new;
-            an[j1].use = t_use;
-        }
-        an[i].dead = 1;
-        removed += 1;
-        tps_note(7);
-    }
-
-    /* ---- 5b. drop REVs whose consumer does not care about operand order ----
-     *
-     * Rules S2, S4/S5 and S7 all pay for removing a store by inserting a REV,
-     * because the two values come back off the stack swapped. But REV is a
-     * stage-4 ALU operation, and a group gets only one of those — so a REV
-     * closes a group exactly as a store did, and the win is only the byte
-     * saved, not the pipeline slot.
-     *
-     * When the very next thing to execute is a commutative binary operation,
-     * the swap is unobservable and the REV is pure waste. Measured after this
-     * scheduler landed: rev went 24,871 -> 120,942 while ALU group closures
-     * rose 19.9% -> 26.7%, which is most of the group-width regression.
-     *
-     * Only exact 2-in/1-out commutative OPRs qualify. DIFF, SUB, GT, the
-     * shifts and WSUB are all order-sensitive and must keep their REV. */
-    for (i = 0; i < n; i++) {
-        int j;
-        if (an[i].dead || ins[i].pinned)
-            continue;
-        if (ins[i].opcode != TP_ENC_OPR || ins[i].operand != TP_OPR_REV)
-            continue;
-        j = tps_next(ins, an, n, i);
-        if (j < 0 || ins[j].pinned || an[j].head)
-            continue;               /* a branch target may be reached with
-                                     * the operands the other way round */
-        if (ins[j].opcode != TP_ENC_OPR)
-            continue;
-        switch (ins[j].operand) {
-        case TP_OPR_SUM: case TP_OPR_ADD:
-        case TP_OPR_PROD: case TP_OPR_MUL:
-        case TP_OPR_AND: case TP_OPR_OR: case TP_OPR_XOR:
-        /* bsub is plain commutative addition (AReg + BReg, t4/p.c:4703), so a
-         * preceding REV is dead for it too.  wsub/ssub/wsubdb are NOT
-         * commutative - they scale BReg and use AReg as the base - and must
-         * keep their REV. */
-        case TP_OPR_BSUB:
-            if (an[j].reads != 2)
-                break;
-            an[i].dead = 1;
-            removed += 1;
-            tps_note(7);
-            break;
-        default:
-            break;
-        }
-    }
-
-    /* ---- 5b. rev ; rev  ==  nothing ----
-     * REV exchanges AReg and BReg, so two in a row restore the original
-     * stack.  Pairs arise when gen_store_addr already leaves AReg=address /
-     * BReg=value and store()'s narrow path adds its own REV to guarantee that
-     * order: every initialised byte of `char buf[16] = "hello"` emitted one.
-     * The second REV must not be a branch target, or control could arrive
-     * having executed only one of the pair. */
-    for (i = 0; i < n; i++) {
-        int j;
-        if (an[i].dead || ins[i].pinned)
-            continue;
-        if (ins[i].opcode != TP_ENC_OPR || ins[i].operand != TP_OPR_REV)
-            continue;
-        j = tps_next(ins, an, n, i);
-        if (j < 0 || ins[j].pinned || an[j].head)
-            continue;
-        if (ins[j].opcode != TP_ENC_OPR || ins[j].operand != TP_OPR_REV)
-            continue;
-        an[i].dead = 1;
-        an[j].dead = 1;
-        removed += 2;
-        tps_note(7);
-    }
-
-    /* ---- 6. commit ---- */
-    for (i = 0; i < n; i++) {
-        if (an[i].dead) {
-            ins[i].opcode = -1;
-            ins[i].operand = 0;
-            ins[i].is_branch = 0;
-        }
-    }
-    if (tps_stats_on > 0)
-        fprintf(stderr, "[SCHED] cumulative S1=%d S2=%d S3=%d S4=%d S5=%d "
-                        "S6=%d S7=%d S8=%d S9=%d (last %s -%d)\n",
-                tps_stats[0], tps_stats[1], tps_stats[2], tps_stats[3],
-                tps_stats[4], tps_stats[5], tps_stats[6], tps_stats[7],
-                tps_stats[8], funcname ? funcname : "?", removed);
-    tcc_free(idx);
-    tcc_free(an);
-    return removed;
-}
-
-/*
- * Workspace slot layout.
- *
- * Only slots 0..15 are addressable in one byte, and the emitter numbers the
- * frame by convention rather than by use: pseudo-registers, the float and
- * return slots and backend scratch take the low numbers whether or not the
- * function touches them, and locals follow in allocation order.  In vmlinux
- * over half of all LDL/STL/LDLP needed a prefix byte while slots 3-6 and 8
- * sat almost idle.
- *
- * This renumbers the frame by use.  The frame is cut into units that must
- * keep their internal layout: each slot of the reserved region (a
- * pseudo-register or scratch word) and each block of locals between two
- * recorded values of `loc` (tp_loc_marks) - a struct, say, or an array whose
- * address is taken.  Units are laid out from the bottom of the frame in order
- * of accesses per word, every LDL/STL/LDLP naming a moved slot is rewritten,
- * and the result is kept only when the function gets smaller.
- *
- * What stays put:
- *   - slot 0, which outbyte/outword and the ALT instructions use implicitly,
- *     and the outgoing-argument words, which the callee reads in place;
- *   - everything at and above the frame top: return address and parameters;
- *   - the shape around an LDLP naming the first slot of a unit, which may be
- *     `&arr[N]` for the unit below: the two are merged.  One naming the frame
- *     top pins the unit beneath it.
- * Functions the pass cannot see into are left alone, as tp_sched_function
- * leaves them: inline assembly, GAJW, a mid-function AJW, and an LDLP of a
- * pseudo-register in any shape but the LDNL/STNL pairs the back end emits.
- *
- * Runs after the scheduler, which reasons about the emitter's numbering.
- * Returns 1 if it rewrote anything; new_len then holds each rewritten
- * instruction's width, which may have grown.
- */
-static int tp_slot_remap(struct tp_relax_insn *ins, int n)
-{
-    static int off = -1, stats = -1;
-    int F = func_frame_words, R = func_frame_reserved;
-    int P = func_max_outgoing_words > 1 ? func_max_outgoing_words : 1;
-    int pin_top = 0, nu = 0, lo, hi, first, i, j, s, pos;
-    int old_bytes = 0, new_bytes = 0;
-    char *cut;
-    int *unit, *ustart, *usize, *uweight, *uorder, *unew;
-
-    if (off < 0) {
-        off = getenv("TP_NO_SLOTMAP") ? 1 : 0;
-        stats = getenv("TP_SLOTMAP_STATS") ? 1 : 0;
-    }
-    if (off || func_uses_inline_asm || tp_loc_marks_bad ||
-        F <= P + 1 || F > 4096 || R > F)
-        return 0;
-
-    for (first = 0; first < n && ins[first].opcode == -1; first++)
-        ;
-    for (i = 0; i < n; i++) {
-        if (ins[i].opcode == TP_ENC_OPR && ins[i].operand == TP_OPR_GAJW)
-            return 0;
-        if (ins[i].opcode == TP_ENC_AJW && i != first) {
-            for (j = i + 1; j < n && ins[j].opcode == -1; j++)
-                ;
-            if (!(j < n && ins[j].opcode == TP_ENC_OPR &&
-                  ins[j].operand == TP_OPR_RET))
-                return 0;
-        }
-    }
-
-    /* cut[s]: a unit starts at slot s.  Every reserved slot is its own unit;
-     * locals are cut at each recorded `loc` that falls on a word boundary. */
-    cut = tcc_mallocz(F + 1);
-    for (s = 0; s <= R; s++)
-        cut[s] = 1;
-    cut[F] = 1;
-    for (i = 0; i < tp_loc_marks_count; i++) {
-        int m = tp_loc_marks[i];
-        if (m <= 0 && !(m & 3) && F + m / 4 > R && F + m / 4 < F)
-            cut[F + m / 4] = 1;
-    }
-
-    /* Merge what LDLP ties together. */
-    for (i = 0; i < n; i++) {
-        int t, recognised;
-        if (ins[i].opcode != TP_ENC_LDLP)
-            continue;
-        s = ins[i].operand;
-        for (j = i + 1; j < n && ins[j].opcode == -1; j++)
-            ;
-        recognised = j < n && (ins[j].opcode == TP_ENC_LDNL ||
-                               ins[j].opcode == TP_ENC_STNL);
-        if (recognised) {
-            t = s + ins[j].operand;
-            if ((s < 0 || s >= F) != (t < 0 || t >= F)) {
-                if (s < P && t < P)
-                    continue;               /* staging, which stays put */
-                goto bail;                  /* reaches across the frame edge */
-            }
-            if (s >= 0 && s < F && t != s) {
-                int a = s < t ? s : t, b = s < t ? t : s, k;
-                for (k = a + 1; k <= b; k++)
-                    cut[k] = 0;
-            }
-        } else if (s >= 0 && s < R) {
-            if (s >= P)
-                goto bail;                  /* a pseudo-register escapes */
-        } else if (s > R && s < F) {
-            cut[s] = 0;                     /* maybe one past the unit below */
-        } else if (s == F) {
-            pin_top = 1;
-        }
-    }
-
-    /* Units, their weights, and the pinned ends: [0, lo) holds slot 0 and the
-     * staging words, [hi, F) the unit an LDLP of the frame top points past. */
-    unit = tcc_malloc(F * sizeof(int));
-    ustart = tcc_malloc((F + 1) * sizeof(int));
-    usize = tcc_malloc((F + 1) * sizeof(int));
-    uweight = tcc_mallocz((F + 1) * sizeof(int));
-    uorder = tcc_malloc((F + 1) * sizeof(int));
-    unew = tcc_malloc((F + 1) * sizeof(int));
-    for (s = 0; s < F; s++) {
-        if (cut[s]) {
-            ustart[nu] = s;
-            usize[nu++] = 0;
-        }
-        unit[s] = nu - 1;
-        usize[nu - 1]++;
-    }
-    lo = ustart[unit[P - 1]] + usize[unit[P - 1]];
-    hi = pin_top ? ustart[unit[F - 1]] : F;
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode;
-        if ((opc == TP_ENC_LDL || opc == TP_ENC_STL || opc == TP_ENC_LDLP) &&
-            ins[i].operand >= 0 && ins[i].operand < F)
-            uweight[unit[ins[i].operand]]++;
-    }
-
-    /* Lay the movable units out from lo, densest first; insertion sort keeps
-     * equal densities in frame order. */
-    {
-        int m = 0, u, k;
-        for (u = unit[lo < F ? lo : F - 1]; u < nu && ustart[u] < hi; u++) {
-            if (ustart[u] < lo)
-                continue;
-            for (k = m; k > 0; k--) {
-                int v = uorder[k - 1];
-                if ((long long)uweight[v] * usize[u] >=
-                    (long long)uweight[u] * usize[v])
-                    break;
-                uorder[k] = v;
-            }
-            uorder[k] = u;
-            m++;
-        }
-        for (pos = lo, k = 0; k < m; k++) {
-            unew[uorder[k]] = pos;
-            pos += usize[uorder[k]];
-        }
-    }
-
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode, u;
-        if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
-            continue;
-        s = ins[i].operand;
-        if (s < lo || s >= hi)
-            continue;
-        u = unit[s];
-        old_bytes += tp_encode_len(opc, s);
-        new_bytes += tp_encode_len(opc, s - ustart[u] + unew[u]);
-    }
-    if (stats && old_bytes)
-        fprintf(stderr, "[SLOTMAP] %s: %d -> %d bytes%s\n",
-                funcname ? funcname : "?", old_bytes, new_bytes,
-                new_bytes < old_bytes ? "" : " (kept)");
-    if (new_bytes >= old_bytes)
-        goto bail;
-
-    for (i = 0; i < n; i++) {
-        int opc = ins[i].opcode, u;
-        if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
-            continue;
-        s = ins[i].operand;
-        if (s < lo || s >= hi)
-            continue;
-        u = unit[s];
-        ins[i].operand = s - ustart[u] + unew[u];
-        ins[i].new_len = tp_encode_len(opc, ins[i].operand);
-    }
-    tcc_free(unit); tcc_free(ustart); tcc_free(usize);
-    tcc_free(uweight); tcc_free(uorder); tcc_free(unew);
-    tcc_free(cut);
-    return 1;
-
-bail:
-    if (nu) {
-        tcc_free(unit); tcc_free(ustart); tcc_free(usize);
-        tcc_free(uweight); tcc_free(uorder); tcc_free(unew);
-    }
-    tcc_free(cut);
-    return 0;
-}
-
-/* Returns 1 if the function was rewritten. */
-static int tp_relax_function(void)
-{
-    Section *sec = cur_text_section;
-    uint8_t *code;
-    struct tp_relax_insn *ins;
-    int n = 0, i, pass;
-    int base = func_start_ind;
-    int size = ind - func_start_ind;
-    int p, saved;
-    int *map;           /* old offset -> new offset */
-    int *tidx;          /* old offset -> instruction index */
-    uint8_t *out;
-    int outlen;
-    int grown = 0;      /* an instruction may now need more bytes */
-
-    if (base < 0 || size <= 0 || size > TP_RELAX_MAX_INSNS)
-        return tp_relax_bail("size");
-    /* Switch jump tables embed absolute code addresses that are patched later
-     * from recorded slot offsets; relaxing under them would invalidate both. */
-    if (func_has_switch_slots)
-        return tp_relax_bail("switch");
-    /* Debug info records code offsets per line. */
-    if (tcc_state->do_debug)
-        return tp_relax_bail("debug");
-
-    code = sec->data + base;
-    ins = tcc_malloc(sizeof(*ins) * (size + 1));
-
-    /* 1. Linear decode. */
-    for (p = 0; p < size; ) {
-        int opc = -1, opd = 0;
-        int len;
-
-        /* At an instruction boundary Oreg is 0, so a PFIX 0 byte contributes
-         * nothing: it is pure placeholder padding. Record it as a standalone
-         * no-op rather than letting it merge into the instruction that
-         * follows. Merging would be semantically harmless but would erase the
-         * boundary between them, and jump targets land on exactly those
-         * boundaries — which is why most functions previously bailed out. */
-        if (code[p] == ((TP_ENC_PFIX << 4) | 0)) {
-            ins[n].old_off = p;
-            ins[n].old_len = 1;
-            ins[n].new_len = 1;
-            ins[n].opcode = -1;
-            ins[n].operand = 0;
-            ins[n].pinned = 0;
-            ins[n].is_branch = 0;
-            ins[n].target_old = 0;
-            ins[n].ext = 0;
-            n++;
-            p++;
-            continue;
-        }
-
-        len = tp_relax_decode(code, p, size, &opc, &opd);
-        if (len <= 0) {           /* malformed tail — bail out entirely */
-            tcc_free(ins);
-            return tp_relax_bail("decode");
-        }
-        ins[n].old_off = p;
-        ins[n].old_len = len;
-        ins[n].new_len = len;
-        ins[n].opcode = opc;
-        ins[n].operand = opd;
-        ins[n].pinned = 0;
-        ins[n].is_branch = (opc == TP_ENC_J || opc == TP_ENC_CJ);
-        ins[n].target_old = ins[n].is_branch ? (p + len + opd) : 0;
-        ins[n].ext = 0;
-        n++;
-        p += len;
-    }
-
-    /* An offset -> index map. Branch retargeting is done three times over
-     * (shrink fixpoint, emit, validation) and a linear search there made the
-     * whole pass quadratic in the size of the function. */
-    tidx = tcc_malloc(sizeof(int) * (size + 1));
-    for (i = 0; i <= size; i++)
-        tidx[i] = -1;
-    for (i = 0; i < n; i++)
-        tidx[ins[i].old_off] = i;
-
-    /* 2. Pin anything a relocation points into.  This function's
-     * relocations are the ones added since its prologue. */
-    if (sec->reloc) {
-        ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
-        int nrel = sec->reloc->data_offset / sizeof(*rel);
-        for (i = func_start_nrel; i < nrel; i++) {
-            int ro = (int)rel[i].r_offset - base;
-            int k, m;
-            if (ro < 0 || ro >= size)
-                continue;
-            /* the instruction holding ro starts at or before it */
-            for (k = ro; k > 0 && tidx[k] < 0; k--)
-                ;
-            k = tidx[k];
-            if (k < 0 || ro >= ins[k].old_off + ins[k].old_len) {
-                tcc_free(tidx); tcc_free(ins);
-                return tp_relax_bail("reloc-outside");
-            }
-            /* A relocated placeholder such as the 8-byte LDC_ABS chain
-             * is now decoded as a run of PFIX 0 no-ops followed by the
-             * real opcode. The linker rewrites the whole reserved
-             * width, so pin the entire run, not just the first byte. */
-            for (m = k; m < n; m++) {
-                ins[m].pinned = 1;
-                if (ins[m].opcode != -1)
-                    break;
-            }
-        }
-    }
-
-    /* A branch must land exactly on an instruction boundary, otherwise our
-     * decode disagrees with what the emitter intended and we must not touch
-     * the function. */
-    for (i = 0; i < n; i++) {
-        int t, ok = 0;
-        if (!ins[i].is_branch)
-            continue;
-        t = ins[i].target_old;
-        if (t == size)
-            ok = 1;                       /* branch to the very end */
-        else if (t >= 0 && t < size && tidx[t] >= 0)
-            ok = 1;
-        if (!ok) {
-            tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("branch-target");
-        }
-    }
-
-    /* 2a. Give the placeholders gfunc_epilog could not fit (wide_log) their
-     * real operand and the width it needs.  This must come before the
-     * scheduler, which would otherwise take them for accesses to slot 0. */
-    for (i = 0; i < wide_log_count; i++) {
-        int o = wide_log[i].offset - base;
-        int k = (o >= 0 && o < size) ? tidx[o] : -1;
-        if (k < 0 || ins[k].pinned || ins[k].opcode != wide_log[i].opcode) {
-            tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("wide");
-        }
-        ins[k].operand = wide_log[i].operand;
-        ins[k].new_len = tp_encode_len(ins[k].opcode, ins[k].operand);
-        grown = 1;
-    }
-
-    /* 2b. Evaluation-stack scheduling: delete the workspace round trips the
-     * always-STL register model leaves behind. Deleted instructions become
-     * zero-length no-ops, which the shrink pass below already knows how to
-     * drop; a rewritten one keeps its slot and is re-encoded from its new
-     * opcode/operand. */
-    tp_sched_function(ins, n, size);
-
-    /* 2b'. Renumber the frame by use.  Moving a cold unit up can widen an
-     * access, which the growth pass below then makes room for. */
-    if (tp_slot_remap(ins, n))
-        grown = 1;
-
-    /* 2b''. Narrowed direct calls (near_call_log) stayed pinned through the
-     * scheduler.  Now make each a branch to its callee: that sits before this
-     * function and does not move, so the call re-encodes like a J - shorter
-     * as the code in front of it shrinks, longer if widening pushed it away.
-     * Its pfix 0 front padding becomes deletable no-ops; the relocation,
-     * on the first of them, then slides onto the call itself.  Only a call
-     * still encoded with the logged callee's displacement is the logged one;
-     * anything else there stays pinned, as re-targeting it would send it to
-     * the wrong function. */
-    for (i = 0; i < near_call_count; i++) {
-        int o = near_call_log[i].offset - base;
-        int k = (o >= 0 && o < size) ? tidx[o] : -1;
-        int m, t = near_call_log[i].target - base;
-
-        if (k < 0)
-            continue;
-        for (m = k; m < n && ins[m].opcode == -1; m++)
-            ;
-        if (m == n || ins[m].opcode != TP_ENC_CALL
-            || ins[m].old_off + ins[m].old_len + ins[m].operand != t)
-            continue;
-        for (; k < m; k++)
-            ins[k].pinned = 0;
-        ins[m].pinned = 0;
-        ins[m].is_branch = 1;
-        ins[m].ext = 1;
-        ins[m].target_old = t;
-    }
-
-    /* 2c. Widening pushes code apart, so a branch across a widened
-     * instruction may no longer reach with the width it had. Grow those
-     * first: sizes only ever increase here, so this settles, and the shrink
-     * pass below then starts from widths that all fit. */
-    for (pass = 0; grown && pass < 16; pass++) {
-        int changed = 0;
-        int off = 0;
-
-        for (i = 0; i < n; i++) {
-            ins[i].new_off = off;
-            off += ins[i].new_len;
-        }
-        outlen = off;
-
-        for (i = 0; i < n; i++) {
-            int newt, need;
-            if (!ins[i].is_branch || ins[i].pinned)
-                continue;
-            newt = tp_relax_newt(ins, i, tidx, size, outlen);
-            need = tp_encode_len(ins[i].opcode,
-                                 newt - (ins[i].new_off + ins[i].new_len));
-            if (need > ins[i].new_len) {
-                ins[i].new_len = need;
-                changed = 1;
-            }
-        }
-        if (!changed)
-            break;
-    }
-
-    /* 3. Shrink to fixpoint. Sizes only ever decrease, so this terminates. */
-    for (pass = 0; pass < 16; pass++) {
-        int changed = 0;
-        int off = 0;
-
-        for (i = 0; i < n; i++) {
-            ins[i].new_off = off;
-            off += ins[i].new_len;
-        }
-        outlen = off;
-
-        for (i = 0; i < n; i++) {
-            int want;
-            if (ins[i].pinned)
-                continue;
-            if (ins[i].is_branch) {
-                /* Displacement is relative to the end of this instruction, so
-                 * it depends on its own length. Solve by trying lengths from
-                 * the current one downwards and keeping the first that fits. */
-                int newt = tp_relax_newt(ins, i, tidx, size, outlen);
-                want = ins[i].new_len;
-                while (want > 1) {
-                    int disp = newt - (ins[i].new_off + want - 1);
-                    /* Accept the shorter slot whenever the displacement fits
-                     * in it. Insisting on an exact match left branches one
-                     * byte too wide, and - worse - the emit step below then
-                     * found the encoder disagreeing with the reserved width
-                     * and abandoned the whole function, padding and all. */
-                    if (tp_encode_len(ins[i].opcode, disp) > want - 1)
-                        break;
-                    want--;
-                }
-            } else if (ins[i].opcode == -1) {
-                want = 0;               /* redundant PFIX 0 — delete it */
-            } else {
-                want = tp_encode_len(ins[i].opcode, ins[i].operand);
-            }
-            if (want < ins[i].new_len) {
-                ins[i].new_len = want;
-                changed = 1;
-            }
-        }
-        if (!changed)
-            break;
-    }
-
-    /* Recompute final offsets after the last shrink. */
-    {
-        int off = 0;
-        for (i = 0; i < n; i++) {
-            ins[i].new_off = off;
-            off += ins[i].new_len;
-        }
-        outlen = off;
-    }
-    if (outlen == size && !grown) {
-        tcc_free(tidx); tcc_free(ins);
-        return tp_relax_bail("nogain");
-    }
-
-    /* 4. Emit the relaxed stream. */
-    out = tcc_malloc(outlen > size ? outlen : size);
-    map = tcc_malloc(sizeof(int) * (size + 1));
-    for (i = 0; i <= size; i++)
-        map[i] = -1;
-
-    for (i = 0; i < n; i++) {
-        uint8_t buf[16];
-        int len;
-        map[ins[i].old_off] = ins[i].new_off;
-        if (ins[i].pinned) {
-            int k;
-            /* A pinned instruction keeps its exact width, so every byte inside
-             * it has a well-defined new position. Relocations do not always
-             * point at the first byte of the reserved placeholder, and leaving
-             * an interior offset unmapped would strand the relocation on stale
-             * code — which showed up as LDC_ABS_PATCH_FAIL at link time. */
-            for (k = 0; k < ins[i].old_len; k++)
-                map[ins[i].old_off + k] = ins[i].new_off + k;
-            memcpy(out + ins[i].new_off, code + ins[i].old_off, ins[i].old_len);
-            continue;
-        }
-        if (ins[i].opcode == -1) {
-            continue;                   /* deleted no-op */
-        }
-        if (ins[i].is_branch) {
-            int newt = tp_relax_newt(ins, i, tidx, size, outlen);
-            len = tp_encode_instr(buf, ins[i].opcode,
-                                  newt - (ins[i].new_off + ins[i].new_len));
-        } else {
-            len = tp_encode_instr(buf, ins[i].opcode, ins[i].operand);
-        }
-        if (len > ins[i].new_len) {      /* encoder wanted more — abandon */
-            tcc_free(out); tcc_free(map); tcc_free(tidx); tcc_free(ins);
-            return tp_relax_bail("encoder");
-        }
-        /* A branch displacement is measured from the end of the instruction,
-         * so shortening the instruction lengthens the displacement: there are
-         * targets for which no width is an exact fixed point (a two-byte slot
-         * whose displacement then encodes in one). Left-pad with PFIX 0,
-         * which contributes nothing to Oreg at an instruction boundary and so
-         * works for NFIX-prefixed negative displacements too. */
-        if (len < ins[i].new_len) {
-            int q, pad = ins[i].new_len - len;
-            for (q = 0; q < pad; q++)
-                out[ins[i].new_off + q] = (TP_ENC_PFIX << 4);
-            memcpy(out + ins[i].new_off + pad, buf, len);
-            continue;
-        }
-        memcpy(out + ins[i].new_off, buf, len);
-    }
-    map[size] = outlen;
-
-    /* Every relocation must land on a mapped byte, otherwise the rewrite would
-     * strand it. Verify before committing anything. */
-    if (sec->reloc) {
-        ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
-        int nrel = sec->reloc->data_offset / sizeof(*rel);
-        for (i = func_start_nrel; i < nrel; i++) {
-            int ro = (int)rel[i].r_offset - base;
-            if (ro < 0 || ro > size)
-                continue;
-            if (map[ro] < 0) {
-                tcc_free(out); tcc_free(map); tcc_free(tidx); tcc_free(ins);
-                return tp_relax_bail("reloc-unmapped");
-            }
-        }
-    }
-    /* The same for labels, which step 6 moves. */
-    {
-        Sym *s;
-        for (s = global_label_stack; s; s = s->prev) {
-            int o = s->jnext - base;
-            if (s->r == LABEL_DEFINED && o >= 0 && o <= size && map[o] < 0) {
-                tcc_free(out); tcc_free(map); tcc_free(tidx); tcc_free(ins);
-                return tp_relax_bail("label-unmapped");
-            }
-        }
-    }
-
-    if (base + outlen > sec->data_allocated) {
-        section_realloc(sec, base + outlen);
-        code = sec->data + base;
-    }
-    memcpy(code, out, outlen);
-    saved = size - outlen;
-    ind -= saved;
-    sec->data_offset = ind;
-    wide_log_count = 0;
-
-    /* 5. Slide relocations that point into this function. */
-    if (sec->reloc) {
-        ElfW_Rel *rel = (ElfW_Rel *)sec->reloc->data;
-        int nrel = sec->reloc->data_offset / sizeof(*rel);
-        for (i = func_start_nrel; i < nrel; i++) {
-            int ro = (int)rel[i].r_offset - base;
-            if (ro < 0 || ro > size)
-                continue;
-            rel[i].r_offset = base + map[ro];
-        }
-    }
-
-    /* 6. Move the symbols that name code in this function.  A label whose
-     * address is taken (&&l) is defined by label_pop() from s->jnext only
-     * after gfunc_epilog returns, so remap jnext.  Anything already defined
-     * by now - a __label__ local popped at the end of its block, an asm
-     * label - is an ELF symbol at its old offset; such symbols were all
-     * created since the prologue. */
-    {
-        Sym *s;
-        ElfSym *es, *es_end;
-        for (s = global_label_stack; s; s = s->prev) {
-            int o = s->jnext - base;
-            if (s->r == LABEL_DEFINED && o >= 0 && o <= size)
-                s->jnext = base + map[o];
-        }
-        es = (ElfSym *)symtab_section->data + func_start_nsym;
-        es_end = (ElfSym *)(symtab_section->data + symtab_section->data_offset);
-        for (; es < es_end; es++) {
-            int o = (int)es->st_value - base;
-            if (es->st_shndx == sec->sh_num && o >= 0 && o <= size
-                && map[o] >= 0)
-                es->st_value = base + map[o];
-        }
-    }
-
-    tcc_free(out);
-    tcc_free(map);
-    tcc_free(tidx);
-    tcc_free(ins);
-    return saved;
-}
+#include "transputer-fnopt.h"
 
 /*
  * Size of the reserved region below the locals, in words.
@@ -8286,7 +6530,7 @@ static int tp_frame_policy_cached = -1;
 static int tp_frame_policy(void)
 {
     if (tp_frame_policy_cached < 0) {
-        const char *e = getenv("TCC_FRAME_POLICY");
+        const char *e = tp_knob(TPK_TCC_FRAME_POLICY);
         tp_frame_policy_cached = (e && *e) ? atoi(e) : 2;
     }
     return tp_frame_policy_cached;
@@ -8397,7 +6641,6 @@ ST_FUNC void gfunc_leave(void)
     /* Nothing reaches the code after this but a jump to a label. */
     abcreg_stack_depth = 0;
     tp_hist_clear();
-    tp_stl_track_clear();
     tp_areg_invalidate();
 }
 
@@ -8560,7 +6803,7 @@ ST_FUNC void gfunc_epilog(void)
     {
         static int relax_off = -1;
         if (relax_off < 0)
-            relax_off = getenv("TP_NO_RELAX") ? 1 : 0;
+            relax_off = tp_knob(TPK_TP_NO_RELAX) ? 1 : 0;
         if (!relax_off)
             tp_relax_function();
         else
@@ -8580,4143 +6823,10 @@ ST_FUNC void gfunc_epilog(void)
     transputer_func_reset();
 }
 
-static void tp_call_words_reserve(struct tp_call_words *cw, int extra_words)
-{
-    int need, new_cap;
+#include "transputer-call.h"
 
-    need = cw->count + extra_words;
-    if (need <= cw->cap)
-        return;
+#include "transputer-int.h"
 
-    new_cap = cw->cap ? cw->cap : 16;
-    while (new_cap < need) {
-        if (new_cap > (1 << 20))
-            tcc_error("too many call argument words");
-        new_cap <<= 1;
-    }
-    cw->words = tcc_realloc(cw->words, new_cap * sizeof(*cw->words));
-    cw->cap = new_cap;
-}
-
-static void tp_expand_struct_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug)
-{
-    int align, size, words, w;
-
-    size = type_size(&arg->type, &align);
-    words = (size + 3) >> 2;
-
-    /*
-     * GCC's ABI gives an empty struct no argument words.  Linux uses this
-     * deliberately for feature-dependent token parameters (for example,
-     * kmalloc_token_t when partitioned kmalloc caches are disabled).  The
-     * callee layout already consumes zero words for such a parameter, so
-     * manufacturing one here shifts every following argument and can turn
-     * kzalloc(size, flags) into kzalloc(token, flags).
-     */
-    if (size == 0) {
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_EMPTY_STRUCT] func=%s arg_index=%d skipped\n",
-                    funcname ? funcname : "<unknown>", arg_index);
-        }
-        return;
-    }
-
-    if (arg->r & VT_LVAL) {
-        int spill_base = loc - size;
-        SValue src_addr = *arg;
-
-        spill_base &= ~3;
-        loc = spill_base;
-        src_addr.r &= ~VT_LVAL;
-
-        for (w = 0; w < words; w++) {
-            int spill_off = spill_base + (w * 4);
-            int copy_size = size - (w * 4);
-            SValue dst_addr;
-
-            if (copy_size > 4)
-                copy_size = 4;
-            if (copy_size < 0)
-                copy_size = 0;
-
-            Tp_LDC(0);
-            emit_local_op(TP_OP_STL, spill_off);
-            abcreg_stack_depth = 0;
-
-            if (copy_size > 0) {
-                dst_addr.type = int_type;
-                dst_addr.r = VT_LOCAL;
-                dst_addr.c.i = spill_off;
-                dst_addr.sym = NULL;
-
-                tp_push_sv(&src_addr);
-                if (w)
-                    Tp_ADC(w * 4);
-                tp_push_sv(&dst_addr);
-                Tp_LDC(copy_size);
-                Tp_OPR(TP_OPR_MOVE);
-                abcreg_pop(3);
-                abcreg_stack_depth = 0;
-            }
-        }
-    } else {
-        /* Keep current fallback semantics for struct rvalues during refactor. */
-        words = 1;
-    }
-
-    for (w = 0; w < words; w++) {
-        tp_call_words_reserve(cw, 1);
-        cw->words[cw->count] = *arg;
-        cw->words[cw->count].type.t =
-            (cw->words[cw->count].type.t & ~(VT_BTYPE | VT_UNSIGNED)) | VT_INT;
-
-        if (cw->words[cw->count].r & VT_LVAL) {
-            cw->words[cw->count].r = VT_LOCAL | VT_LVAL;
-            cw->words[cw->count].c.i = loc + (w * 4);
-        }
-
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_WORD] func=%s arg_index=%d word=%d abi_word=%d r=0x%x v=0x%x bt=0x%x c.i=%ld lval=%d\n",
-                    funcname ? funcname : "<unknown>", arg_index, w, cw->count,
-                    cw->words[cw->count].r,
-                    cw->words[cw->count].r & VT_VALMASK,
-                    cw->words[cw->count].type.t & VT_BTYPE,
-                    (long)cw->words[cw->count].c.i,
-                    (cw->words[cw->count].r & VT_LVAL) != 0);
-        }
-        cw->count++;
-    }
-}
-
-static void tp_expand_scalar_call_words(struct tp_call_words *cw, SValue *arg, int arg_index, int callarg_debug)
-{
-    int bt, size;
-
-    bt = arg->type.t & VT_BTYPE;
-    size = get_primitive_type_size(bt);
-    if (size == 8) {
-        SValue lo = *arg;
-        SValue hi = *arg;
-        int v = arg->r & VT_VALMASK;
-
-        lo.type.t = (lo.type.t & ~(VT_BTYPE | VT_UNSIGNED)) | VT_INT;
-        hi.type.t = (hi.type.t & ~(VT_BTYPE | VT_UNSIGNED)) | VT_INT;
-
-        if ((arg->r & VT_LVAL) &&
-            ((v < VT_CONST && v != VT_LOCAL) || v == VT_LLOCAL)) {
-            int spill_lo = loc - 4;
-            int spill_hi = loc - 8;
-            loc -= 8;
-            if (v == VT_LLOCAL)
-                emit_local_op(TP_OP_LDL, arg->c.i);
-            else
-                Tp_LDL(v);
-            if (tp_t414()) {
-                /* no dup: load the pointer again for the high word */
-                Tp_LDNL(0);
-                emit_local_op(TP_OP_STL, spill_lo);
-                if (v == VT_LLOCAL)
-                    emit_local_op(TP_OP_LDL, arg->c.i);
-                else
-                    Tp_LDL(v);
-            } else {
-                Tp_DUP();
-                Tp_LDNL(0);
-                emit_local_op(TP_OP_STL, spill_lo);
-            }
-            Tp_LDNL(1);
-            emit_local_op(TP_OP_STL, spill_hi);
-            lo.r = VT_LOCAL | VT_LVAL;
-            lo.c.i = spill_lo;
-            hi.r = VT_LOCAL | VT_LVAL;
-            hi.c.i = spill_hi;
-        } else if (arg->r & VT_LVAL) {
-            hi.c.i += 4;
-        } else if (v == VT_CONST && !(arg->r & VT_SYM)) {
-            uint64_t bits;
-            if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-                union { double d; uint64_t u; } u;
-                u.d = arg->c.d;
-                bits = u.u;
-            } else {
-                bits = arg->c.i;
-            }
-            lo.r = VT_CONST;
-            lo.c.i = (uint32_t)bits;
-            lo.sym = NULL;
-            hi.r = VT_CONST;
-            hi.c.i = (uint32_t)(bits >> 32);
-            hi.sym = NULL;
-        } else if (v == VT_CONST && (arg->r & VT_SYM)) {
-            lo.r |= VT_LVAL;
-            hi.r |= VT_LVAL;
-            hi.c.i += 4;
-        } else if (v < VT_CONST) {
-            /* The high word is in r2, as in load(): after lbuild() the pair
-             * can be any two registers (e.g. r=11, r2=9).  Assuming v+1 read
-             * a slot nothing had written - (off + bs) >> bits passed garbage
-             * as __ashrdi3's high word.  v+1 stays the fallback when r2 names
-             * no register. */
-            int v2 = arg->r2 & VT_VALMASK;
-            hi.r = (hi.r & ~VT_VALMASK) | (v2 < VT_CONST ? v2 : v + 1);
-        }
-
-        tp_call_words_reserve(cw, 2);
-        cw->words[cw->count++] = lo;
-        cw->words[cw->count++] = hi;
-
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_WORD64] func=%s arg_index=%d lo{r=0x%x v=0x%x c.i=%ld} hi{r=0x%x v=0x%x c.i=%ld}\n",
-                    funcname ? funcname : "<unknown>", arg_index,
-                    lo.r, lo.r & VT_VALMASK, (long)lo.c.i,
-                    hi.r, hi.r & VT_VALMASK, (long)hi.c.i);
-        }
-    } else {
-        tp_call_words_reserve(cw, 1);
-        cw->words[cw->count] = *arg;
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_WORD] func=%s arg_index=%d word=0 abi_word=%d r=0x%x v=0x%x bt=0x%x c.i=%ld lval=%d\n",
-                    funcname ? funcname : "<unknown>", arg_index, cw->count,
-                    cw->words[cw->count].r,
-                    cw->words[cw->count].r & VT_VALMASK,
-                    cw->words[cw->count].type.t & VT_BTYPE,
-                    (long)cw->words[cw->count].c.i,
-                    (cw->words[cw->count].r & VT_LVAL) != 0);
-        }
-        cw->count++;
-    }
-}
-
-static void tp_expand_call_words(struct tp_call_words *cw, int nb_args, int callarg_debug)
-{
-    int i;
-
-    for (i = 0; i < nb_args; i++) {
-        SValue *arg = &vtop[-(nb_args - 1 - i)];
-        int bt = arg->type.t & VT_BTYPE;
-
-        if (bt == VT_STRUCT)
-            tp_expand_struct_call_words(cw, arg, i, callarg_debug);
-        else
-            tp_expand_scalar_call_words(cw, arg, i, callarg_debug);
-    }
-}
-
-/* Does tp_push_sv() materialise this value as a *pure push* - one that reads
- * nothing already on the evaluation stack, writes no memory and touches no
- * backend scratch slot?
- *
- * Only such values can be pushed straight into A/B/C in reverse ABI order
- * (see tp_stage_call_words below).  This is a deliberate whitelist: anything
- * not named here - narrow loads, which rebuild a halfword through
- * FRAME_SLOT_SCRATCH, and the VT_CMP / VT_JMP forms, which are not values at
- * all yet - falls back to the spill path.  Being absent is always safe.
- *
- * Word-size lvalues qualify even though they take two instructions
- * (`ldl p; ldnl 0`): the second consumes only what the first pushed, so the
- * pair is still net +1 and reads nothing underneath. */
-static int tp_push_sv_is_pure(const SValue *sv)
-{
-    int fr = sv->r;
-    int v  = fr & VT_VALMASK;
-    int bt = sv->type.t & VT_BTYPE;
-    int size = get_primitive_type_size(bt);
-
-    if (bt == VT_STRUCT)
-        return 0;
-    if (fr & VT_LVAL) {
-        /* narrower than a word (_Bool and the 16-bit floats included) is
-           a byte or halfword load; wider pushes its low word */
-        if (size < 4)
-            return 0;
-        return v == VT_CONST || v == VT_LOCAL || v == VT_LLOCAL ||
-               (v >= 0 && v < VT_CONST);
-    }
-    return v == VT_CONST || v == VT_LOCAL || v == VT_LLOCAL ||
-           (v >= 0 && v < VT_CONST);
-}
-
-/* Whether materialising `sv` reads or writes a workspace slot in [lo, hi).
- * A pseudo-register r is slot r; an impure load may go through the scratch
- * slots [TP_SCRATCH_BASE, FRAME_SLOT_MIN_LOCALS) (halfword loads use
- * SCRATCH/+1 or DBL_TMP/+1). */
-static int tp_push_sv_touches(const SValue *sv, int lo, int hi)
-{
-    int v = sv->r & VT_VALMASK;
-
-    if (v >= 0 && v < VT_CONST && v >= lo && v < hi)
-        return 1;
-    return !tp_push_sv_is_pure(sv) &&
-           lo < FRAME_SLOT_MIN_LOCALS && hi > TP_SCRATCH_BASE;
-}
-
-/* Push one call word while others already sit in workspace slots: the spills
- * and parked words [spill_lo, spill_hi), the stacked words stored so far
- * [area_lo, area_hi) and an indirect target in fn_slot (-1: none).  The
- * staging rules below - fresh spill slots, parking, late_impure - exist so
- * that the push touches none of them; emit_instr checks it, so a push that
- * breaks them (a new path through the scratch slots, say) stops the compile
- * instead of passing a clobbered argument, as c-testsuite 09003 once did. */
-static void tp_stage_push(SValue *sv, int spill_lo, int spill_hi,
-                          int area_lo, int area_hi, int fn_slot)
-{
-    tp_staged_lo[0] = spill_lo;
-    tp_staged_hi[0] = spill_hi;
-    tp_staged_lo[1] = area_lo;
-    tp_staged_hi[1] = area_hi;
-    tp_staged_lo[2] = fn_slot;
-    tp_staged_hi[2] = fn_slot < 0 ? fn_slot : fn_slot + 1;
-    tp_staging_push = 1;
-    tp_push_sv(sv);
-    tp_staging_push = 0;
-}
-
-/* Materialise the call words.  Returns the slot holding an indirect target
- * (-1 for a direct call).  *abc_slot is -1 when the register words are left
- * in A/B/C, else the first of the three slots holding them. */
-static int tp_stage_call_words(struct tp_call_words *cw, int nb_args,
-                               int callarg_debug, int *abc_slot)
-{
-    int i, arg_index;
-    int reg_words = cw->count > 3 ? 3 : cw->count;
-    int stack_words = cw->count > 3 ? (cw->count - 3) : 0;
-    int spill_base = stack_words;
-    int call_setup_words;
-    int indirect_fn_slot = -1;
-    SValue *fn_sv;
-    int is_direct;
-    int *parked = NULL;
-    int park_base, nparked = 0, park_fn = 0, late_impure = 0;
-
-    *abc_slot = -1;
-
-    /* Fast path: the first three ABI words go to A/B/C, and the hardware
-     * evaluation stack is exactly three deep, so when every one of them is a
-     * pure push they can simply be pushed in reverse ABI order and left where
-     * they land.  No spill, no reload.
-     *
-     * The slow path below exists because evaluating argument n generally needs
-     * the whole evaluation stack and would destroy arguments 0..n-1, so each
-     * one is written out to a workspace word (`stl s`) and read back
-     * (`ldl s`) once they are all in place.  That is two extra instructions
-     * and one extra stage-5 write per argument - and over a kernel corpus most
-     * arguments are a local, a constant or a value already sitting in a
-     * workspace slot, none of which need the stack at all.
-     *
-     * Reordering the pushes is sound precisely because they are pure: no push
-     * can observe or disturb another, so left-to-right and right-to-left
-     * produce the same three values.  (The arguments were fully evaluated by
-     * the front end long before this point; all that happens here is
-     * materialisation.)
-     *
-     * Restricted to calls with no stacked arguments: with stack_words > 0 the
-     * outgoing area is written before the register words are materialised, and
-     * keeping that order avoids reasoning about whether a stacked argument's
-     * store can alias a later argument's load. */
-    if (stack_words == 0 && reg_words > 0 && !tp_no_callopt()) {
-        int all_pure = 1;
-        for (i = 0; i < reg_words; i++) {
-            if (!tp_push_sv_is_pure(&cw->words[i])) {
-                all_pure = 0;
-                break;
-            }
-        }
-        if (all_pure) {
-            SValue *fn_sv = &vtop[-nb_args];
-            int is_direct = (fn_sv->r & VT_SYM) && !(fn_sv->r & VT_LVAL);
-
-            /* An indirect target has to be parked before the arguments go up,
-             * because materialising it needs the stack they would occupy. */
-            if (!is_direct) {
-                indirect_fn_slot = FRAME_SLOT_DBL_TMP;
-                tp_push_sv(fn_sv);
-                Tp_STL(indirect_fn_slot);
-            }
-            /* The DUP shortcut in tp_push_sv() compares against whatever was
-             * last left in AReg, which here is either nothing or the indirect
-             * target - neither of which is an argument. */
-            tp_areg_invalidate();
-            for (i = reg_words - 1; i >= 0; i--) {
-                if (callarg_debug) {
-                    fprintf(stderr,
-                            "[CALLARG_DIRECT] func=%s abi_word=%d r=0x%x bt=0x%x\n",
-                            funcname ? funcname : "<unknown>", i,
-                            cw->words[i].r, cw->words[i].type.t & VT_BTYPE);
-                }
-                tp_stage_push(&cw->words[i], 0, 0, 0, 0, indirect_fn_slot);
-            }
-            return indirect_fn_slot;
-        }
-    }
-
-    fn_sv = &vtop[-nb_args];
-    is_direct = (fn_sv->r & VT_SYM) && !(fn_sv->r & VT_LVAL);
-
-    if (stack_words > 0 && spill_base < func_max_slot_used + 1)
-        spill_base = func_max_slot_used + 1;
-
-    /* Stacked word a is stored to Wptr[a-3], top down, so no word pushed
-     * after it may touch Wptr[a-2 .. stack_words-1]: a pseudo-register
-     * holding a later word's value or address, or the scratch slots an
-     * impure load goes through, can lie inside the staging area once it
-     * is large enough.  Such words are parked above the spills before the
-     * first store, and so is an indirect target that would read the area,
-     * or be written into FRAME_SLOT_DBL_TMP inside it or over a spill. */
-    if (stack_words > 0) {
-        parked = tcc_malloc(cw->count * sizeof(int));
-        for (arg_index = 3; arg_index < cw->count; arg_index++) {
-            parked[arg_index] = -1;
-            if (tp_push_sv_touches(&cw->words[arg_index], arg_index - 2,
-                                   stack_words))
-                parked[arg_index] = nparked++;
-        }
-        park_fn = !is_direct &&
-                  (tp_push_sv_touches(fn_sv, 0, stack_words) ||
-                   FRAME_SLOT_DBL_TMP < stack_words ||
-                   (FRAME_SLOT_DBL_TMP >= spill_base &&
-                    FRAME_SLOT_DBL_TMP < spill_base + reg_words));
-        if (park_fn)
-            nparked++;
-
-        /* Spills and parked words must also survive every push after the
-         * first spill, and an impure one may use any scratch slot.
-         * spill_base came from func_max_slot_used *so far*, which says
-         * nothing about the scratch a push still to come will use: when a
-         * two-sb 16-bit store (slot 15 only) was the function's one earlier
-         * scratch use, c-testsuite 09003's printf spills landed on
-         * FRAME_SLOT_DBL_TMP and the -mt800 halfword loads of the next
-         * arguments overwrote them.  Keep them out of the scratch region. */
-        for (i = 1; i < cw->count; i++)
-            if (!tp_push_sv_is_pure(&cw->words[i]))
-                late_impure = 1;
-        if (!is_direct && !tp_push_sv_is_pure(fn_sv))
-            late_impure = 1;
-        if (late_impure && spill_base < FRAME_SLOT_MIN_LOCALS &&
-            spill_base + reg_words + nparked > TP_SCRATCH_BASE)
-            spill_base = FRAME_SLOT_MIN_LOCALS;
-    }
-    park_base = spill_base + reg_words;
-
-    call_setup_words = park_base + nparked;
-    if (call_setup_words < stack_words)
-        call_setup_words = stack_words;
-    if (call_setup_words > func_max_outgoing_words)
-        func_max_outgoing_words = call_setup_words;
-    if (stack_words > func_max_stack_words)
-        func_max_stack_words = stack_words;
-
-    for (i = 0; i < reg_words; i++) {
-        int spill_slot = spill_base + i;
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_REG_MAT] func=%s abi_word=%d spill=%d r=0x%x v=0x%x bt=0x%x c.i=%ld lval=%d\n",
-                    funcname ? funcname : "<unknown>", i, spill_slot,
-                    cw->words[i].r, cw->words[i].r & VT_VALMASK,
-                    cw->words[i].type.t & VT_BTYPE, (long)cw->words[i].c.i,
-                    (cw->words[i].r & VT_LVAL) != 0);
-        }
-        tp_stage_push(&cw->words[i], spill_base, spill_slot, 0, 0, -1);
-        Tp_STL(spill_slot);
-    }
-
-    if (parked) {
-        int k = 0;
-
-        for (arg_index = 3; arg_index < cw->count; arg_index++) {
-            if (parked[arg_index] < 0)
-                continue;
-            parked[arg_index] = park_base + k;
-            tp_stage_push(&cw->words[arg_index], spill_base, park_base + k,
-                          0, 0, -1);
-            Tp_STL(parked[arg_index]);
-            k++;
-        }
-        if (park_fn) {
-            indirect_fn_slot = park_base + k;
-            tp_stage_push(fn_sv, spill_base, indirect_fn_slot, 0, 0, -1);
-            Tp_STL(indirect_fn_slot);
-        }
-    }
-
-    for (arg_index = cw->count - 1; arg_index >= 3; arg_index--) {
-        int slot_off = (arg_index - 3) * 4;
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_STACK] func=%s abi_word=%d slot_off=%d r=0x%x v=0x%x bt=0x%x c.i=%ld lval=%d\n",
-                    funcname ? funcname : "<unknown>", arg_index, slot_off,
-                    cw->words[arg_index].r, cw->words[arg_index].r & VT_VALMASK,
-                    cw->words[arg_index].type.t & VT_BTYPE,
-                    (long)cw->words[arg_index].c.i,
-                    (cw->words[arg_index].r & VT_LVAL) != 0);
-        }
-        if (parked && parked[arg_index] >= 0)
-            Tp_LDL(parked[arg_index]);
-        else
-            tp_stage_push(&cw->words[arg_index], spill_base,
-                          park_base + nparked, arg_index - 2, stack_words, -1);
-        Tp_STL(slot_off / 4);
-    }
-    tcc_free(parked);
-
-    if (!is_direct && !park_fn) {
-        indirect_fn_slot = FRAME_SLOT_DBL_TMP;
-        tp_stage_push(fn_sv, spill_base, park_base + nparked, 0, stack_words,
-                      -1);
-        Tp_STL(indirect_fn_slot);
-    }
-
-    /* An indirect call stores the register words below Wptr from slots;
-     * with stacked words, hand it the spills, which lie clear of the
-     * staging area, rather than reloading them for it to park again at
-     * FRAME_SLOT_SPILL_A..C, which the area can cover. */
-    if (!is_direct && stack_words > 0) {
-        *abc_slot = spill_base;
-        goto ready;
-    }
-
-    for (i = reg_words - 1; i >= 0; i--) {
-        int spill_slot = spill_base + i;
-        if (callarg_debug) {
-            fprintf(stderr,
-                    "[CALLARG_REG_LDL] func=%s abi_word=%d spill=%d\n",
-                    funcname ? funcname : "<unknown>", i, spill_slot);
-        }
-        Tp_LDL(spill_slot);
-    }
-
-ready:
-    if (callarg_debug) {
-        fprintf(stderr,
-                "[CALLARG_READY] func=%s nb_args=%d call_words=%d reg_words=%d stack_words=%d vtop_r=0x%x\n",
-                funcname ? funcname : "<unknown>", nb_args, cw->count,
-                reg_words, stack_words, vtop ? vtop->r : -1);
-        fflush(stderr);
-    }
-
-    return indirect_fn_slot;
-}
-
-/* Bytes reserved for a direct call's prefixes and opcode. */
-#define TP_CALL_SLOT 6
-
-/* Width of the slot for a direct call to `sym`, storing the callee's section
- * offset in *target when it is narrower than TP_CALL_SLOT.
- *
- * A callee this object already holds earlier in the same section gets only
- * the width its displacement needs, and nothing afterwards can lengthen that
- * displacement: tp_relax_function() treats the call as a branch to the fixed
- * target (near_call_log), the linker keeps an input section's bytes in
- * order, and ICF never folds a function a narrowed call reaches
- * (tp_icf_fold).  Left out are inline functions, whose per-object outlines
- * are what ICF folds into one copy: a narrowed call would keep every outline
- * alive.  (An earlier attempt, before the ICF guard, narrowed those too and
- * the kernel link failed with 32 IPREL_PATCH_FAIL, e.g. current_thread_info.)
- * Also left out are weak definitions, which a strong one elsewhere replaces.
- * Forward and external callees keep TP_CALL_SLOT.
- *
- * Nothing is emitted under nocode_wanted (typeof, sizeof, dead code), so
- * nothing may be logged either: an entry at the frozen `ind` would describe
- * whatever is emitted there next - in the kernel, a full-width call to
- * another function, which the relaxer then re-targeted. */
-static int tp_call_slot_width(Sym *sym, int *target)
-{
-    ElfSym *es;
-    int w;
-
-    if (nocode_wanted || !sym->c || (sym->type.t & VT_INLINE) || sym->a.weak)
-        return TP_CALL_SLOT;
-    es = elfsym(sym);
-    if (!es || es->st_shndx != cur_text_section->sh_num
-        || ELFW(ST_BIND)(es->st_info) == STB_WEAK
-        || (int)es->st_value > ind)
-        return TP_CALL_SLOT;
-    for (w = 1; w < TP_CALL_SLOT; w++)
-        if (tp_encode_len(TP_OP_CALL, (int)es->st_value - (ind + w)) <= w)
-            break;
-    *target = (int)es->st_value;
-    return w;
-}
-
-static void tp_emit_call_target(int call_word_count, int indirect_fn_slot,
-                                int abc_slot, int callarg_debug)
-{
-    if ((vtop->r & VT_SYM) && !(vtop->r & VT_LVAL)) {
-        int i, target = 0;
-        int w = tp_call_slot_width(vtop->sym, &target);
-        greloc(cur_text_section, vtop->sym, ind, R_TRANSPUTER_IPREL32);
-        if (tp_debug_check()) {
-            fprintf(stderr, "[CALL_DEBUG] func=%s call_to=%s at ind=0x%x\n",
-                    funcname ? funcname : "<unknown>",
-                    get_tok_str(vtop->sym->v, NULL), ind);
-        }
-        if (tp_gen_sym_filter) {
-            const char *name = get_tok_str(vtop->sym->v, NULL);
-            if (name && strstr(name, tp_gen_sym_filter)) {
-                int bt = vtop->type.t & VT_BTYPE;
-                fprintf(stderr,
-                        "GEN_RELOC: kind=call sym=%s type=%d bt=0x%x file=%s line=%d\n",
-                        name, R_TRANSPUTER_IPREL32, bt,
-                        file ? file->filename : "<unknown>",
-                        file ? file->line_num : -1);
-            }
-        }
-        /* Six bytes carry a 24-bit displacement, +/-16 MB, which reaches any
-         * call within one image; a full 32-bit operand would take eight, and
-         * calls are a quarter of all kernel code, so the two spare bytes were
-         * 6% of it.  The linker re-encodes the slot and fails the link for a
-         * target out of reach, except an unresolved one at address 0, which
-         * it handles itself (tp_patch_iprel).  A callee already behind us in
-         * this section gets a narrower slot, holding the real displacement
-         * (front-padded with pfix 0 where the shortest encoding is shorter
-         * still); see tp_call_slot_width. */
-        if (w < TP_CALL_SLOT) {
-            uint8_t enc[16];
-            int len = tp_encode_instr(enc, TP_OP_CALL, target - (ind + w));
-            near_call_add(ind, target);
-            for (i = len; i < w; i++)
-                g((TP_OP_PFIX << 4) | 0);
-            for (i = 0; i < len; i++)
-                g(enc[i]);
-        } else {
-            for (i = 0; i < TP_CALL_SLOT - 1; i++)
-                g((TP_OP_PFIX << 4) | 0);
-            g((TP_OP_CALL << 4) | 0);
-        }
-        if (callarg_debug) {
-            fprintf(stderr, "[CALLARG_CALL_DIRECT] func=%s sym=%s ind=0x%x\n",
-                    funcname ? funcname : "<unknown>",
-                    vtop->sym ? get_tok_str(vtop->sym->v, NULL) : "<null>",
-                    ind);
-            fflush(stderr);
-        }
-    } else {
-        int num_reg_args = call_word_count > 3 ? 3 : call_word_count;
-
-        if (abc_slot < 0) {
-            abc_slot = FRAME_SLOT_SPILL_A;
-            if (num_reg_args >= 1)
-                Tp_STL(FRAME_SLOT_SPILL_A);
-            if (num_reg_args >= 2)
-                Tp_STL(FRAME_SLOT_SPILL_B);
-            if (num_reg_args >= 3)
-                Tp_STL(FRAME_SLOT_SPILL_C);
-        }
-
-        if (num_reg_args >= 3) {
-            Tp_LDL(abc_slot + 2);
-            Tp_LDLP(0);
-            Tp_STNL(-1);
-        }
-        if (num_reg_args >= 2) {
-            Tp_LDL(abc_slot + 1);
-            Tp_LDLP(0);
-            Tp_STNL(-2);
-        }
-        if (num_reg_args >= 1) {
-            Tp_LDL(abc_slot);
-            Tp_LDLP(0);
-            Tp_STNL(-3);
-        }
-
-        emit_instr(TP_OP_AJW, -4);
-
-        {
-            uint8_t enc_buf[8];
-            int fn_slot_shifted = indirect_fn_slot + 4;
-            int ldl_len = tp_encode_instr(enc_buf, TP_OP_LDL, fn_slot_shifted);
-            int skip = 1 + ldl_len + 1;
-            emit_instr(TP_OP_LDC, skip);
-            Tp_OPR(TP_OPR_LDPI);
-            Tp_STL(0);
-        }
-
-        Tp_LDL(indirect_fn_slot + 4);
-        Tp_OPR(TP_OPR_GCALL);
-
-        if (callarg_debug) {
-            fprintf(stderr, "[CALLARG_CALL_INDIRECT] func=%s fn_slot=%d ind=0x%x\n",
-                    funcname ? funcname : "<unknown>", indirect_fn_slot, ind);
-            fflush(stderr);
-        }
-    }
-}
-
-ST_FUNC void gfunc_call(int nb_args) {
-    /* Function call - TCWG calling convention:
-     * - First 3 args already in Areg, Breg, Creg
-     * - Additional args on workspace (not implemented yet)
-     * - CALL instruction:
-     *   1. Stores Iptr, Areg, Breg, Creg at new Wptr
-     *   2. Adjusts Wptr down by 4 words
-     *   3. Jumps to target address (in Areg before CALL)
-     * - Function address should be in vtop (TOS)
-     *
-     * vstack management:
-     * - TCC's frontend pushes all arguments including any hidden struct return pointer
-     * - nb_args includes the hidden pointer if present
-     * - We pop ALL arguments (nb_args entries)
-     * - We pop the function address (1 entry)
-     * - TCC's frontend will push the return value after gfunc_call returns
-     *   (see tccgen.c lines 6275-6289: vsetc() after gfunc_call)
-     */
-
-    int i;
-    int callarg_debug = tp_callarg_debug;
-    struct tp_call_words call_words;
-    int indirect_fn_slot, abc_slot;
-    /* The callee's return type, read before the argument pops move vtop.
-     * VT_INT is the conservative fallback: it captures AReg only, which is
-     * what R_RET() names for every non-float, non-64-bit type. */
-    int ret_type_t = VT_INT;
-    /* An old-style callee's declared type says nothing about what the caller
-     * reads back: gen_opl() and the conversion helpers call __divdi3 & co.
-     * through func_old_type ("int f()") and then read REG_IRET/REG_IRE2 or
-     * the float slots themselves.  Capture every result word for those. */
-    int capture_all = 1;
-
-    {
-        SValue *fsv = vtop - nb_args;
-        if (fsv >= vstack && (fsv->type.t & VT_BTYPE) == VT_FUNC &&
-            fsv->type.ref) {
-            ret_type_t = fsv->type.ref->type.t;
-            capture_all = fsv->type.ref->f.func_type == FUNC_OLD;
-        }
-    }
-
-    call_words.words = NULL;
-    call_words.count = 0;
-    call_words.cap = 0;
-
-    if (callarg_debug) {
-        fprintf(stderr, "[CALLARG_ENTER] func=%s nb_args=%d vtop_r=0x%x\n",
-                funcname ? funcname : "<unknown>", nb_args, vtop ? vtop->r : -1);
-        fflush(stderr);
-    }
-    if (tp_try_inline_memcpy(nb_args)) {
-        if (callarg_debug) {
-            fprintf(stderr, "[CALLARG_MEMCPY_INLINE] func=%s ind=0x%x nb_args=%d\n",
-                    funcname ? funcname : "<unknown>", ind, nb_args);
-            fflush(stderr);
-        }
-        return;
-    }
-    if (tp_try_inline_local_zero_memset(nb_args)) {
-        if (callarg_debug) {
-            fprintf(stderr, "[CALLARG_MEMSET_INLINE] func=%s ind=0x%x nb_args=%d\n",
-                    funcname ? funcname : "<unknown>", ind, nb_args);
-            fflush(stderr);
-        }
-        return;
-    }
-
-    /* Save any register-held values to the stack before the call.
-     * This matches x86 (save_regs(nb_args+1)) and ARM behavior.
-     * Without this, values cached in registers would be clobbered by CALL. */
-    save_regs(nb_args + 1);
-
-    tp_expand_call_words(&call_words, nb_args, callarg_debug);
-    indirect_fn_slot = tp_stage_call_words(&call_words, nb_args, callarg_debug,
-                                           &abc_slot);
-
-    /* Pop all arguments from vstack */
-    for (i = 0; i < nb_args; i++) {
-        vtop--;
-    }
-
-    /* Now vtop points to the function address.
-     * For direct calls with a symbol, emit a relocation so the linker can patch the offset.
-     * For indirect calls (function pointers), we would need GCALL instead.
-     */
-    tp_emit_call_target(call_words.count, indirect_fn_slot, abc_slot,
-                        callarg_debug);
-
-    /* Pop function address from vstack */
-    vtop--;
-
-    /* Capture the ABI result words from A/B into workspace slots.
-     *
-     * Only the slots the front end will actually read are worth writing.
-     * tccgen labels the call's result with PUT_R_RET(), i.e. R_RET(t) and
-     * R2_RET(t) of the callee's *return type*, so those two macros decide
-     * exactly which of REG_IRET / REG_IRE2 / REG_FRET / REG_FRET+1 can ever
-     * be read afterwards:
-     *
-     *   float            -> FRET
-     *   double           -> FRET, FRET+1
-     *   long long        -> IRET, IRE2
-     *   anything else    -> IRET
-     *
-     * This used to store all four unconditionally - six instructions, four of
-     * them writes, after every single call - and a write is the T9000's
-     * scarcest pipeline resource: stage 5 issues one per cycle, so each one
-     * closes an instruction group, and an STL burns a stage-2 address
-     * calculation on top.  Over a kernel corpus that was ~10% of the whole
-     * instruction stream spent copying words nothing reads.
-     *
-     * Anything left in BReg afterwards is dead: save_regs() above has already
-     * spilled every vstack entry that is not an argument to this call, so no
-     * live value names a register here, and the value the front end pushes
-     * next names only the slots written below.
-     *
-     * The eval-stack scheduler models the depth after a call as 2 and it stays
-     * correct: dropping a store leaves the corresponding word in place, which
-     * is exactly the depth the model already assumes. */
-    if (tp_no_callopt() || capture_all) {
-        /* Old-style callee (see capture_all), or the bisection escape hatch:
-         * the unconditional four-slot capture. */
-        emit_instr(TP_OP_STL, REG_IRET);
-        emit_instr(TP_OP_STL, REG_IRE2);
-        Tp_LDL(REG_IRET);
-        emit_instr(TP_OP_STL, REG_FRET);
-        Tp_LDL(REG_IRE2);
-        emit_instr(TP_OP_STL, REG_FRET + 1);
-    } else {
-        int bt = ret_type_t & VT_BTYPE;
-
-        if (is_float(ret_type_t)) {
-            emit_instr(TP_OP_STL, REG_FRET);
-            if (bt == VT_DOUBLE || bt == VT_LDOUBLE)
-                emit_instr(TP_OP_STL, REG_FRET + 1);
-        } else {
-            emit_instr(TP_OP_STL, REG_IRET);
-            if (bt == VT_LLONG)
-                emit_instr(TP_OP_STL, REG_IRE2);
-        }
-    }
-    abcreg_stack_depth = 0;
-
-    /* A call clobbers the hardware A/B/C evaluation stack.  The return-word
-     * capture above reconstructs only the ABI result, not any value that was
-     * cached before the call.  Leaving this tag live can make the next
-     * tp_push_sv() emit DUP instead of reloading its local; Linux rwsem then
-     * forwards a post-call workspace value as the semaphore pointer. */
-    tp_areg_invalidate();
-
-    if (callarg_debug) {
-        fprintf(stderr, "[CALLARG_EXIT] func=%s ind=0x%x\n",
-                funcname ? funcname : "<unknown>", ind);
-        fflush(stderr);
-    }
-
-    tcc_free(call_words.words);
-}
-
-ST_FUNC void gfunc_return(CType *func_type) {
-    /* Handle struct returns - structs may occupy multiple vstack entries */
-    if ((func_type->t & VT_BTYPE) == VT_STRUCT) {
-        CType type, ret_type;
-        int ret_align, ret_nregs, regsize;
-
-        /* Query how many registers are needed for this struct */
-        ret_nregs = gfunc_sret(func_type, func_var, &ret_type,
-                               &ret_align, &regsize);
-
-        if (ret_nregs < 0) {
-            /* Struct returned via hidden pointer (already handled) */
-            /* vstore() already consumed vstack, just pop final entry */
-        } else if (ret_nregs == 0) {
-            /* Copy to implicit first pointer arg location.
-             * vstore() calls gen_struct_copy() which now properly manages vstack. */
-            type = *func_type;
-            mk_pointer(&type);
-            vset(&type, VT_LOCAL | VT_LVAL, func_vc);
-            indir();
-            vswap();
-            vstore();
-            /* vstore+gen_struct_copy consumed both source and dest, leaving dest_copy.
-             * The final vtop-- at the end of this function will pop it. */
-        } else {
-            /* For Transputer, return values are typically in AReg */
-            gv(RC_INT);
-        }
-    } else {
-        /* Simple return: load into return register
-         *
-         * CRITICAL FIX (2026-01-17): gv(r) stores the value into
-         * workspace slot r (slot 7 for int), but RET expects the return
-         * value in AReg (hardware A register). We must explicitly load
-         * from the workspace slot into AReg before returning.
-         */
-        int bt = func_type->t & VT_BTYPE;
-        if (bt != VT_VOID) {
-            /* Cleanups / prior calls may have left a stale AReg tag or
-             * clobbered slot 7.  Force a full rematerialize into IRET and
-             * then into hardware A so RET sees the true return value. */
-            tp_areg_invalidate();
-            gv(RC_IRET);  /* Load return value into REG_IRET (workspace slot 7) */
-
-            /* Load from slot back to Hardware Stack */
-            if (bt == VT_LLONG || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-                /* 64-bit return: Needs 2 stack entries.
-                   Order depends on calling convention (A=Low vs A=High).
-                   Assuming A=Low, B=High:
-                */
-                Tp_LDL(REG_IRE2); /* Load High (Slot 8) -> A */
-                Tp_LDL(REG_IRET); /* Load Low  (Slot 7) -> A, pushes High to B */
-            } else {
-                /* The caller takes the result from AReg, and this entry
-                 * is popped below, so nothing reads slot 7 again: the
-                 * `stl 7` gv() just parked it with cancels, and `return
-                 * x;` is `ldl x` rather than `ldl x; stl 7; ldl 7`. */
-                tp_push_reg_or_cancel_stl(REG_IRET, vtop);
-            }
-        }
-    }
-
-    /* Pop final vstack entry - do this once at the end like ARM64 */
-    vtop--;
-}
-
-/* Push a vstack entry's value onto the hardware eval stack.
- * Unlike load(REG_IRET, ...), this ALWAYS generates code to push
- * the value, even if it's conceptually "already in REG_IRET". */
-static void tp_push_sv(SValue *sv) {
-    int fr = sv->r;
-    int v = fr & VT_VALMASK;
-    int bt = sv->type.t & VT_BTYPE;
-    int is_unsigned = (sv->type.t & VT_UNSIGNED) != 0 || bt == VT_BF16 || bt == VT_F16
-                      || bt == VT_FLOAT16;
-    int size = get_primitive_type_size(bt);
-
-    if (size > 4)
-        size = 4;   /* one word: the low half of a two-word value */
-
-    /* DUP optimization: if AReg already holds the value we want, DUP it
-     * instead of reloading from workspace. Only for word-size local lvals
-     * and rvalues in workspace slots (the common case). */
-    if (tp_areg_tag != TP_AREG_TAG_NONE && !tp_t414()) {
-        int want_tag = TP_AREG_TAG_NONE;
-        if ((fr & VT_LVAL) && v == VT_LOCAL && size == 4) {
-            want_tag = TP_AREG_TAG_LOCAL_BASE + (int)sv->c.i;
-        } else if (!(fr & VT_LVAL) && v < VT_CONST && v >= 0) {
-            want_tag = TP_AREG_TAG_REG_BASE + v;
-        }
-        if (want_tag != TP_AREG_TAG_NONE && want_tag == tp_areg_tag) {
-            Tp_DUP();
-            tp_areg_tag = want_tag;  /* restore tag — DUP doesn't change AReg */
-            return;
-        }
-    }
-    tp_areg_invalidate();
-
-    if (fr & VT_LVAL) {
-        /* Lvalue: load from memory */
-        if (v == VT_LOCAL) {
-            if (size == 1) {
-                /* Byte load: use byte-addressed LDLP + LB.
-                 * LDL truncates non-word-aligned offsets, so sbuf[1]
-                 * at byte offset -3 would read from the same word as
-                 * sbuf[0] at offset -4.  LDLP + ADC + LB is correct
-                 * for any byte position within a word. */
-                emit_local_addr(sv->c.i);
-                abcreg_push(1);
-                if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
-                    Tp_LBX();
-                } else {
-                    Tp_LB();                    /* zero-extends */
-                    if (!is_unsigned)
-                        tp_sign_extend(8, 1);
-                }
-            } else if (size == 2 && tp_t9000_half_ok((int)sv->c.i, sv->r)) {
-                emit_local_addr(sv->c.i);
-                abcreg_push(1);
-                if (is_unsigned) Tp_LS(); else Tp_LSX();
-            } else if (size == 2) {
-                /* Halfword load: use two byte loads to handle
-                 * arbitrary byte alignment within a word. */
-                emit_local_addr(sv->c.i);
-                abcreg_push(1);
-                Tp_STL(FRAME_SLOT_SCRATCH);
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_LB();
-                Tp_STL(FRAME_SLOT_SCRATCH + 1);  /* low byte */
-
-                Tp_LDL(FRAME_SLOT_SCRATCH);
-                Tp_ADC(1);
-                Tp_LB();
-                Tp_LDC(8);
-                Tp_SHL();
-                Tp_LDL(FRAME_SLOT_SCRATCH + 1);
-                Tp_OR();
-
-                /* two zero-extended bytes: already 0..0xFFFF */
-                if (!is_unsigned)
-                    tp_sign_extend(16, 1);
-            } else {
-                /* Word or larger: LDL is correct (always word-aligned). */
-                emit_local_op(TP_OP_LDL, sv->c.i);
-                abcreg_push(1);
-            }
-        } else {
-            int addr_in_areg = 0;
-
-            if (v == VT_CONST) {
-                if (fr & VT_SYM) {
-                    int i;
-                    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                    for (i = 0; i < 7; i++) g((TP_OP_PFIX << 4) | 0);
-                    g((TP_OP_LDC << 4) | 0);
-                    abcreg_push(1);
-                    if (sv->c.i) Tp_ADC(sv->c.i);
-                } else {
-                    Tp_LDC(sv->c.i);
-                }
-                addr_in_areg = 1;
-            } else if (v == VT_LLOCAL) {
-                emit_local_op(TP_OP_LDL, sv->c.i);
-                abcreg_push(1);
-                addr_in_areg = 1;
-            } else if (v < VT_CONST) {
-                /* Pointer in workspace slot */
-                Tp_LDL(v);
-                addr_in_areg = 1;
-            }
-
-            if (addr_in_areg) {
-                if (size == 1) {
-                    if (!is_unsigned && tp_have_t9000_feat(TP_T9K_LOAD8)) {
-                        Tp_LBX();
-                    } else {
-                        Tp_LB();                    /* zero-extends */
-                        if (!is_unsigned)
-                            tp_sign_extend(8, 1);
-                    }
-                } else if (size == 2 && tp_t9000_half_ptr_ok(sv->r,
-                               (v == VT_CONST) ? (long long)sv->c.i : 0)) {
-                    if (is_unsigned) Tp_LS(); else Tp_LSX();
-                } else if (size == 2) {
-                    /* LDNL word-aligns its address — the emulator masks with
-                     * MemWordMask — so LDNL 0 on a halfword sitting at byte
-                     * offset 2 mod 4 silently reads the *containing word*, and
-                     * the 0xFFFF mask below then yields the neighbouring
-                     * field. `struct { u16 a, b; }` passed as p->b returned
-                     * p->a, with no diagnostic. Rebuild from two byte loads,
-                     * exactly as the VT_LOCAL path above already does for the
-                     * same reason. */
-                    /* NOT FRAME_SLOT_SCRATCH/+1: those alias
-                     * FRAME_SLOT_SPILL_A/SPILL_B, which hold the spilled
-                     * A/B registers while a call's arguments are being
-                     * staged — and staging arguments is exactly when this
-                     * path runs. Use the dedicated 64-bit temp pair. */
-                    Tp_STL(FRAME_SLOT_DBL_TMP);          /* address */
-
-                    Tp_LDL(FRAME_SLOT_DBL_TMP);
-                    Tp_LB();
-                    Tp_STL(FRAME_SLOT_DBL_TMP + 1);      /* low byte */
-
-                    Tp_LDL(FRAME_SLOT_DBL_TMP);
-                    Tp_ADC(1);
-                    Tp_LB();
-                    Tp_LDC(8);
-                    Tp_SHL();
-                    Tp_LDL(FRAME_SLOT_DBL_TMP + 1);
-                    Tp_OR();
-
-                    /* two zero-extended bytes: already 0..0xFFFF */
-                    if (!is_unsigned)
-                        tp_sign_extend(16, 1);
-                } else {
-                    Tp_LDNL(0);
-                }
-            }
-        }
-    } else {
-        /* Rvalue */
-        if (v == VT_CONST) {
-            if (fr & VT_SYM) {
-                int i;
-                greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-                for (i = 0; i < 7; i++) g((TP_OP_PFIX << 4) | 0);
-                g((TP_OP_LDC << 4) | 0);
-                abcreg_push(1);
-                if (sv->c.i) Tp_ADC(sv->c.i);
-            } else {
-                tp_ldc_pooled(sv->c.i);
-            }
-        } else if (v == VT_LOCAL) {
-            /* VT_LOCAL rvalue is an address of a local object. */
-            emit_local_addr(sv->c.i);
-            abcreg_push(1);
-        } else if (v == VT_LLOCAL) {
-            /* Spilled address value in a local slot. */
-            emit_local_op(TP_OP_LDL, sv->c.i);
-            abcreg_push(1);
-        } else if (v < VT_CONST) {
-            /* Value in workspace slot */
-            Tp_LDL(v);
-        }
-    }
-
-    /* Set DUP tag for trackable cases */
-    if ((fr & VT_LVAL) && v == VT_LOCAL && size == 4) {
-        tp_areg_tag = TP_AREG_TAG_LOCAL_BASE + (int)sv->c.i;
-    } else if (!(fr & VT_LVAL) && v < VT_CONST && v >= 0) {
-        tp_areg_tag = TP_AREG_TAG_REG_BASE + v;
-    } else {
-        tp_areg_tag = TP_AREG_TAG_NONE;
-    }
-}
-
-static int gen_ptradd_wsub_gv2(void);
-
-/* A pointer-arithmetic base must be a genuine runtime value. A literal base
- * (VT_CONST with no symbol) is the offsetof idiom `((T *)0)->m`, which appears
- * inside constant expressions — emitting an instruction sequence for it makes
- * the expression non-constant and the parser rejects it. Let those fall through
- * to the generic lowering, which constant-folds. */
-static int tp_operand_is_simple(const SValue *sv);
-static void tp_push_simple(const SValue *sv);
-
-static int tp_ptradd_base_ok(const SValue *sv)
-{
-    /* A symbol address is a real runtime base and is fine; a bare literal is
-     * the offsetof idiom and must be left to constant folding. */
-    if ((sv->r & VT_VALMASK) == VT_CONST)
-        return (sv->r & VT_SYM) != 0;
-    return 1;
-}
-
-/* Emit the absolute address of a symbol: a relocation plus the 8-nibble
- * placeholder the linker rewrites, matching load()/gen_store_addr. */
-static void tp_push_sym_addr(const SValue *sv)
-{
-    int i;
-
-    greloc(cur_text_section, sv->sym, ind, R_TRANSPUTER_LDC_ABS);
-    for (i = 0; i < 7; i++)
-        g((TP_OP_PFIX << 4) | 0);
-    g((TP_OP_LDC << 4) | 0);
-    abcreg_push(1);
-    if (sv->c.i)
-        Tp_ADC((int)sv->c.i);
-}
-
-/* Bases additionally allow a symbol address, which tp_operand_is_simple
- * rejects. Global and static arrays are the overwhelmingly common subscript
- * base in kernel code, and excluding them kept WSUB down at 0.08% of emitted
- * instructions — leaving the index scaling on the contended ALU as
- * DUP/SUM/DUP/SUM instead of one address-stage WSUB. */
-static int tp_ptradd_base_is_simple(const SValue *sv)
-{
-    if (tp_operand_is_simple(sv))
-        return 1;
-    if (sv->r & (VT_LVAL | VT_MUSTCAST | VT_MUSTBOUND | VT_BOUNDED))
-        return 0;
-    if ((sv->r & VT_VALMASK) != VT_CONST || !(sv->r & VT_SYM))
-        return 0;
-    return get_primitive_type_size(sv->type.t & VT_BTYPE) == 4;
-}
-
-static void tp_push_base(const SValue *sv)
-{
-    if ((sv->r & VT_VALMASK) == VT_CONST && (sv->r & VT_SYM))
-        tp_push_sym_addr(sv);
-    else
-        tp_push_simple(sv);
-}
-
-/* Can this SValue be pushed onto the eval stack with a single instruction? */
-static int tp_operand_is_simple(const SValue *sv)
-{
-    int v = sv->r & VT_VALMASK;
-
-    if (sv->r & (VT_SYM | VT_MUSTCAST | VT_MUSTBOUND | VT_BOUNDED))
-        return 0;
-    if (get_primitive_type_size(sv->type.t & VT_BTYPE) != 4)
-        return 0;
-    if (sv->r & VT_LVAL)
-        return v == VT_LOCAL;
-    return v == VT_CONST || (v >= TREG_W0 && v < NB_REGS);
-}
-
-static void tp_push_simple(const SValue *sv)
-{
-    int v = sv->r & VT_VALMASK;
-
-    if (sv->r & VT_LVAL) {
-        emit_local_op(TP_OP_LDL, sv->c.i);
-        abcreg_push(1);
-    } else if (v == VT_CONST) {
-        tp_ldc_pooled((int)sv->c.i);
-    } else {
-        Tp_LDL(v);
-    }
-}
-
-/* `base + constant` costs no code at all when the base is the address of a
- * local (a frame offset) or of a symbol (a link-time constant): the generic
- * lowering scales the index, and gen_opic folds it into the offset, so the
- * element is then one ldl/ldlp, or one ldnl off the symbol.  The indexed fast
- * paths would instead park the base in a register and add to it -
- * `float p[3]; p[0]` cost `ldlp 15; stl 9; ldc 0; stl 10; ldl 10; ldl 9;
- * wsub; stl 9` before the access.  The conditions are gen_opic's own. */
-static int tp_ptradd_const_folds(void)
-{
-    int br = vtop[-1].r;
-
-    if ((vtop[0].r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
-        return 0;
-    return (br & (VT_VALMASK | VT_LVAL)) == VT_LOCAL ||
-           (br & (VT_VALMASK | VT_LVAL | VT_SYM)) == (VT_CONST | VT_SYM);
-}
-
-/* T800 fast path for pointer arithmetic on 4-byte (word) elements. */
-ST_FUNC int gen_ptradd_wsub(void) {
-    if (tp_ptradd_const_folds())
-        return 0;
-    /* Push index then base straight onto the eval stack, so `a[i]` becomes
-     * LDL i; LDL a; WSUB; STL r. Routing through gv2 first spills both
-     * operands to fresh slots and reloads them, doubling the instruction
-     * count for the most common addressing form in the kernel and in
-     * CoreMark's list and matrix loops. */
-    if (!nocode_wanted && tp_ptradd_base_ok(&vtop[-1]) &&
-        tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
-        SValue base = vtop[-1];
-        SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
-        int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
-        int index_const = !(index.r & VT_LVAL) && iv == VT_CONST;
-        int dest;
-
-        abcreg_stack_depth = 0;
-        if (index_const) {
-            /* Compiler writer's guide 5.4.2: the address of component e of a
-             * word-addressed structure Wa is either `e; Wa; wsub` or, for a
-             * literal subscript, simply `Wa; ldnlp e`. The second form drops
-             * the LDC entirely.  Index 0 is just the base (no ldnlp 0). */
-            tp_push_base(&base);
-            if ((int)index.c.i != 0)
-                emit_instr(TP_OP_LDNLP, (int)index.c.i);
-        } else {
-            /* Variable index: push index then base → `ldl i; ldl a; wsub`
-             * so the T9000 grouper packs L2+A1 (textbook a[i] form). */
-            tp_push_simple(&index);
-            tp_push_base(&base);
-            Tp_WSUB();
-        }
-
-        vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
-        vtop->r = dest;
-        Tp_STL(dest);
-        return 1;
-    }
-    return gen_ptradd_wsub_gv2();
-}
-
-static int gen_ptradd_wsub_gv2(void) {
-    SValue sv_base, sv_index;
-    int result_v;
-
-    gv2(RC_INT, RC_INT);
-    sv_base = vtop[-1];
-    sv_index = vtop[0];
-
-    abcreg_stack_depth = 0;
-    tp_push_sv(&sv_index);  /* push index first so it lands in BReg */
-    tp_push_sv(&sv_base);   /* AReg = base, BReg = index */
-
-    Tp_WSUB();              /* result = base + index * 4 */
-    vtop--;
-
-    result_v = vtop->r & VT_VALMASK;
-    if (result_v < VT_CONST) {
-        Tp_STL(result_v);
-    }
-    return 1;
-}
-
-/* Pointer arithmetic on 1-byte elements.
- *
- * `bsub` computes AReg + BReg and is numerically identical to `sum`, so this
- * changes nothing about the result.  What it changes is *which pipeline stage
- * pays for it*: the T9000 grouper treats `bsub` as a stage-2 address
- * calculation (2 per cycle) and `sum` as a stage-4 ALU operation (1 per
- * cycle, the narrowest resource in the machine).  Measurement shows stage 2
- * has spare capacity - relaxing its limit from 2 to 4 changes nothing - so
- * moving byte-pointer arithmetic there is close to free, and it releases the
- * stage-4 slot for real work.
- *
- * Unlike WSUB there is no constant-index form: `ldnlp` scales by a word, so
- * it cannot express a byte displacement.  Constant indices therefore fall
- * through to the generic path, which folds them into a single `adc`.
- *
- * `bsub` is commutative, so unlike WSUB the operand order does not matter. */
-ST_FUNC int gen_ptradd_bsub(void) {
-    SValue sv_base, sv_index;
-    int result_v;
-
-    if (tp_ptradd_const_folds())
-        return 0;
-    if (!nocode_wanted && tp_ptradd_base_ok(&vtop[-1]) &&
-        tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
-        SValue base = vtop[-1];
-        SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
-        int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
-        int index_const = !(index.r & VT_LVAL) && iv == VT_CONST;
-        int dest;
-
-        if (index_const)
-            return 0;           /* `adc n` is shorter; let the generic path run */
-
-        abcreg_stack_depth = 0;
-        tp_push_simple(&index);
-        tp_push_base(&base);
-        Tp_BSUB();
-
-        vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
-        vtop->r = dest;
-        Tp_STL(dest);
-        return 1;
-    }
-
-    /* No gv2 fallback.  Unlike WSUB, BSUB buys nothing the generic path
-     * cannot already do - `sum` is the same arithmetic - so the only reason
-     * to emit it is the free stage-2 slot.  Forcing gv2 here to get it would
-     * spill and reload both operands and lose the zero-STL local-to-local
-     * lowering that gen_opi already applies, which measured as *more*
-     * dynamic instructions than it saved.  Return 0 and let gen_op handle
-     * it. */
-    (void)sv_base; (void)sv_index; (void)result_v;
-    return 0;
-}
-
-/* T800 fast path for pointer arithmetic on 8-byte elements.
- * Expects vstack: vtop[-1] = base pointer, vtop[0] = unscaled index.
- * TCWG wsubdb semantics: AReg = base, BReg = index → result = AReg + BReg * 8.
- * Returns 1 when emitted. */
-ST_FUNC int gen_ptradd_wsubdb(void);
-
-/* T9000 fast path for pointer arithmetic on 2-byte (16-bit) elements.
- * ssub: AReg := AReg + 2*BReg, i.e. the same operand order as WSUB.
- * Returns 0 without emitting anything when -mt9000 is off or when the
- * operands are not in the simple form, so the caller's generic
- * multiply-then-add lowering still runs. */
-ST_FUNC int gen_ptradd_ssub(void) {
-    if (!tp_have_t9000_feat(TP_T9K_SSUB))
-        return 0;
-    if (tp_ptradd_const_folds())
-        return 0;
-    if (!nocode_wanted && tp_ptradd_base_ok(&vtop[-1]) &&
-        tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
-        SValue base = vtop[-1];
-        SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
-        int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
-        int index_const = !(index.r & VT_LVAL) && iv == VT_CONST;
-        int dest;
-
-        abcreg_stack_depth = 0;
-        if (index_const) {
-            /* Literal subscript: fold 2*k into the address as an ADC.
-             * (LDNLP is word-scaled, so it cannot serve here.) */
-            tp_push_base(&base);
-            if (index.c.i)
-                Tp_ADC((int)(2 * index.c.i));
-        } else {
-            tp_push_simple(&index);
-            tp_push_base(&base);
-            Tp_SSUB();
-        }
-
-        vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
-        vtop->r = dest;
-        Tp_STL(dest);
-        return 1;
-    }
-    return 0;
-}
-
-ST_FUNC int gen_ptradd_wsubdb(void) {
-    SValue sv_base, sv_index;
-    int result_v;
-
-    if (tp_t414())
-        return 0;               /* no wsubdb: the generic multiply */
-    if (tp_ptradd_const_folds())
-        return 0;
-
-    /* Same direct form as gen_ptradd_wsub. */
-    if (!nocode_wanted && tp_ptradd_base_ok(&vtop[-1]) &&
-        tp_ptradd_base_is_simple(&vtop[-1]) && tp_operand_is_simple(&vtop[0])) {
-        SValue base = vtop[-1];
-        SValue index = vtop[0];
-        int bv = base.r & VT_VALMASK;
-        int iv = index.r & VT_VALMASK;
-        int base_reg = !(base.r & VT_LVAL) && bv >= TREG_W0 && bv < NB_REGS;
-        int index_reg = !(index.r & VT_LVAL) && iv >= TREG_W0 && iv < NB_REGS;
-        int dest;
-
-        abcreg_stack_depth = 0;
-        tp_push_simple(&index);
-        tp_push_base(&base);
-        Tp_WSUBDB();
-
-        vtop--;
-        dest = base_reg ? bv : (index_reg ? iv : get_reg(RC_INT));
-        vtop->r = dest;
-        Tp_STL(dest);
-        return 1;
-    }
-
-    gv2(RC_INT, RC_INT);
-    sv_base = vtop[-1];
-    sv_index = vtop[0];
-
-    abcreg_stack_depth = 0;
-    tp_push_sv(&sv_index);  /* push index first so it lands in BReg */
-    tp_push_sv(&sv_base);   /* AReg = base, BReg = index */
-
-    Tp_WSUBDB();            /* result = base + index * 8 */
-    vtop--;
-
-    /* Store result to workspace — matches gen_opi's post-switch STL.
-     * Without this, subsequent load()/tp_push_sv() reads stale data
-     * from the workspace slot assigned by gv2. */
-    result_v = vtop->r & VT_VALMASK;
-    if (result_v < VT_CONST) {
-        Tp_STL(result_v);
-    }
-    return 1;
-}
-
-static int tp_mul_const_strength(long c, int *out)
-{
-    if (c == -1 || c == 0 || c == 1 ||
-        c == 2 || c == 3 || c == 4 || c == 8) {
-        *out = (int)c;
-        return 1;
-    }
-    if (c > 0 && (c & (c - 1)) == 0) {
-        int shift = 0;
-        long t = c;
-        while (t > 1) {
-            shift++;
-            t >>= 1;
-        }
-        if (shift >= 4 && shift <= 31) {
-            *out = 0x100 + shift;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* ---- strict comparisons at a loop back-edge -----------------------------
- *
- * CJ branches when AReg == 0.  A loop back-edge wants to branch when the
- * condition is TRUE, so gvtst asks gjmp_cond to invert and gjmp_cond emits
- * `EQC 0` - one contended stage-4 slot on every iteration.  Worse, the EQC is
- * itself a stage-4 op, so it cannot share the compare's group and the CJ that
- * follows starts a third: the tail of a counted loop costs two groups where
- * one would do.
- *
- * The non-strict forms already avoid this.  TOK_GE/TOK_LE/TOK_UGE/TOK_ULE
- * compute the *complement* with a plain GT/GTU and tag the result
- * VT_CMP(TOK_EQ) - "zero is true" - which gjmp_cond consumes with no EQC at
- * all.  TOK_GT/TOK_LT/TOK_UGT/TOK_ULT did not, which is why `i <= 9999`
- * measured 25% faster than `i < 10000` for the identical loop.
- *
- * Against a literal the complement is free, because a strict comparison with
- * the bound moved by one is the negation of the same comparison reversed:
- *
- *     A >  K   ===  !(K+1 >  A)        K >  A   ===  !(A >  K-1)
- *
- * Swapping the two vstack entries and moving the literal by one costs no
- * instructions - both operands are already evaluated, exactly as the
- * TOK_LT/TOK_GE swap at the top of gen_opi relies on - and lets the result be
- * tagged "zero is true" like the non-strict forms.  For TOK_ULT it also drops
- * the REV, since the reversed form needs no operand exchange.
- *
- * Getting the polarity wrong is not a correctness bug: VT_CMP carries the
- * convention and both consumers (gjmp_cond and load()) handle either.  A
- * mispredicted consumer only moves the EQC, so the hint below can be
- * approximate. */
-
-/* Set while a loop's controlling expression is generated. */
-static int tp_cmp_branch_true;
-
-ST_FUNC void tp_cmp_hint_branch_true(int on)
-{
-    tp_cmp_branch_true = on;
-}
-
-static int tp_cmp_is_word_literal(const SValue *sv)
-{
-    if ((sv->r & (VT_VALMASK | VT_LVAL | VT_SYM | VT_MUSTCAST |
-                  VT_MUSTBOUND | VT_BOUNDED)) != VT_CONST)
-        return 0;
-    return get_primitive_type_size(sv->type.t & VT_BTYPE) == 4;
-}
-
-static void tp_cmp_swap_operands(void)
-{
-    SValue tmp = vtop[-1];
-    vtop[-1] = vtop[0];
-    vtop[0] = tmp;
-}
-
-/* Rewrite a strict comparison against a literal into its complement.  Returns
- * 1 when the rewrite happened, in which case the result must be tagged
- * VT_CMP(TOK_EQ) rather than VT_CMP(TOK_NE). */
-/* TP_NO_CMPFLIP=1 restores the pre-fix lowering, so the change can be A/B
- * measured without rebuilding a different tree - same handle as TP_NO_CALLOPT
- * and TP_POOL. */
-/* TP_NO_EQC0=1 keeps the `x == 0` eager inversion.  Separate from
- * TP_NO_CMPFLIP so the two compare changes can be attributed independently -
- * they are different mechanisms and, as it turned out, very different wins. */
-static int tp_no_eqc0(void)
-{
-    static int v = -1;
-    if (v < 0)
-        v = getenv("TP_NO_EQC0") ? 1 : 0;
-    return v;
-}
-
-static int tp_no_cmpflip(void)
-{
-    static int v = -1;
-    if (v < 0)
-        v = getenv("TP_NO_CMPFLIP") ? 1 : 0;
-    return v;
-}
-
-static int tp_cmp_complement_vs_literal(int *op)
-{
-    if (!tp_cmp_branch_true || nocode_wanted || tp_no_cmpflip())
-        return 0;
-
-    switch (*op) {
-    case TOK_GT:
-        /* A > K  ===  !(K+1 > A) */
-        if (tp_cmp_is_word_literal(&vtop[0])) {
-            int k = (int)vtop[0].c.i;
-            if (k == 0x7FFFFFFF)
-                return 0;
-            vtop[0].c.i = k + 1;
-            tp_cmp_swap_operands();
-            return 1;
-        }
-        /* K > A  ===  !(A > K-1) */
-        if (tp_cmp_is_word_literal(&vtop[-1])) {
-            int k = (int)vtop[-1].c.i;
-            if (k == (int)0x80000000)
-                return 0;
-            vtop[-1].c.i = k - 1;
-            tp_cmp_swap_operands();
-            return 1;
-        }
-        return 0;
-
-    case TOK_UGT:
-        /* A >u K  ===  !(K+1 >u A) */
-        if (tp_cmp_is_word_literal(&vtop[0])) {
-            uint32_t k = (uint32_t)vtop[0].c.i;
-            if (k == 0xFFFFFFFFu)
-                return 0;
-            vtop[0].c.i = (int)(k + 1);
-            tp_cmp_swap_operands();
-            return 1;
-        }
-        return 0;
-
-    case TOK_ULT:
-        /* A <u K  ===  !(A >u K-1), and the reversed form needs no REV. */
-        if (tp_cmp_is_word_literal(&vtop[0])) {
-            uint32_t k = (uint32_t)vtop[0].c.i;
-            if (k == 0)
-                return 0;
-            vtop[0].c.i = (int)(k - 1);
-            *op = TOK_UGT;
-            return 1;
-        }
-        return 0;
-
-    default:
-        return 0;
-    }
-}
-
-/* gtu (opr 0x5F) arrived with the T9000: the T414/T425/T800/T805
- * instruction sets have none (t4 accepts it in T800 mode regardless), so
- * for -mt800 and -mt425 flip the sign bit of both operands and let the
- * signed gt order them as unsigned values.  Entry AReg = R, BReg = L;
- * leaves AReg = (L >u R), or (R >u L) - what `rev; gtu` gives - when
- * `swapped`.  The extra mint pushes a third word: CReg is dead here, as the
- * operands are the only values gen_opi keeps on the stack. */
-static void tp_emit_gtu(int swapped)
-{
-    if (tp_have_t9000_feat(TP_T9K_GTU)) {
-        if (swapped)
-            Tp_REV();
-        Tp_OPR(TP_OPR_GTU);
-        return;
-    }
-    Tp_LDC(-0x7fffffff - 1);                    /* mint */
-    Tp_XOR();                                   /* A = R^M, B = L */
-    Tp_REV();
-    Tp_LDC(-0x7fffffff - 1);
-    Tp_XOR();                                   /* A = L^M, B = R^M */
-    if (!swapped)
-        Tp_REV();
-    Tp_GT();
-}
-
-ST_FUNC void gen_opi(int op) {
-    int cmp_zero_true;
-    int shl_add_opt = 0;
-    int mul_const_opt = 0;
-    int mul_const_val = 0;
-    int eqc_const_opt = 0;
-    int eqc_const_val = 0;
-    int adc_const_opt = 0;
-    int adc_const_val = 0;
-    /* x >> K with a literal K: the shift count can be pushed *after* xdble
-     * instead of being parked in a workspace slot across it.  See TOK_SAR. */
-    int sar_const_opt = 0;
-    int sar_const_val = 0;
-    int mod_pow2_opt = 0;   /* unsigned modulo power-of-2: x % N -> x & (N-1) */
-    int mod_pow2_mask = 0;
-    /* Shift count is a literal already in 0..31, so the runtime
-     * "LDC 31; AND" clamp is provably a no-op and can be dropped. */
-    int shift_const_ok = 0;
-
-    /* UMULL leaves its high word in REG_IRE2, which may still hold the high
-     * half of a pending long long call result (`get_u64() + x * y`). */
-    if (op == TOK_UMULL)
-        save_reg(REG_IRE2);
-
-    /* `a < b` and `a >= b` used to emit REV before GT, because GT computes
-     * (BReg > AReg) and the operands are pushed first-then-second.  Swapping
-     * the two vstack entries and flipping the operator gives the same result
-     * with no REV at all:
-     *
-     *     a <  b   ===   b >  a
-     *     a >= b   ===   b <= a
-     *
-     * Both operands are already evaluated by the time gen_opi runs, so
-     * exchanging them cannot reorder side effects - this is the same
-     * reasoning behind the existing TOK_EQ/TOK_NE commutation swap further
-     * down.  Doing it here rather than at the push sites means every operand
-     * path (local/local, local/const, register, and the gv2 fallback) gets it,
-     * and the classification below sees the final order.
-     *
-     * The peephole rule that was supposed to catch this pattern reports zero
-     * hits on every function, so it never fired; removing the REV at the
-     * source is the fix. */
-    if (op == TOK_LT || op == TOK_GE) {
-        SValue tmp = vtop[-1];
-        vtop[-1] = vtop[0];
-        vtop[0] = tmp;
-        op = (op == TOK_LT) ? TOK_GT : TOK_LE;
-    }
-
-    /* Strict compare against a literal at a loop back-edge: produce the
-     * complement so the result can be tagged "zero is true" and gjmp_cond
-     * needs no EQC 0. */
-    cmp_zero_true = tp_cmp_complement_vs_literal(&op);
-
-    /* Transputer: comparison operations need explicit operand loading.
-     *
-     * For arithmetic ops (+, -, etc.), the operands are typically already
-     * on the eval stack from preceding load/computation instructions.
-     * These work "by construction" — TCC's generic layer generates loads
-     * that happen to leave values on the Transputer eval stack.
-     *
-     * For comparison ops (==, !=, >, <, etc.), this doesn't work after
-     * function calls because the eval stack is corrupted by the CALL
-     * instruction's return value. We must explicitly load operands.
-     *
-     * We use tp_push_sv() which always generates code to push a value
-     * onto the eval stack, handling all SValue types correctly. */
-    /* Always explicitly push both operands onto the hardware eval stack.
-     * TCC's generic layer may leave values in workspace-backed "registers"
-     * (workspace slots) rather than on the eval stack. On the Transputer,
-     * all binary operations (arithmetic, logic, comparisons) operate on
-     * AReg and BReg, so we must ensure both values are pushed. */
-    /* Transputer-specific gv2: for two word-size local lvalues, emit
-     * LDL directly from local offsets and STL to allocated registers.
-     * This produces LDL a; STL r1; LDL b; STL r2 (4 insns) which is
-     * the same as normal gv2. BUT: tp_push_sv then does LDL r1; LDL r2
-     * (2 more insns). With the DUP/areg_tag tracker, the second load
-     * might be optimized. The real win comes when we later skip the
-     * tp_push_sv reload by keeping values on the eval stack.
-     *
-     * For now, this function is identical to gv2 for the common case
-     * but lays the groundwork for direct eval-stack loading. */
-    {
-        int v1 = vtop[-1].r & VT_VALMASK;
-        int v2 = vtop[0].r & VT_VALMASK;
-
-        /* Classify operands */
-        int first_local = (vtop[-1].r & VT_LVAL) && v1 == VT_LOCAL &&
-                          !(vtop[-1].r & VT_SYM) &&
-                          get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
-        int second_local = (vtop[0].r & VT_LVAL) && v2 == VT_LOCAL &&
-                           !(vtop[0].r & VT_SYM) &&
-                           get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
-        int first_const = (v1 == VT_CONST) && !(vtop[-1].r & VT_SYM);
-        int second_const = (v2 == VT_CONST) && !(vtop[0].r & VT_SYM);
-
-        /* A value already materialised in a general workspace-slot register
-         * costs exactly one LDL r to push — the same as a local. Without this,
-         * (register op X) forms fell through to gv2 and emitted the
-         * five-instruction spill dance `STL a; LDC k; STL b; LDL a; LDL b`
-         * ahead of the real operation. That is the single most common waste in
-         * kernel code: ~184k sites, ~738 KB of .text.
-         *
-         * Restricted to TREG_W0..NB_REGS-1: slots 0-2 are the hardware A/B/C
-         * eval-stack registers and 3-5 are the FPU slots, none of which follow
-         * the plain "value lives in workspace slot r" rule. VT_MUSTCAST must be
-         * excluded too — bypassing gv2 would skip a required narrowing cast. */
-        int first_reg = !(vtop[-1].r & (VT_LVAL | VT_SYM | VT_MUSTCAST |
-                                        VT_MUSTBOUND | VT_BOUNDED)) &&
-                        v1 >= TREG_W0 && v1 < NB_REGS &&
-                        get_primitive_type_size(vtop[-1].type.t & VT_BTYPE) == 4;
-        int second_reg = !(vtop[0].r & (VT_LVAL | VT_SYM | VT_MUSTCAST |
-                                        VT_MUSTBOUND | VT_BOUNDED)) &&
-                         v2 >= TREG_W0 && v2 < NB_REGS &&
-                         get_primitive_type_size(vtop[0].type.t & VT_BTYPE) == 4;
-
-
-        /* Exclude 3-operand ops and special cases from direct path */
-        int exclude = op == TOK_UMULL || op == TOK_ADDC1 || op == TOK_SUBC1 ||
-                      op == TOK_ADDC2 || op == TOK_SUBC2 ||
-                      op == TOK_UDIV || op == TOK_UMOD ||
-                      op == TOK_A_SHL || op == TOK_A_SAR || op == TOK_NEG;
-
-        /* Plain shifts are NOT excluded: SHL/SHR/SAR all want AReg=count,
-         * BReg=value, which is exactly the operand order CASE 1/2/3 produce.
-         * Excluding them forced every shift down the gv2 spill path, which
-         * cost 8 extra bytes per constant shift (the dominant kernel form:
-         * `x >> LITERAL` in field extracts and bitmap indexing). */
-        int is_shift = (op == TOK_SHL || op == TOK_SHR || op == TOK_SAR);
-        int second_folded;
-
-        /* A literal count already in range makes the runtime clamp dead. */
-        if ((is_shift || op == TOK_A_SHL || op == TOK_A_SAR) && second_const) {
-            unsigned long cnt = (unsigned long)vtop[0].c.i;
-            if (cnt <= 31)
-                shift_const_ok = 1;
-        }
-
-        /* Constant-RHS folds, decided once for every direct case below.
-         * `direct_ready` jumps past the block that used to compute these, so
-         * without this the fast paths emitted `LDC k; SUM` where the slow path
-         * would have emitted a single `ADC k`. That matters enormously: every
-         * struct field access is lowered by tccgen as `pointer + constant`
-         * (see the TOK_ARROW case in tccgen.c), so ADC folding applies to
-         * essentially all field addressing in the kernel.
-         *
-         * When a fold fires, the second operand must NOT be pushed — the
-         * folded instruction carries the literal itself. */
-        if (!exclude && second_const) {
-            long c = (long)vtop[0].c.i;
-            switch (op) {
-            case '+': case TOK_A_ADD:
-                if (!tp_adc_would_trap()) {
-                    adc_const_opt = 1; adc_const_val = (int)c;
-                }
-                break;
-            case '-': case TOK_A_SUB:
-                if (!tp_adc_would_trap()) {
-                    adc_const_opt = 1; adc_const_val = -(int)c;
-                }
-                break;
-            case TOK_EQ: case TOK_NE:
-                eqc_const_opt = 1; eqc_const_val = (int)c;
-                break;
-            case '*': case TOK_A_MUL:
-                if (tp_mul_const_strength(c, &mul_const_val))
-                    mul_const_opt = 1;
-                break;
-            case TOK_SHL:
-                if (c == 1 || c == 2)
-                    shl_add_opt = (int)c;
-                break;
-            case TOK_SAR: case TOK_A_SAR:
-                /* Only for counts the runtime clamp would have passed
-                   through unchanged.  Negative counts, and counts above 31,
-                   keep the generic path and its LDC 31; AND clamp, so
-                   behaviour there is exactly as before. */
-                if (c >= 0 && c <= 31) {
-                    sar_const_opt = 1; sar_const_val = (int)c;
-                }
-                break;
-            default:
-                break;
-            }
-        }
-
-        /* True when the constant RHS is folded into the operation and so must
-         * not be materialised on the eval stack. */
-        second_folded = adc_const_opt || eqc_const_opt ||
-                        mul_const_opt || shl_add_opt || sar_const_opt;
-
-        if (!exclude && first_local && second_local) {
-            /* CASE 1: local op local → LDL a; LDL b */
-            int off1 = vtop[-1].c.i;
-            int off2 = vtop[0].c.i;
-            abcreg_stack_depth = 0;
-            if (off1 == off2 && !tp_t414()) {
-                emit_local_op(TP_OP_LDL, off1);
-                Tp_DUP();
-            } else {
-                emit_local_op(TP_OP_LDL, off1);
-                emit_local_op(TP_OP_LDL, off2);
-            }
-            vtop[-1].r = get_reg(RC_INT);
-            goto direct_ready;
-        }
-
-        if (!exclude && first_local && second_const) {
-            /* CASE 2: local op const → LDL a; LDC const */
-            abcreg_stack_depth = 0;
-            emit_local_op(TP_OP_LDL, vtop[-1].c.i);
-            if (!second_folded)
-                tp_ldc_pooled((int)vtop[0].c.i);
-            vtop[-1].r = get_reg(RC_INT);
-            goto direct_ready;
-        }
-
-        if (!exclude && first_const && second_local) {
-            /* CASE 3: const op local → LDC const; LDL b */
-            abcreg_stack_depth = 0;
-            if ((op == '*' || op == TOK_A_MUL) &&
-                tp_mul_const_strength((long)vtop[-1].c.i, &mul_const_val)) {
-                emit_local_op(TP_OP_LDL, vtop[0].c.i);
-                mul_const_opt = 1;
-            } else {
-                tp_ldc_pooled((int)vtop[-1].c.i);
-                emit_local_op(TP_OP_LDL, vtop[0].c.i);
-            }
-            vtop[-1].r = get_reg(RC_INT);
-            goto direct_ready;
-        }
-
-        /* CASES 4-8: one or both operands already live in a workspace-slot
-         * register. Push directly with LDL instead of round-tripping through
-         * gv2's freshly allocated spill slots. The first operand's register is
-         * reused as the destination — it is consumed by this operation anyway,
-         * and reusing it avoids a get_reg() call that could spill a live value
-         * after we have already pushed onto the eval stack. */
-        if (!exclude && (first_reg || second_reg) &&
-            (first_reg || first_local || first_const) &&
-            (second_reg || second_local || second_const)) {
-            int dest;
-            abcreg_stack_depth = 0;
-
-            /* Push first operand. The common shape is that the value was just
-             * computed and stored into v1 by the previous operation, so try to
-             * cancel that store instead of reloading it. */
-            if (first_reg)
-                tp_push_reg_or_cancel_stl(v1, &vtop[-1]);
-            else if (first_local)
-                emit_local_op(TP_OP_LDL, vtop[-1].c.i);
-            else
-                tp_ldc_pooled((int)vtop[-1].c.i);
-
-            /* Push second operand, unless it was folded into the operation. */
-            if (second_folded) {
-                /* nothing to push — the literal rides in the instruction */
-            } else if (second_reg) {
-                if (first_reg && v1 == v2 && !tp_t414())
-                    Tp_DUP();
-                else
-                    Tp_LDL(v2);
-            } else if (second_local) {
-                emit_local_op(TP_OP_LDL, vtop[0].c.i);
-            } else {
-                tp_ldc_pooled((int)vtop[0].c.i);
-            }
-
-            /* Plain assignment, as CASES 1-3 do: the result is a fresh value
-             * in a register, so every other r-flag (VT_LVAL, VT_SYM,
-             * VT_MUSTCAST, ...) must be cleared, not carried over. */
-            dest = first_reg ? v1 : (second_reg ? v2 : get_reg(RC_INT));
-            vtop[-1].r = dest;
-            goto direct_ready;
-        }
-
-        /* Standard path: gv2 */
-        gv2(RC_INT, RC_INT);
-    }
-    {
-        SValue sv_first = vtop[-1];
-        SValue sv_second = vtop[0];
-        int first_is_imm_const = ((sv_first.r & VT_VALMASK) == VT_CONST) && !(sv_first.r & VT_SYM);
-        int second_is_imm_const = ((sv_second.r & VT_VALMASK) == VT_CONST) && !(sv_second.r & VT_SYM);
-
-        /* Spill/reload desync guard:
-         * For arithmetic/comparison, a scalar local can transiently appear as
-         * VT_LOCAL without VT_LVAL. Treat it as a value load in this context.
-         * Keep pointer/array/function operands untouched (address semantics). */
-        if (!(sv_first.r & VT_LVAL) && (sv_first.r & VT_VALMASK) == VT_LOCAL) {
-            int bt1 = sv_first.type.t & VT_BTYPE;
-            if (!(sv_first.type.t & (VT_ARRAY | VT_VLA)) && bt1 != VT_PTR && bt1 != VT_FUNC) {
-                tp_debug_log_vt_local_normalize(&sv_first, "lhs");
-                sv_first.r |= VT_LVAL;
-            }
-        }
-        if (!(sv_second.r & VT_LVAL) && (sv_second.r & VT_VALMASK) == VT_LOCAL) {
-            int bt2 = sv_second.type.t & VT_BTYPE;
-            if (!(sv_second.type.t & (VT_ARRAY | VT_VLA)) && bt2 != VT_PTR && bt2 != VT_FUNC) {
-                tp_debug_log_vt_local_normalize(&sv_second, "rhs");
-                sv_second.r |= VT_LVAL;
-            }
-        }
-
-        if (op == '*' || op == TOK_A_MUL) {
-            /* PROD latency depends on AReg; keep immediate constant in AReg. */
-            if (first_is_imm_const && !second_is_imm_const) {
-                SValue tmp = sv_first;
-                sv_first = sv_second;
-                sv_second = tmp;
-                first_is_imm_const = 0;
-                second_is_imm_const = 1;
-            }
-            /* Strength reduction for multiply by constants.
-             * DUP+SUM = 2 cycles vs PROD's 30+ cycles.
-             * x*0 → 0
-             * x*1 → x
-             * x*(-1) → -x
-             * x*2 → DUP;SUM
-             * x*3 → DUP;SUM;(orig);SUM (save x, x*2, add x)
-             * x*4 → DUP;SUM;DUP;SUM
-             * x*8 → DUP;SUM;DUP;SUM;DUP;SUM
-             * x*(1<<N), N>=4 → LDC N; SHL */
-            if (second_is_imm_const) {
-                long c = sv_second.c.i;
-                if (tp_mul_const_strength(c, &mul_const_val)) {
-                    mul_const_opt = 1;
-                }
-            }
-        }
-
-        /* Modulo power-of-2: x % N -> x & (N-1).
-         * Only valid for unsigned modulo. Signed C remainder must keep the
-         * dividend sign, e.g. -9 % 8 == -1, while -9 & 7 == 7. */
-        if (op == TOK_UMOD && second_is_imm_const) {
-            long c = sv_second.c.i;
-            if (c > 0 && (c & (c - 1)) == 0) {  /* power of 2 check */
-                mod_pow2_opt = 1;
-                mod_pow2_mask = (int)(c - 1);
-            }
-        }
-
-        if ((op == TOK_A_SHL || op == TOK_SHL) && second_is_imm_const) {
-            if (sv_second.c.i == 1) {
-                shl_add_opt = 1;
-            } else if (sv_second.c.i == 2) {
-                shl_add_opt = 2;
-            }
-        }
-
-        if (op == TOK_EQ || op == TOK_NE) {
-            /* Commutative: if left is constant, swap so right is constant */
-            if (first_is_imm_const && !second_is_imm_const) {
-                SValue tmp = sv_first;
-                sv_first = sv_second;
-                sv_second = tmp;
-                first_is_imm_const = 0;
-                second_is_imm_const = 1;
-            }
-            if (second_is_imm_const) {
-                eqc_const_opt = 1;
-                eqc_const_val = sv_second.c.i;
-            }
-        }
-
-        if (op == '+' || op == TOK_A_ADD || op == '-' || op == TOK_A_SUB) {
-            /* ADC optimization: a + const → load a; ADC const (1 instruction)
-             * Also works for subtraction: a - const → ADC(-const).
-             * Commutative for +: if left is constant, swap. */
-            if ((op == '+' || op == TOK_A_ADD) && first_is_imm_const && !second_is_imm_const) {
-                SValue tmp = sv_first;
-                sv_first = sv_second;
-                sv_second = tmp;
-                first_is_imm_const = 0;
-                second_is_imm_const = 1;
-            }
-            if (second_is_imm_const && !tp_adc_would_trap()) {
-                int cval = (op == '-' || op == TOK_A_SUB) ? -(int)sv_second.c.i : (int)sv_second.c.i;
-                adc_const_opt = 1;
-                adc_const_val = cval;
-            }
-        }
-
-        if (tp_genopi_debug) {
-            fprintf(stderr, "[GEN_OPI] func=%s op=0x%x('%c') ind=0x%x "
-                    "first: r=0x%x v=0x%x c.i=%ld lval=%d  "
-                    "second: r=0x%x v=0x%x c.i=%ld lval=%d\n",
-                    funcname ? funcname : "?", op, (op > 0x20 && op < 0x7f) ? op : '?',
-                    ind,
-                    sv_first.r, sv_first.r & VT_VALMASK, (long)sv_first.c.i,
-                    (sv_first.r & VT_LVAL) != 0,
-                    sv_second.r, sv_second.r & VT_VALMASK, (long)sv_second.c.i,
-                    (sv_second.r & VT_LVAL) != 0);
-        }
-        abcreg_stack_depth = 0;
-        /* Prime CReg for 3-operand instructions (LMUL, LSUM, LDIFF, LDIV).
-         * Push the CReg value before operands so it naturally falls to CReg
-         * after two operand pushes. Eliminates STL/REV/LDL workspace thrash. */
-        if (op == TOK_UMULL || op == TOK_ADDC1 || op == TOK_SUBC1
-            || op == TOK_UDIV || op == TOK_UMOD) {
-            Tp_LDC(0);
-            abcreg_push(1);
-        } else if (op == TOK_ADDC2 || op == TOK_SUBC2) {
-            Tp_LDL(FRAME_SLOT_CARRY);
-            abcreg_push(1);
-        }
-        /* Direct LDL chaining: DISABLED — gv2() already emits load
-         * instructions and updating the vstack. Adding extra LDLs on top
-         * corrupts the eval stack state. Proper fix requires either:
-         * a) Preventing gv2() from emitting loads for the direct path
-         * b) Replacing gv2() entirely with a transputer-specific loader
-         * Both are major TCC refactors. See STL-LDL-PLAN.md. */
-        tp_push_sv(&sv_first);
-        if (!shl_add_opt && !mul_const_opt && !eqc_const_opt && !adc_const_opt
-            && !mod_pow2_opt && !sar_const_opt) {
-            int same_operand = 0;
-            if (sv_first.r == sv_second.r && sv_first.c.i == sv_second.c.i)
-                same_operand = 1;
-            if (same_operand && !tp_t414()) {
-                Tp_DUP();
-            } else {
-                tp_push_sv(&sv_second);
-            }
-        }
-    }
-
-direct_ready:
-    switch (op) {
-    case TOK_A_ADD:  /* += compound assignment */
-    case '+':
-        if (adc_const_opt) {
-            int w = tp_addr_disp_words(adc_const_val);
-            if (w)
-                emit_instr(TP_OP_LDNLP, w);   /* stage 2, not stage 4 */
-            else
-                emit_instr(TP_OP_ADC, adc_const_val);
-        } else {
-            Tp_SUM();
-        }
-        vtop--; break;
-    case TOK_A_SUB:  /* -= compound assignment */
-    case '-':
-        if (adc_const_opt) {
-            int w = tp_addr_disp_words(adc_const_val);
-            if (w)
-                emit_instr(TP_OP_LDNLP, w);   /* already negated; stage 2 */
-            else
-                emit_instr(TP_OP_ADC, adc_const_val);
-        } else {
-            Tp_DIFF();
-        }
-        vtop--; break;
-    case TOK_A_MUL:  /* *= compound assignment */
-    case '*':
-        if (mul_const_opt && mul_const_val == 0) {
-            if (tp_no_t805_ops()) {
-                Tp_LDC(0);              /* no pop: x & 0 */
-                Tp_AND();
-            } else {
-                Tp_POP();
-                Tp_LDC(0);
-            }
-            vtop--; break;
-        }
-        if (mul_const_opt && tp_t414() && (mul_const_val == 2
-            || mul_const_val == 4 || mul_const_val == 8)) {
-            /* the dup; sum chains below need dup */
-            Tp_LDC(mul_const_val == 2 ? 1 : mul_const_val == 4 ? 2 : 3);
-            Tp_SHL();
-            vtop--; break;
-        }
-        if (mul_const_opt && tp_t414() && mul_const_val == 3) {
-            Tp_LDC(3);
-            Tp_OPR_BINARY(TP_OPR_PROD);
-            vtop--; break;
-        }
-        if (mul_const_opt && mul_const_val == 1) {
-            vtop--; break;
-        }
-        if (mul_const_opt && mul_const_val == -1) {
-            /* ~x + 1, but not with adc, the error-checking add: negating
-             * MinInt overflows.  That is undefined for an int, but this is
-             * also how a 64-bit multiply's cross terms take a low word of
-             * all ones (`x * -1LL`, `(u64)(i32)-1 * y`), where the words
-             * are signed or unsigned ints with the 64-bit type's sign and
-             * any value is defined (c-testsuite 09117). */
-            Tp_OPR(TP_OPR_NOT);
-            Tp_LDC(1);
-            Tp_SUM();
-            vtop--; break;
-        }
-        if (mul_const_opt && mul_const_val == 2) {
-            /* x * 2 → DUP; SUM */
-            Tp_DUP(); Tp_SUM();
-            vtop--; break;
-        }
-        if (mul_const_opt && mul_const_val == 3) {
-            /* x * 3 → DUP; SUM; x; SUM (need original x)
-             * But x is on eval stack — we can't easily get it back.
-             * Alternative: DUP; DUP; SUM; SUM = x + x + x = 3x */
-            Tp_DUP(); Tp_DUP();  /* AReg=x, BReg=x, CReg=x */
-            Tp_SUM();            /* AReg=2x, BReg=x */
-            Tp_SUM();            /* AReg=3x */
-            vtop--; break;
-        }
-        if (mul_const_opt && mul_const_val == 4) {
-            /* x * 4 → DUP; SUM; DUP; SUM */
-            Tp_DUP(); Tp_SUM(); Tp_DUP(); Tp_SUM();
-            vtop--; break;
-        }
-        if (mul_const_opt && mul_const_val == 8) {
-            /* x * 8 → DUP; SUM; DUP; SUM; DUP; SUM */
-            Tp_DUP(); Tp_SUM(); Tp_DUP(); Tp_SUM(); Tp_DUP(); Tp_SUM();
-            vtop--; break;
-        }
-        if (mul_const_opt && (mul_const_val & 0x100) != 0) {
-            /* x * (1 << N) → x << N.  Entry has AReg=x; push N as
-             * shift count so SHL sees AReg=count, BReg=value. */
-            Tp_LDC(mul_const_val & 0xff);
-            Tp_SHL();
-            vtop--; break;
-        }
-        Tp_OPR(TP_OPR_PROD); abcreg_pop(1); vtop--; break;
-    case TOK_A_DIV:  /* /= compound assignment */
-    case '/':
-    case TOK_PDIV:   /* pointer difference / element size: signed */
-        Tp_OPR(TP_OPR_DIV); abcreg_pop(1); vtop--; break;
-    case TOK_UDIV:   /* unsigned division */
-        /* T4 DIV is signed-only. Use LDIV's CReg==0 fast path for unsigned
-         * 32-bit division. CReg already primed with 0 in preamble.
-         * Entry: AReg=divisor, BReg=dividend, CReg=0. */
-        Tp_OPR(TP_OPR_LDIV);           /* AReg=quotient, BReg=remainder */
-        abcreg_pop(1); vtop--; break;
-    case TOK_A_MOD:  /* %= compound assignment */
-    case '%':
-        if (mod_pow2_opt) {
-            Tp_LDC(mod_pow2_mask);
-            Tp_AND();
-            vtop--; break;
-        }
-        Tp_OPR(TP_OPR_REM); abcreg_pop(1); vtop--; break;
-    case TOK_UMOD:   /* unsigned modulo */
-        if (mod_pow2_opt) {
-            Tp_LDC(mod_pow2_mask);
-            Tp_AND();
-            vtop--; break;
-        }
-        /* CReg already primed with 0 in preamble.
-         * Entry: AReg=divisor, BReg=dividend, CReg=0. */
-        Tp_OPR(TP_OPR_LDIV);           /* AReg=quotient, BReg=remainder */
-        Tp_REV();                      /* AReg=remainder */
-        abcreg_pop(1); vtop--; break;
-    case TOK_A_AND:  /* &= compound assignment */
-    case '&': Tp_AND(); vtop--; break;
-    case TOK_A_OR:   /* |= compound assignment */
-    case '|': Tp_OR(); vtop--; break;
-    case TOK_A_XOR:  /* ^= compound assignment */
-    case '^': Tp_XOR(); vtop--; break;
-    case TOK_A_SHL:  /* <<= compound assignment */
-    case TOK_SHL:
-        if (shl_add_opt && tp_t414()) {
-            Tp_LDC(shl_add_opt);        /* no dup for x + x */
-            Tp_SHL();
-            vtop--;
-            break;
-        }
-        if (shl_add_opt == 1) {
-            /* x << 1 == x + x */
-            Tp_DUP();
-            Tp_SUM();
-            vtop--;
-            break;
-        } else if (shl_add_opt == 2) {
-            /* x << 2 == ((x + x) + (x + x)) */
-            Tp_DUP();
-            Tp_SUM();
-            Tp_DUP();
-            Tp_SUM();
-            vtop--;
-            break;
-        }
-        /* Clamp shift count to 0-31: TCWG warns count >= 32 can lock
-         * the processor for minutes.  AReg=count, BReg=value.
-         * A literal count already in range makes the clamp dead code. */
-        if (!shift_const_ok) { Tp_LDC(31); Tp_AND(); }
-        Tp_SHL(); vtop--; break;
-    case TOK_SHR:    /* >> logical shift right */
-        /* Clamp shift count to 0-31 (same safety as SHL) */
-        if (!shift_const_ok) { Tp_LDC(31); Tp_AND(); }
-        Tp_SHR(); vtop--; break;
-    case TOK_A_SAR:  /* >>= compound assignment (arithmetic shift) */
-    case TOK_SAR:    /* arithmetic shift right using XDBLE+LSHR (Compiler Guide p28) */
-        if (sar_const_opt) {
-            /* Literal count: the count was NOT pushed (second_folded), so the
-             * value alone is in AReg and the workspace round trip that the
-             * general case needs disappears.
-             *
-             * ISM 21 FD (xdble):  Areg unchanged, Breg' = sign word, Creg' =
-             * Breg'.  ISM 23 F5 (lshr): shifts the double word Creg:Breg (most
-             * significant word in Creg) right by the count *in Areg*.
-             *
-             *   value in AReg
-             *   xdble   -> AReg=value, BReg=sign, CReg=sign
-             *   ldc K   -> AReg=K,     BReg=value, CReg=sign   (ldc pushes)
-             *   lshr    -> AReg = (sign:value) >> K            (arithmetic)
-             *
-             * which is register-for-register identical to what
-             * `ldc K; stl s; xdble; ldl s; lshr` produced, minus the stl/ldl.
-             * K == 0 is the identity, so emit nothing at all. */
-            if (sar_const_val != 0) {
-                Tp_OPR(TP_OPR_XDBLE);
-                Tp_LDC(sar_const_val);   /* abcreg_push(1) */
-                Tp_OPR(TP_OPR_LSHR);
-                /* Net the LDC back out so the eval-stack depth on exit is 1,
-                 * exactly what the general path's trailing abcreg_pop(1)
-                 * leaves.  Tp_OPR does not touch the AReg tag cache and,
-                 * unlike the general path, there is no Tp_STL/Tp_LDL here to
-                 * do it, so invalidate explicitly. */
-                abcreg_pop(1);
-                tp_areg_invalidate();
-            }
-            vtop--; break;
-        }
-        /* Entry: AReg=shift, BReg=value.
-         * XDBLE sign-extends AReg into BReg:AReg (64-bit).
-         * LSHR shifts CReg:BReg right by AReg bits, result in AReg. */
-        if (!shift_const_ok) { Tp_LDC(31); Tp_AND(); } /* clamp shift 0-31 */
-        Tp_STL(FRAME_SLOT_SCRATCH2);   /* save shift; AReg=value */
-        Tp_OPR(TP_OPR_XDBLE);         /* BReg=sign(-1/0), AReg=value */
-        Tp_LDL(FRAME_SLOT_SCRATCH2);  /* AReg=shift, BReg=value, CReg=sign */
-        Tp_OPR(TP_OPR_LSHR);          /* CReg:BReg >> AReg → AReg=result */
-        abcreg_pop(1); vtop--; break;
-
-    /* Comparisons: Result 1(True) or 0(False) in AReg.
-     *
-     * All comparisons produce "non-zero = true" in AReg.  gvtst() calls
-     * gjmp_cond(op ^ inv, t).  gjmp_cond adds EQC 0 when (op & 1) == 1.
-     * CJ jumps when AReg == 0.
-     *
-     * With TOK_NE (0x95, odd):
-     *   inv=0 → gjmp_cond(odd) → EQC 0 + CJ → jumps when was non-zero (true)
-     *   inv=1 → gjmp_cond(even) → CJ → jumps when zero (false)
-     *
-     * So vset_VT_CMP(TOK_NE) is correct for "non-zero = true" results. */
-    case TOK_EQ:
-        if (eqc_const_opt && eqc_const_val == 0 && !tp_no_eqc0()) {
-            /* `x == 0` is exactly what VT_CMP(TOK_EQ) already means - "zero is
-             * true" - so the value can be left raw and no instruction emitted
-             * at all.  This is the mirror of the `x != 0` case below, which
-             * was already deferred; the equality side was not, and it is the
-             * one that pays more.
-             *
-             * Emitting `EQC 0` and tagging TOK_NE ("nonzero is true") costs an
-             * inversion that every consumer then has to undo:
-             *
-             *   branch when true   EQC 0 ; EQC 0 ; CJ   ->  CJ
-             *   branch when false  EQC 0 ; CJ           ->  EQC 0 ; CJ
-             *   used as a value    EQC 0 ; EQC 0 ; EQC 0 ->  EQC 0
-             *
-             * so deferring is better or equal in every context, never worse -
-             * no consumer hint is needed.  `return !x` was three EQC 0 and is
-             * now one; the second operand of `a == 0 && b == 0` was two and is
-             * now none.  Each EQC is a stage-4 ALU op that cannot share the
-             * group of the compare feeding it, so a removed pair also lets the
-             * CJ group with its operand. */
-            vtop--;
-            vset_VT_CMP(TOK_EQ);
-        } else if (eqc_const_opt) {
-            /* EQC K: single instruction, AReg = (AReg == K) ? 1 : 0.
-             * Replaces LDC K + DIFF + EQC 0 (3 instrs) with 1 instr. */
-            emit_instr(TP_OP_EQC, eqc_const_val);
-            /* EQC produces 1 if equal → non-zero = true */
-            vtop--;
-            vset_VT_CMP(TOK_NE);
-        } else {
-            /* DIFF produces 0 when equal, nonzero otherwise.
-             * vset_VT_CMP(TOK_EQ) defers normalization: gjmp_cond and
-             * load() know "zero = true" and add EQC 0 only when needed. */
-            Tp_DIFF();
-            vtop--;
-            vset_VT_CMP(TOK_EQ);
-        }
-        break;
-    case TOK_NE:
-        if (eqc_const_opt) {
-            if (eqc_const_val == 0) {
-                /* `x != 0` is exactly what VT_CMP(TOK_NE) already means -
-                 * "nonzero is true" - so the value can be left raw.  The
-                 * previous `EQC 0; EQC 0` normalised it to 1/0 and then
-                 * inverted twice, costing 2 instructions and 2 stage-4 slots
-                 * for nothing.  Both consumers cope: gjmp_cond keys only on
-                 * op & 1, and load()'s VT_CMP handler re-normalises when a
-                 * 0/1 value is actually needed.  Fires on every `if (p)`,
-                 * `while (n)`, `if (x != 0)`. */
-            } else {
-                /* EQC K gives 1 if equal: "zero is true" for x != K.  As
-                 * for `x == 0` above, leaving it raw and tagging TOK_EQ is
-                 * better or equal for every consumer than inverting now:
-                 *   branch when false  EQC K ; EQC 0 ; CJ  (unchanged)
-                 *   branch when true   EQC K ; EQC 0 ; EQC 0 ; CJ  ->  EQC K ; CJ
-                 *   used as a value    EQC K ; EQC 0 ; EQC 0 ; EQC 0  ->  EQC K ; EQC 0 */
-                emit_instr(TP_OP_EQC, eqc_const_val);
-                vtop--;
-                vset_VT_CMP(TOK_EQ);
-                break;
-            }
-            vtop--;
-            vset_VT_CMP(TOK_NE);
-        } else {
-            /* DIFF produces 0 when equal, nonzero when not equal.
-             * vset_VT_CMP(TOK_NE) defers normalization to 0/1 until
-             * materialization in load()'s VT_CMP handler. For branching,
-             * gvtst/gjmp_cond only tests zero vs nonzero. */
-            Tp_DIFF();
-            vtop--;
-            vset_VT_CMP(TOK_NE);
-        }
-        break;
-    case TOK_GT:
-        Tp_GT();                   /* 1 if a > b, 0 otherwise */
-        vtop--;
-        vset_VT_CMP(cmp_zero_true ? TOK_EQ : TOK_NE);
-        break;
-    case TOK_LT:
-        Tp_REV();
-        Tp_GT();                   /* 1 if a < b (swapped), 0 otherwise */
-        vtop--;
-        vset_VT_CMP(TOK_NE);
-        break;
-    case TOK_GE:
-        /* a >= b  ===  !(a < b)  ===  !(b > a)
-         * REV so GT tests b > a (= a < b).  The result is then inverted for
-         * free by deferring with VT_CMP(TOK_EQ), i.e. "zero is true" - the
-         * same mechanism TOK_EQ's DIFF path above uses.  The explicit
-         * `EQC 0` that used to do the inversion is pure waste. */
-        Tp_REV();
-        Tp_GT();                   /* 1 when a < b, so 0 means a >= b */
-        vtop--;
-        vset_VT_CMP(TOK_EQ);
-        break;
-    case TOK_LE:
-        /* a <= b  ===  !(a > b).  Same deferred inversion as TOK_GE. */
-        Tp_GT();                   /* 1 when a > b, so 0 means a <= b */
-        vtop--;
-        vset_VT_CMP(TOK_EQ);
-        break;
-
-
-
-    case TOK_NEG: Tp_OPR(TP_OPR_NOT); emit_instr(TP_OP_ADC, 1); break;  /* ~x + 1 = -x (two's complement) */
-    case '~': Tp_OPR(TP_OPR_NOT); break;  /* Unary - no vtop-- */
-
-    /* Multi-precision arithmetic (64-bit operations decomposed by gen_opl)
-     *
-     * Entry state after gv2 + tp_push_sv: AReg=R (vtop[0]), BReg=L (vtop[-1])
-     *
-     * LMUL semantics: result = BReg * AReg + CReg → AReg=low32, BReg=high32
-     * LSUM semantics: AReg = BReg + AReg + (CReg & 1), BReg = carry_out
-     * LDIFF semantics: AReg = BReg - AReg - (CReg & 1), BReg = borrow_out
-     *
-     * Key insight: CReg must be explicitly set up because gv2/load between
-     * ADDC1 and ADDC2 clobbers the entire eval stack. We save carry/borrow
-     * to FRAME_SLOT_CARRY and restore it in the C2 operation.
-     */
-    case TOK_UMULL:
-        /* Unsigned 32x32→64 multiply. CReg already primed with 0 in preamble.
-         * Entry: AReg=R, BReg=L, CReg=0. LMUL: result = BReg*AReg+CReg. */
-        Tp_OPR(TP_OPR_LMUL);         /* AReg=low(L*R), BReg=high(L*R) */
-        Tp_REV();                     /* AReg=high, BReg=low */
-        Tp_STL(REG_IRE2);            /* save high word; AReg←low */
-        abcreg_pop(1);
-        vtop--;
-        vtop->r2 = REG_IRE2;         /* tell TCC where high word is */
-        break;
-
-    case TOK_ADDC1:
-        /* Add low halves, generate carry. CReg already primed with 0.
-         * Entry: AReg=R_lo, BReg=L_lo, CReg=0. */
-        Tp_OPR(TP_OPR_LSUM);         /* AReg=sum_lo, BReg=carry_out */
-        Tp_REV();                     /* AReg=carry, BReg=sum_lo */
-        Tp_STL(FRAME_SLOT_CARRY);    /* save carry; AReg←sum_lo */
-        abcreg_pop(1);
-        vtop--;
-        break;
-
-    case TOK_ADDC2:
-        /* Add high halves with saved carry. CReg primed with carry in preamble.
-         * Entry: AReg=R_hi, BReg=L_hi, CReg=carry. */
-        Tp_OPR(TP_OPR_LSUM);         /* AReg=sum_hi, BReg=carry_out (discarded) */
-        abcreg_pop(1);
-        vtop--;
-        break;
-
-    case TOK_SUBC1:
-        /* Subtract low halves, generate borrow. CReg already primed with 0.
-         * Entry: AReg=R_lo, BReg=L_lo, CReg=0. */
-        Tp_OPR(TP_OPR_LDIFF);        /* AReg=diff_lo, BReg=borrow_out */
-        Tp_REV();                     /* AReg=borrow, BReg=diff_lo */
-        Tp_STL(FRAME_SLOT_CARRY);    /* save borrow; AReg←diff_lo */
-        abcreg_pop(1);
-        vtop--;
-        break;
-
-    case TOK_SUBC2:
-        /* Subtract high halves with saved borrow. CReg primed with borrow in preamble.
-         * Entry: AReg=R_hi, BReg=L_hi, CReg=borrow. */
-        Tp_OPR(TP_OPR_LDIFF);        /* AReg=diff_hi, BReg=borrow_out (discarded) */
-        abcreg_pop(1);
-        vtop--;
-        break;
-
-    /* Unsigned comparisons - XOR both operands with MinInt (0x80000000)
-     * to convert unsigned ordering to signed ordering, then use GT.
-     *
-     * Entry state: AReg = right (vtop[0]), BReg = left (vtop[-1])
-     * GT semantics: AReg = (BReg > AReg) ? 1 : 0  (signed comparison)
-     *
-     * MINT (OPR 0x42) loads 0x80000000 in a single byte — much more
-     * efficient than LDC 0x80000000 which needs 8 prefix bytes.
-     *
-     * Core XOR-both-operands sequence (from entry AReg=R, BReg=L):
-     *   MINT    → AReg=MINT, BReg=R, CReg=L
-     *   XOR     → AReg=R^MINT, BReg=L        (XOR pops CReg→BReg)
-     *   REV     → AReg=L, BReg=R^MINT
-     *   MINT    → AReg=MINT, BReg=L, CReg=R^MINT
-     *   XOR     → AReg=L^MINT, BReg=R^MINT   (XOR pops CReg→BReg)
-     *   (no REV)
-     *   GT      → (R^MINT > L^MINT) = unsigned(R > L) = unsigned(L < R)
-     *
-     * With final REV before GT:
-     *   REV     → AReg=R^MINT, BReg=L^MINT
-     *   GT      → (L^MINT > R^MINT) = unsigned(L > R)
-     */
-    case TOK_ULT:
-        /* unsigned left < right: REV + GTU → (right >u left) */
-        tp_emit_gtu(1);
-        vtop--;
-        vset_VT_CMP(TOK_NE);
-        break;
-
-    case TOK_UGE:
-        /* unsigned left >= right = !(left < right) = !(right >u left).
-         * REV + GTU yields 1 when left < right; defer the invert via
-         * VT_CMP(TOK_EQ) ("zero is true"), matching signed TOK_GE.
-         * Eager EQC 0 here + load()'s odd-op double-EQC 0 used to emit
-         * three EQC 0 bytes for `return a + b <= c` (seq_buf_can_fit). */
-        tp_emit_gtu(1);
-        vtop--;
-        vset_VT_CMP(TOK_EQ);
-        break;
-
-    case TOK_UGT:
-        /* unsigned left > right: GTU → (BReg >u AReg) = (left >u right) */
-        tp_emit_gtu(0);
-        vtop--;
-        vset_VT_CMP(cmp_zero_true ? TOK_EQ : TOK_NE);
-        break;
-
-    case TOK_ULE:
-        /* unsigned left <= right = !(left >u right). Same deferred invert
-         * as TOK_LE / TOK_UGE: GTU is 1 when left > right, so 0 means <=.
-         * ISM App B: gtu = secondary 0x5F (25 FF). Never emit non-IMS OPR. */
-        tp_emit_gtu(0);
-        vtop--;
-        vset_VT_CMP(TOK_EQ);
-        break;
-
-    default: tcc_error("unsupported integer op 0x%x", op);
-    }
-
-    /* After gen_opi, the result is in AReg. For non-comparison operations,
-     * store it back to the target workspace slot so later LDL reads the
-     * correct value. Comparisons use vset_VT_CMP which sets vtop->r to
-     * VT_CMP (>= VT_CONST), so the check below naturally skips them. */
-    {
-        int result_v = vtop->r & VT_VALMASK;
-        if (tp_genopi_debug) {
-            fprintf(stderr, "[GEN_OPI_RESULT] func=%s vtop->r=0x%x result_v=0x%x %s ind=0x%x\n",
-                    funcname ? funcname : "?", vtop->r, result_v,
-                    result_v < VT_CONST ? "→ STL" : "→ skip(VT_CMP)", ind);
-        }
-        if (result_v < VT_CONST) {
-            Tp_STL(result_v);
-        }
-    }
-}
-
-/* 64-bit shift using native LSHL/LSHR instructions.
- *
- * Called from tccgen.c gen_opl() for variable-count 64-bit shifts.
- * Entry vstack: [..., 64-bit_value (VT_LLONG), shift_count (VT_INT)]
- *
- * Transputer LSHL/LSHR semantics:
- *   Input:  AReg = shift count, BReg = lo word, CReg = hi word
- *   Output: AReg = result lo word, BReg = result hi word
- *
- * For SAR (arithmetic right shift), LSHR is logical so we call the
- * __ashrdi3 runtime helper (SAR on signed long long is uncommon in
- * kernel code; most 64-bit values are unsigned).
- */
-ST_FUNC void gen_opl_shift(int op)
-{
-    int t, shift_slot, lo_slot, hi_slot;
-
-    t = vtop[-1].type.t;  /* type of the 64-bit value */
-
-    if (op == TOK_SAR) {
-        /* Arithmetic right shift: LSHR is logical only.
-         * Fall back to __ashrdi3 runtime helper. */
-        int func = TOK___ashrdi3;
-        vpush_helper_func(func);
-        vrott(3);
-        gfunc_call(2);
-        vpushi(0);
-        vtop->r = REG_IRET;
-        vtop->r2 = REG_IRE2;
-        return;
-    }
-
-    /* Step 1: Swap so 64-bit value is on top, shift below */
-    vswap();
-    /* vstack: [..., shift_count, 64-bit_value] */
-
-    /* Step 2: Expand 64-bit value to lo, hi */
-    lexpand();
-    /* vstack: [..., shift_count, lo (VT_INT), hi (VT_INT)] */
-
-    /* Step 3: Rotate shift to top: shift lo hi → lo hi shift */
-    vrotb(3);
-    /* vstack: [..., lo, hi, shift_count] */
-
-    /* Materialize shift count into a workspace slot, save to scratch */
-    gv(RC_INT);
-    shift_slot = vtop->r & VT_VALMASK;
-
-    /* Clamp shift count to 0-63: TCWG warns that shift > 2*wordlength
-     * can lock the processor for a significant time. */
-    abcreg_stack_depth = 0;
-    Tp_LDL(shift_slot);
-    Tp_LDC(63);
-    Tp_AND();
-    Tp_STL(FRAME_SLOT_SCRATCH2);
-    shift_slot = FRAME_SLOT_SCRATCH2;
-    vpop();
-
-    /* vstack: [..., lo, hi] */
-
-    /* Materialize both halves into workspace slots */
-    gv2(RC_INT, RC_INT);
-    hi_slot = vtop[0].r & VT_VALMASK;
-    lo_slot = vtop[-1].r & VT_VALMASK;
-
-    /* Reset eval stack tracking — we'll manually manage it */
-    abcreg_stack_depth = 0;
-
-    /* SHL or SHR: use native LSHL / LSHR
-     *
-     * Push order onto eval stack (last push = AReg):
-     *   1. LDL hi_slot   → goes to CReg after subsequent pushes
-     *   2. LDL lo_slot   → goes to BReg after subsequent push
-     *   3. LDL shift_slot → stays in AReg
-     *
-     * LSHL/LSHR: CReg=hi, BReg=lo, AReg=shift
-     * Result: AReg=result_lo, BReg=result_hi
-     */
-    Tp_LDL(hi_slot);
-    Tp_LDL(lo_slot);
-    Tp_LDL(shift_slot);
-
-    if (op == TOK_SHL)
-        Tp_OPR_BINARY(TP_OPR_LSHL);  /* 3 in → 2 out, net -1 like binary */
-    else
-        Tp_OPR_BINARY(TP_OPR_LSHR);
-
-    /* After LSHL/LSHR: AReg=result_lo, BReg=result_hi
-     * LSHL/LSHR consume all 3 eval stack entries, produce 2.
-     * Store results back to workspace slots. */
-    Tp_STL(lo_slot);   /* STL stores AReg=result_lo; AReg←BReg=result_hi */
-    Tp_STL(hi_slot);   /* STL stores AReg=result_hi (was BReg) */
-
-    /* The vstack still has [..., lo, hi] from lexpand + gv2.
-     * lo_slot and hi_slot now contain the shifted values.
-     * Rebuild the 64-bit result (inline lbuild). */
-    gv2(RC_INT, RC_INT);
-    vtop[-1].r2 = vtop[0].r;
-    vtop[-1].type.t = t;
-    vpop();
-}
-
-/* Compare FBreg (the first operand) with FAreg (the second), leaving the C
- * truth value in AReg; with a NaN operand every relation but != is false
- * (C99 F.3).
- *
- * T9000: fpeq, fpgt and fpge are the IEEE relations and are false for a
- * NaN (ISM 11.9.1), so a <= b is b >= a, not !(a > b).
- * T800: fpgt and fpeq compare on a total ordering in which a NaN is just a
- * large magnitude (ACWG B.2.7), so each relation is masked with fpordered,
- * which pushes "neither is a NaN" and leaves the FPU stack in place. */
-static void tp_emit_fp_compare(int op)
-{
-    int t800 = !tp_have_t9000_feat(TP_T9K_FPU);
-    int invert = 0;
-
-    if (t800)
-        emit_instr(TP_OP_OPR, TP_OPR_FPORDERED);
-    switch (op) {
-    case TOK_NE:                                /* !(ordered && a == b) */
-        invert = 1;
-        /* fall through */
-    case TOK_EQ:
-        emit_instr(TP_OP_OPR, TP_FPU_EQ);
-        break;
-    case TOK_GT:
-        emit_instr(TP_OP_OPR, TP_FPU_GT);
-        break;
-    case TOK_LT:                                /* b > a */
-        emit_instr(TP_OP_OPR, TP_FPU_REV);
-        emit_instr(TP_OP_OPR, TP_FPU_GT);
-        break;
-    case TOK_GE:
-    case TOK_LE:
-        if (!t800) {
-            if (op == TOK_LE)                   /* b >= a */
-                emit_instr(TP_OP_OPR, TP_FPU_REV);
-            emit_instr(TP_OP_OPR, TP_FPU_GE);
-        } else {
-            if (op == TOK_GE)                   /* !(b > a) */
-                emit_instr(TP_OP_OPR, TP_FPU_REV);
-            emit_instr(TP_OP_OPR, TP_FPU_GT);   /* !(a > b) */
-            emit_instr(TP_OP_EQC, 0);
-        }
-        break;
-    }
-    if (t800)
-        emit_instr(TP_OP_OPR, TP_OPR_AND);
-    if (invert)
-        emit_instr(TP_OP_EQC, 0);
-}
-
-/* ------------------------------------------------------------------------
- * Keeping an FPU result in FA
- *
- * gen_opf stores every result to its slot, and the next operation often
- * loads it straight back: `(a[1]*b[1]) + (a[2]*b[2])` went
- * `... fpldnlmulsn; ldlp 5; fpstnlsn; ldlp 4; fpldnlsn; ldlp 5; fpldnladdsn`.
- * The FPU holds three values, and the occam compiler keeps whole expressions
- * on it.  This catches the common case of that: an operand of an FP operation
- * that is the value the last one stored, with only integer instructions -
- * address arithmetic for the other operand - emitted since.  The store is
- * taken back, those instructions are emitted again, and the value is used
- * where it still is, in FA.
- *
- * Sound because: nothing in between touches the FPU or the slot (checked
- * instruction by instruction in the history window); the operand is the only
- * vstack entry naming the slot, and the operation consumes it, so nothing
- * reads the slot later; and the window holds no branch target or raw bytes
- * (gsym_addr clears the history, and jumps and relocations break its
- * contiguity, which is checked). */
-
-/* May h stand between the store and its consumer?  An integer instruction
- * that neither reads nor writes slot r (or r + 1, a double's pair). */
-static int tp_hist_fpu_neutral(const struct tp_hist_ent *h, int r)
-{
-    if (h->kind == TP_HIST_LOCAL)
-        return h->opc == TP_OP_LDL || h->opc == TP_OP_LDLP ||
-               h->opc == TP_OP_STL;
-    switch (h->opc) {
-    case TP_OP_LDL:
-    case TP_OP_STL:
-        return h->val != r && h->val != r + 1;
-    case TP_OP_LDLP:
-        /* a double access through it touches val and val + 1 */
-        return h->val < r - 1 || h->val > r + 1;
-    case TP_OP_LDC:
-    case TP_OP_ADC:
-    case TP_OP_LDNL:
-    case TP_OP_LDNLP:
-        return 1;
-    case TP_OP_OPR:
-        switch (h->val) {
-        case TP_OPR_REV: case TP_OPR_LB: case TP_OPR_BSUB: case TP_OPR_WSUB:
-        case TP_OPR_WSUBDB: case TP_OPR_SUM: case TP_OPR_DIFF:
-        case TP_OPR_PROD: case TP_OPR_AND: case TP_OPR_OR: case TP_OPR_XOR:
-        case TP_OPR_NOT: case TP_OPR_SHL: case TP_OPR_SHR: case TP_OPR_MINT:
-        case TP_OPR_DUP:
-            return 1;
-        }
-        return 0;
-    }
-    return 0;
-}
-
-/* sv is about to be consumed by an FP operation of precision is_db.  If it
- * is the value the last FP operation stored and the store can be taken back,
- * take it back and return 1: the value is in FA, under nothing. */
-static int tp_fpu_take_resident(SValue *sv, int is_db)
-{
-    struct tp_hist_ent after[TP_HIST_N];
-    int r = sv->r & VT_VALMASK;
-    int k, i, n;
-
-    if (nocode_wanted || tp_fpr_reg < 0 || r != tp_fpr_reg ||
-        (sv->r & (VT_LVAL | VT_SYM)) || tp_fpr_db != is_db ||
-        tp_fpr_off < func_start_ind || tp_hist_n == 0 ||
-        tp_hist[0].end != ind)
-        return 0;
-    if (tp_reg_live_on_vstack(r, sv) ||
-        (is_db && tp_reg_live_on_vstack(r + 1, sv)))
-        return 0;
-    for (k = 1; k < tp_hist_n; k++)
-        if (tp_hist[k].off == tp_fpr_off)
-            break;
-    if (k >= tp_hist_n ||
-        tp_hist[k].kind != TP_HIST_INSTR || tp_hist[k].opc != TP_OP_LDLP ||
-        tp_hist[k].val != r ||
-        tp_hist[k - 1].kind != TP_HIST_INSTR ||
-        tp_hist[k - 1].opc != TP_OP_OPR ||
-        tp_hist[k - 1].val != (is_db ? TP_FPU_STNLDB : TP_FPU_STNLSN) ||
-        tp_hist[k - 1].end != tp_fpr_end)
-        return 0;
-    for (i = k; i > 0; i--)
-        if (tp_hist[i].end != tp_hist[i - 1].off)
-            return 0;
-    for (i = k - 2; i >= 0; i--)
-        if (!tp_hist_fpu_neutral(&tp_hist[i], r))
-            return 0;
-
-    n = k - 1;
-    for (i = 0; i < n; i++)
-        after[i] = tp_hist[k - 2 - i];          /* oldest first */
-    ind = tp_fpr_off;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-    for (i = 0; i < n; i++) {
-        if (after[i].kind == TP_HIST_LOCAL)
-            emit_local_op(after[i].opc, after[i].val);
-        else
-            emit_instr(after[i].opc, after[i].val);
-    }
-    return 1;
-}
-
-/* ------------------------------------------------------------------------
- * Dead parking, cleaned up at the end of a statement
- *
- * A value TinyCC computes is parked in a workspace slot (always-STL) so the
- * vstack can name it, and most are loaded straight back.  When vpop()
- * discards one - an expression statement's value, typically an
- * assignment's - the slot has no reader left, and the code since the last
- * label is still in the history window.  At the end of an expression
- * statement, once that value has been popped, the window is cleaned of
- * what is now dead:
- *
- *   stl x; ldl x          -> (nothing)        the value rides in AReg
- *   <push>; stl x         -> (nothing)        x is never read: `i++`'s copy
- *   ldlp x; fpstnlsn; ldl x; stl y      -> ldlp y; fpstnlsn
- *   ldlp x; fpstnlsn; ldl x; <addr>; stnl k -> <addr>; [ldnlp k;] fpstnlsn
- *
- * each when the value parked in x has no other reader: nothing in the
- * window reads x before x is written again, and either it is written again
- * or no vstack entry names x.  Every rule leaves A/B/C (and the FPU stack)
- * exactly as it found them, so the code after it is replayed unchanged, and
- * removing one pair can expose another (`i = 0;` is `ldc 0; stl 9; ldl 9;
- * stl i`, `i++;` `ldl i; stl 9; ldl 9; stl 10; ldl 9; adc 1; stl i`), so
- * the rules run until nothing changes.  TinyCC keeps no register value
- * across a label, and the window starts after the last one (gsym_addr
- * clears it), so no later code can read a slot no vstack entry names.
- */
-
-/* What may stand in the window: instructions whose position does not
- * matter to them (no jump, call, ldpi or lend) and whose slot traffic is
- * all visible (no other kinds of local access). */
-static int tp_ent_movable(const struct tp_hist_ent *h)
-{
-    if (h->kind == TP_HIST_LOCAL)
-        return h->opc == TP_OP_LDL || h->opc == TP_OP_LDLP ||
-               h->opc == TP_OP_STL;
-    switch (h->opc) {
-    case TP_OP_LDL: case TP_OP_STL: case TP_OP_LDLP: case TP_OP_LDC:
-    case TP_OP_ADC: case TP_OP_LDNL: case TP_OP_LDNLP: case TP_OP_STNL:
-    case TP_OP_EQC:
-        return 1;
-    case TP_OP_OPR:
-        switch (h->val) {
-        case TP_OPR_GCALL: case TP_OPR_LDPI: case TP_OPR_RET:
-        case TP_OPR_LEND:
-            return 0;
-        }
-        return 1;
-    }
-    return 0;
-}
-
-/* `ldlp y` may be followed by a double access, which reads or writes y and
- * y + 1: count it as touching both. */
-static int tp_ent_reads(const struct tp_hist_ent *h, int x)
-{
-    if (h->kind != TP_HIST_INSTR)
-        return 0;
-    if (h->opc == TP_OP_LDL)
-        return h->val == x;
-    return h->opc == TP_OP_LDLP && (h->val == x || h->val == x - 1);
-}
-
-static int tp_ent_writes(const struct tp_hist_ent *h, int x)
-{
-    return h->kind == TP_HIST_INSTR && h->opc == TP_OP_STL && h->val == x;
-}
-
-/* A push with no other effect: removing it with the store it feeds leaves
- * the stacks as they were. */
-static int tp_ent_pure_push(const struct tp_hist_ent *h)
-{
-    if (h->kind == TP_HIST_LOCAL)
-        return h->opc == TP_OP_LDL || h->opc == TP_OP_LDLP;
-    if (h->opc == TP_OP_LDL || h->opc == TP_OP_LDLP || h->opc == TP_OP_LDC)
-        return 1;
-    return h->opc == TP_OP_OPR && h->val == TP_OPR_MINT;
-}
-
-static int tp_ent_is_fpu(const struct tp_hist_ent *h)
-{
-    return h->kind == TP_HIST_INSTR && h->opc == TP_OP_OPR &&
-           !tp_hist_fpu_neutral(h, -2) && h->val != TP_OPR_SB &&
-           h->val != TP_OPR_SS && h->val != TP_OPR_GT &&
-           h->val != TP_OPR_ADD && h->val != TP_OPR_SUB;
-}
-
-#define TP_HIST_FPSTORE 2   /* (local list only) `[ldnlp val;] fpstnlsn` */
-
-/* Is the value the entry at w[i] parks in slot x dead?  `reload` is the
- * one read allowed (the index of a reload being taken back), or -1. */
-static int tp_park_dead(struct tp_hist_ent *w, const int *keep, int n,
-                        int i, int x, int reload)
-{
-    int j;
-
-    if (x < 0 || x >= NB_REGS ||
-        !(reg_classes[x] & (RC_INT | RC_FLOAT | RC_IRET)))
-        return 0;
-    for (j = i + 1; j < n; j++) {
-        if (!keep[j] || j == reload)
-            continue;
-        if (tp_ent_reads(&w[j], x))
-            return 0;
-        if (tp_ent_writes(&w[j], x))
-            return 1;
-    }
-    /* Not written again in the window: dead if no vstack entry names it.
-     * Only at the end of a statement does the vstack say that much -
-     * mid-expression tccgen and the builtins hold slots outside it (gv()
-     * loads a double's high word through a temporary it pops before naming
-     * the slot; a builtin pops its parked arguments, then loads them). */
-    return !tp_reg_live_on_vstack(x, NULL);
-}
-
-static int tp_next_kept(const int *keep, int n, int i)
-{
-    for (i++; i < n && !keep[i]; i++)
-        ;
-    return i;
-}
-
-/* The current pc is a label that a jump emitted later may reach (a loop
- * head, a `continue' target, a case label: tccgen's gind()).  gsym_addr()
- * clears the window when it resolves a forward jump; a backward target is
- * resolved before the jump exists, so it says so here.  Without this a
- * statement-end cleanup could roll back across the label and move code
- * from before it to after it, or the reverse, and the stl tracking could
- * cancel an `stl' that the path arriving by the jump needs. */
-ST_FUNC void tp_label_here(void)
-{
-    tp_hist_clear();
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-}
-
-/* An expression statement, or a for loop's init or step, is complete:
- * clean its parking out of the window. */
-ST_FUNC void tp_stmt_end(void)
-{
-    struct tp_hist_ent w[TP_HIST_N];   /* the window, oldest first */
-    int keep[TP_HIST_N], mod[TP_HIST_N];
-    int n, i, j, a, b, c, d, first, changed, any = 0;
-
-    static int off = -1;
-
-    if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_VPOP_DEAD");
-        off = e && *e == '0';           /* =0 for an A/B run */
-    }
-    if (off || nocode_wanted || func_uses_inline_asm || tp_hist_n == 0 ||
-        tp_hist[0].end != ind)
-        return;
-    {
-        /* TCC_TRANSPUTER_VPOP_ONLY=name: only in functions whose name
-         * contains it - for bisecting a miscompile */
-        const char *only = getenv("TCC_TRANSPUTER_VPOP_ONLY");
-
-        if (only && *only && (!funcname || !strstr(funcname, only)))
-            return;
-    }
-    /* the window: the newest contiguous run of movable instructions */
-    for (n = 0; n < tp_hist_n; n++) {
-        if (!tp_ent_movable(&tp_hist[n]) || tp_hist[n].off < func_start_ind)
-            break;
-        if (n > 0 && tp_hist[n].end != tp_hist[n - 1].off)
-            break;
-    }
-    if (n < 2)
-        return;
-    for (i = 0; i < n; i++) {
-        w[i] = tp_hist[n - 1 - i];
-        keep[i] = 1;
-        mod[i] = 0;
-    }
-    do {
-        changed = 0;
-        for (a = 0; a < n; a = tp_next_kept(keep, n, a)) {
-            if (!keep[a])
-                continue;
-            b = tp_next_kept(keep, n, a);
-            if (b >= n)
-                break;
-            /* stl x; ldl x */
-            if (w[a].kind == TP_HIST_INSTR && w[a].opc == TP_OP_STL &&
-                w[b].kind == TP_HIST_INSTR && w[b].opc == TP_OP_LDL &&
-                w[b].val == w[a].val &&
-                tp_park_dead(w, keep, n, a, w[a].val, b)) {
-                keep[a] = keep[b] = 0;
-                changed = 1;
-                continue;
-            }
-            /* <push>; stl x, x never read */
-            if (tp_ent_pure_push(&w[a]) &&
-                w[b].kind == TP_HIST_INSTR && w[b].opc == TP_OP_STL &&
-                tp_park_dead(w, keep, n, b, w[b].val, -1)) {
-                keep[a] = keep[b] = 0;
-                changed = 1;
-                continue;
-            }
-            /* ldlp x; fpstnlsn; ldl x; <store of A> */
-            if (w[a].kind == TP_HIST_INSTR && w[a].opc == TP_OP_LDLP &&
-                w[b].kind == TP_HIST_INSTR && w[b].opc == TP_OP_OPR &&
-                w[b].val == TP_FPU_STNLSN) {
-                int x = w[a].val;
-
-                c = tp_next_kept(keep, n, b);
-                if (c >= n || !(w[c].kind == TP_HIST_INSTR &&
-                                w[c].opc == TP_OP_LDL && w[c].val == x))
-                    continue;
-                /* the store: a local's stl, or an address (computed
-                 * from what it pushes itself, so nothing that depends on
-                 * the stack's shape, and not on the FPU) and stnl */
-                for (d = tp_next_kept(keep, n, c); d < n;
-                     d = tp_next_kept(keep, n, d)) {
-                    if (w[d].kind == TP_HIST_LOCAL) {
-                        if (w[d].opc == TP_OP_STL)
-                            break;
-                        continue;           /* an address pushed */
-                    }
-                    if (w[d].opc == TP_OP_STNL)
-                        break;
-                    if (w[d].opc == TP_OP_STL || tp_ent_reads(&w[d], x) ||
-                        tp_ent_is_fpu(&w[d]) ||
-                        (w[d].opc == TP_OP_OPR &&
-                         (w[d].val == TP_OPR_REV || w[d].val == TP_OPR_DUP ||
-                          w[d].val == TP_OPR_SB || w[d].val == TP_OPR_SS))) {
-                        d = n;
-                        break;
-                    }
-                }
-                if (d >= n ||
-                    (w[d].kind == TP_HIST_LOCAL &&
-                     d != tp_next_kept(keep, n, c)) ||
-                    !tp_park_dead(w, keep, n, b, x, c))
-                    continue;
-                keep[c] = 0;
-                if (w[d].kind == TP_HIST_LOCAL) {
-                    /* ldlp y; fpstnlsn */
-                    w[a].kind = TP_HIST_LOCAL;
-                    w[a].opc = TP_OP_LDLP;
-                    w[a].val = w[d].val;
-                    mod[a] = 1;
-                    keep[d] = 0;
-                } else {
-                    keep[a] = keep[b] = 0;
-                    w[d].kind = TP_HIST_FPSTORE;
-                    mod[d] = 1;
-                }
-                changed = 1;
-            }
-        }
-        any |= changed;
-    } while (changed);
-    if (!any)
-        return;
-
-    for (first = 0; first < n && keep[first] && !mod[first]; first++)
-        ;
-    if (getenv("TCC_TRANSPUTER_VPOP_DEAD") &&
-        *getenv("TCC_TRANSPUTER_VPOP_DEAD") == '2') {
-        SValue *p;
-
-        fprintf(stderr, "[VPOP_DEAD] %s @%x vstack:", funcname, w[first].off);
-        for (p = vstack; p <= vtop; p++)
-            fprintf(stderr, " %x/%x", p->r, p->r2);
-        fprintf(stderr, "\n");
-        for (j = first; j < n; j++)
-            fprintf(stderr, "    %s %s opc=%x val=%d\n",
-                    keep[j] ? (mod[j] ? "MOD" : "   ") : "DEL",
-                    w[j].kind == TP_HIST_LOCAL ? "local" : "instr",
-                    w[j].opc, w[j].val);
-    }
-    ind = w[first].off;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-    for (j = first; j < n; j++) {
-        if (!keep[j])
-            continue;
-        if (w[j].kind == TP_HIST_LOCAL)
-            emit_local_op(w[j].opc, w[j].val);
-        else if (w[j].kind == TP_HIST_FPSTORE) {
-            if (w[j].val)
-                emit_instr(TP_OP_LDNLP, w[j].val);
-            emit_instr(TP_OP_OPR, TP_FPU_STNLSN);
-        } else
-            emit_instr(w[j].opc, w[j].val);
-    }
-}
-
-/* The FPU stack effect of an FP instruction in the history window: what it
- * does to the depth above a value parked below everything it touches; the
- * depth it needs above that value to touch only values above it; and the
- * most it allows, as the fused loads leave FC undefined (TCWG chapter 11:
- * `FCreg' = undefined`), so a value parked in FC does not survive one.
- * Pushes, pops, stores, compares and fprev carry FC along, and the unary
- * operations touch FA alone.  Returns 0 for anything not modelled (the
- * square-root and remainder sequences use the whole stack). */
-static int tp_fpu_effect(const struct tp_hist_ent *w, int i, int n,
-                         int *delta, int *need, int *most)
-{
-    int v = w[i].val;
-
-    *delta = 0;
-    *need = 0;
-    *most = 2;
-    switch (v) {
-    case TP_FPU_LDNLSN: case TP_FPU_LDNLDB:
-    case TP_OPR_FPLDNLSNI: case TP_OPR_FPLDNLDBI:
-    case TP_OPR_FPLDZEROSN: case TP_OPR_FPLDZERODB:
-    case TP_FPU_I32TOR32: case TP_FPU_I32TOR64: case TP_OPR_FPB32TOR64:
-        *delta = 1;
-        return 1;
-    case TP_FPU_DUP:
-        *delta = 1; *need = 1;
-        return 1;
-    case TP_FPU_LDNLADDSN: case TP_FPU_LDNLADDDB:
-    case TP_FPU_LDNLMULSN: case TP_FPU_LDNLMULDB:
-        *need = 1; *most = 1;
-        return 1;
-    case TP_OPR_FPINT: case TP_FPU_RTOI32:
-    case TP_FPU_NAN: case TP_FPU_NOTFINITE:
-        *need = 1;
-        return 1;
-    case TP_FPU_STNLSN: case TP_FPU_STNLDB: case TP_FPU_STNLI32:
-        *delta = -1; *need = 1;
-        return 1;
-    case TP_FPU_ADD: case TP_FPU_SUB: case TP_FPU_MUL: case TP_FPU_DIV:
-        *delta = -1; *need = 2;
-        return 1;
-    case TP_FPU_GT: case TP_FPU_EQ: case TP_FPU_GE:
-        *delta = -2; *need = 2;
-        return 1;
-    case TP_FPU_REV: case TP_FPU_ORDERED:
-        *need = 2;
-        return 1;
-    case TP_FPU_CHKERR: case TP_FPU_TESTERR:
-        return 1;
-    case TP_OPR_FPENTRY:
-        /* the selector is the `ldc` before it */
-        if (i == 0 || w[i - 1].kind != TP_HIST_INSTR ||
-            w[i - 1].opc != TP_OP_LDC)
-            return 0;
-        switch (w[i - 1].val) {
-        case TP_FPENTRY_SQRTFIRST: case TP_FPENTRY_SQRTSTEP:
-        case TP_FPENTRY_SQRTLAST:
-            return 0;
-        case TP_FPENTRY_RP: case TP_FPENTRY_RM: case TP_FPENTRY_RZ:
-        case TP_FPENTRY_URN:
-        case TP_FPU_OP_SETERR & 0xFF: case TP_FPU_OP_CLRERR & 0xFF:
-            return 1;
-        }
-        *need = 1;              /* a unary operation on FA */
-        return 1;
-    }
-    if (tp_have_t9000_feat(TP_T9K_FPU)) {
-        switch (v) {
-        case TP_OPR_FPABS: case TP_OPR_FPSQRT:
-        case TP_OPR_FPMULBY2: case TP_OPR_FPDIVBY2:
-        case TP_OPR_FPR32TOR64: case TP_OPR_FPR64TOR32:
-        case TP_OPR_FPEXPINC32: case TP_OPR_FPEXPDEC32:
-            *need = 1;
-            return 1;
-        case TP_OPR_FPRN: case TP_OPR_FPRZ: case TP_OPR_FPRP: case TP_OPR_FPRM:
-            return 1;
-        }
-    }
-    (void)n;
-    return 0;
-}
-
-/* Let L, the left operand of an FP operation whose right operand has just
- * been taken back into FA, stay on the FPU stack too: take back its store
- * if every instruction since keeps it there untouched - pushing above it
- * first, never consuming it, never more than two values above it (the
- * stack is three deep), and leaving exactly one, the right operand, above
- * it.  Then L is in FB and R in FA, and the operation needs no memory
- * operand: `a*b + c*d` is `fpldnlsn; fpldnlmulsn; fpldnlsn; fpldnlmulsn;
- * fpadd`, as occam compiles it, where it used to store the first product
- * and add it back with fpldnladdsn.  The window holds no label (a label
- * empties it), call or jump (raw bytes break its contiguity), so nothing
- * can come between the two paths.  TCC_TRANSPUTER_FPSTACK=0 turns it off. */
-static int tp_fpu_take_under(SValue *sv, int is_db)
-{
-    struct tp_hist_ent w[TP_HIST_N];    /* the window, oldest first */
-    int r = sv->r & VT_VALMASK;
-    int k, i, n, d, delta, need, most;
-    static int off = -1;
-
-    if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPSTACK");
-        off = e && *e == '0';
-    }
-    if (off || nocode_wanted || (sv->r & (VT_LVAL | VT_SYM)) ||
-        r >= VT_CONST || !(reg_classes[r] & RC_FLOAT) ||
-        tp_hist_n == 0 || tp_hist[0].end != ind)
-        return 0;
-    {
-        /* TCC_TRANSPUTER_FPSTACK_ONLY=name: only in functions whose name
-         * contains it - for bisecting a miscompile */
-        const char *only = getenv("TCC_TRANSPUTER_FPSTACK_ONLY");
-
-        if (only && *only && (!funcname || !strstr(funcname, only)))
-            return 0;
-    }
-    if (tp_reg_live_on_vstack(r, sv) ||
-        (is_db && tp_reg_live_on_vstack(r + 1, sv)))
-        return 0;
-    /* L's store, the newest write of its slot: `ldlp r; fpstnl` */
-    for (k = 1; k < tp_hist_n; k++) {
-        if (tp_hist[k].end != tp_hist[k - 1].off ||
-            tp_hist[k].off < func_start_ind)
-            return 0;
-        if (tp_hist[k].kind == TP_HIST_INSTR &&
-            tp_hist[k].opc == TP_OP_LDLP && tp_hist[k].val == r &&
-            tp_hist[k - 1].kind == TP_HIST_INSTR &&
-            tp_hist[k - 1].opc == TP_OP_OPR &&
-            tp_hist[k - 1].val == (is_db ? TP_FPU_STNLDB : TP_FPU_STNLSN))
-            break;
-    }
-    if (k >= tp_hist_n || k < 2)
-        return 0;
-    n = k - 1;
-    for (i = 0; i < n; i++)
-        w[i] = tp_hist[k - 2 - i];
-    d = 0;
-    for (i = 0; i < n; i++) {
-        if (w[i].kind == TP_HIST_LOCAL)
-            continue;
-        if (w[i].opc == TP_OP_OPR &&
-            tp_fpu_effect(w, i, n, &delta, &need, &most)) {
-            if (d < need || d > most || d + delta < 0 || d + delta > 2)
-                return 0;
-            d += delta;
-            continue;
-        }
-        if (!tp_hist_fpu_neutral(&w[i], r))
-            return 0;
-    }
-    if (d != 1)
-        return 0;
-    if (getenv("TCC_TRANSPUTER_FPSTACK") &&
-        *getenv("TCC_TRANSPUTER_FPSTACK") == '2') {
-        fprintf(stderr, "[FPSTACK] %s r=%d window:", funcname, r);
-        for (i = 0; i < n; i++)
-            fprintf(stderr, " %s%x:%d", w[i].kind == TP_HIST_LOCAL ? "L" : "",
-                    w[i].opc, w[i].val);
-        fprintf(stderr, "\n");
-    }
-
-    ind = tp_hist[k].off;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-    for (i = 0; i < n; i++) {
-        if (w[i].kind == TP_HIST_LOCAL)
-            emit_local_op(w[i].opc, w[i].val);
-        else
-            emit_instr(w[i].opc, w[i].val);
-    }
-    return 1;
-}
-
-/* May h stand between an address's park in register v (one word, not an
- * FP pair) and its use?  An integer instruction that leaves v alone. */
-static int tp_hist_int_neutral(const struct tp_hist_ent *h, int v)
-{
-    if (h->kind == TP_HIST_LOCAL)
-        return h->opc == TP_OP_LDL || h->opc == TP_OP_LDLP ||
-               h->opc == TP_OP_STL;
-    switch (h->opc) {
-    case TP_OP_LDL:
-    case TP_OP_STL:
-        return h->val != v;
-    case TP_OP_LDLP:
-        return h->val != v && h->val != v - 1;
-    case TP_OP_OPR:
-        return tp_hist_fpu_neutral(h, -2);   /* its integer operations */
-    }
-    return tp_hist_fpu_neutral(h, -2);
-}
-
-/* The integer stack effect of a pure entry of an FP operand's code: what
- * it pushes, and what it needs there first.  0 for anything that stores
- * or is not modelled. */
-static int tp_fpu_pure(const struct tp_hist_ent *h, int *idelta, int *ineed,
-                       int *fdelta)
-{
-    *idelta = *ineed = *fdelta = 0;
-    if (h->kind == TP_HIST_LOCAL) {
-        if (h->opc != TP_OP_LDL && h->opc != TP_OP_LDLP)
-            return 0;
-        *idelta = 1;
-        return 1;
-    }
-    switch (h->opc) {
-    case TP_OP_LDL: case TP_OP_LDLP: case TP_OP_LDC:
-        *idelta = 1;
-        return 1;
-    case TP_OP_LDNLP: case TP_OP_ADC: case TP_OP_LDNL:
-        *ineed = 1;
-        return 1;
-    case TP_OP_OPR:
-        switch (h->val) {
-        case TP_OPR_WSUB: case TP_OPR_BSUB: case TP_OPR_WSUBDB:
-        case TP_OPR_SUM: case TP_OPR_PROD:
-            *idelta = -1; *ineed = 2;
-            return 1;
-        case TP_FPU_LDNLSN: case TP_FPU_LDNLDB:
-            *idelta = -1; *ineed = 1; *fdelta = 1;
-            return 1;
-        case TP_OPR_FPLDNLSNI: case TP_OPR_FPLDNLDBI:
-            *idelta = -2; *ineed = 2; *fdelta = 1;
-            return 1;
-        case TP_FPU_LDNLADDSN: case TP_FPU_LDNLADDDB:
-        case TP_FPU_LDNLMULSN: case TP_FPU_LDNLMULDB:
-            *idelta = -1; *ineed = 1;
-            return 1;
-        case TP_OPR_FPLDZEROSN: case TP_OPR_FPLDZERODB:
-        case TP_FPU_DUP:        /* a square's; tp_fpu_effect checks its need */
-            *fdelta = 1;
-            return 1;
-        case TP_FPU_ADD: case TP_FPU_MUL: case TP_FPU_SUB: case TP_FPU_DIV:
-            *fdelta = -1;
-            return 1;
-        }
-        return 0;
-    }
-    return 0;
-}
-
-/* The left operand of a commutative FP operation (+ or *) whose right
- * operand is in FA cannot stay under it - it would be in FC under a fused
- * load, which loses FC - but its own code can move: if the code that
- * computed it starts from empty stacks, only loads (locals, registers,
- * memory through them) and does arithmetic, and the right operand's code
- * after it stores nothing it reads and nothing to memory, emit the right
- * operand's code first and the left's on top of it.  Then the right is in
- * FB and the left in FA, and FB op FA is the same IEEE result: occam's
- * order for `a*b + (c*d + e*f)`, the deeper side first.  Returns 1 with
- * both on the stack. */
-static int tp_fpu_take_moved(SValue *sv, int is_db)
-{
-    struct tp_hist_ent rseg[TP_HIST_N], lseg[TP_HIST_N];
-    int r = sv->r & VT_VALMASK;
-    int k, j, s, nr, nl, i, d, delta, need, most, fd, id, idelta, ineed, fdelta;
-    int rd_reg[TP_HIST_N], rd_loc[TP_HIST_N], nrd = 0, nloc = 0;
-    static int off = -1;
-
-    if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPSTACK");
-        off = e && *e == '0';
-    }
-    if (off || nocode_wanted || (sv->r & (VT_LVAL | VT_SYM)) ||
-        r >= VT_CONST || !(reg_classes[r] & RC_FLOAT) ||
-        tp_hist_n == 0 || tp_hist[0].end != ind ||
-        tp_reg_live_on_vstack(r, sv) ||
-        (is_db && tp_reg_live_on_vstack(r + 1, sv)))
-        return 0;
-    {
-        const char *only = getenv("TCC_TRANSPUTER_FPSTACK_ONLY");
-
-        if (only && *only && (!funcname || !strstr(funcname, only)))
-            return 0;
-    }
-    /* the left operand's store, `ldlp r; fpstnl`, at k and k - 1 */
-    for (k = 1; k < tp_hist_n; k++) {
-        if (tp_hist[k].end != tp_hist[k - 1].off ||
-            tp_hist[k].off < func_start_ind)
-            return 0;
-        if (tp_hist[k].kind == TP_HIST_INSTR &&
-            tp_hist[k].opc == TP_OP_LDLP && tp_hist[k].val == r &&
-            tp_hist[k - 1].kind == TP_HIST_INSTR &&
-            tp_hist[k - 1].opc == TP_OP_OPR &&
-            tp_hist[k - 1].val == (is_db ? TP_FPU_STNLDB : TP_FPU_STNLSN))
-            break;
-    }
-    if (k >= tp_hist_n || k < 2)
-        return 0;
-    /* its code: back from the store to where both stacks were empty */
-    fd = 1;
-    id = 0;
-    for (s = k + 1; s < tp_hist_n; s++) {
-        if (tp_hist[s].end != tp_hist[s - 1].off ||
-            tp_hist[s].off < func_start_ind ||
-            !tp_fpu_pure(&tp_hist[s], &idelta, &ineed, &fdelta))
-            return 0;
-        fd -= fdelta;
-        id -= idelta;
-        if (fd < 0 || id < 0 || id < ineed)
-            return 0;
-        if (fd == 0 && id == 0)
-            break;
-    }
-    if (s >= tp_hist_n)
-        return 0;
-    nl = s - k;
-    for (i = 0; i < nl; i++) {
-        lseg[i] = tp_hist[s - i];                   /* oldest first */
-        if (lseg[i].kind == TP_HIST_LOCAL)
-            rd_loc[nloc++] = lseg[i].val;
-        else if (lseg[i].opc == TP_OP_LDL || lseg[i].opc == TP_OP_LDLP)
-            rd_reg[nrd++] = lseg[i].val;
-    }
-    /* the right operand's code: no store into what the left reads, none
-     * to memory except its own parking in register slots */
-    nr = k - 1;
-    for (i = 0; i < nr; i++) {
-        const struct tp_hist_ent *e = &tp_hist[k - 2 - i];
-        int x;
-
-        rseg[i] = *e;
-        if (e->kind == TP_HIST_LOCAL) {
-            if (e->opc == TP_OP_STL)
-                for (x = 0; x < nloc; x++)
-                    if (rd_loc[x] == e->val)
-                        return 0;
-            continue;
-        }
-        if (e->opc == TP_OP_STL) {
-            for (x = 0; x < nrd; x++)
-                if (rd_reg[x] == e->val || rd_reg[x] + 1 == e->val)
-                    return 0;
-            continue;
-        }
-        if (e->opc == TP_OP_STNL)
-            return 0;
-        if (e->opc == TP_OP_OPR &&
-            (e->val == TP_FPU_STNLSN || e->val == TP_FPU_STNLDB ||
-             e->val == TP_FPU_STNLI32)) {
-            /* only to a register slot the left does not read */
-            const struct tp_hist_ent *a = i > 0 ? &rseg[i - 1] : NULL;
-            if (!a || a->kind != TP_HIST_INSTR || a->opc != TP_OP_LDLP)
-                return 0;
-            for (x = 0; x < nrd; x++)
-                if (rd_reg[x] == a->val || rd_reg[x] == a->val + 1)
-                    return 0;
-            continue;
-        }
-        if (e->opc == TP_OP_OPR &&
-            (e->val == TP_OPR_SB || e->val == TP_OPR_SS ||
-             e->val == TP_OPR_MOVE))
-            return 0;
-    }
-    /* the right operand's code leaves the integer stack as it found it,
-     * so the left's pushes land where they did */
-    id = 0;
-    for (i = 0; i < nr; i++) {
-        const struct tp_hist_ent *e = &rseg[i];
-
-        if (tp_fpu_pure(e, &idelta, &ineed, &fdelta)) {
-            if (id < ineed)
-                return 0;
-            id += idelta;
-        } else if (e->opc == TP_OP_STL ||
-                   (e->kind == TP_HIST_INSTR && e->opc == TP_OP_OPR &&
-                    (e->val == TP_FPU_STNLSN || e->val == TP_FPU_STNLDB ||
-                     e->val == TP_FPU_STNLI32))) {
-            if (id < 1)
-                return 0;
-            id--;
-        } else
-            return 0;
-    }
-    if (id != 0)
-        return 0;
-    /* the left's code on top of the right operand: the stack rules */
-    d = 0;
-    for (i = 0; i < nl; i++) {
-        if (lseg[i].kind == TP_HIST_LOCAL || lseg[i].opc != TP_OP_OPR)
-            continue;
-        if (!tp_fpu_effect(lseg, i, nl, &delta, &need, &most))
-            continue;           /* integer operations */
-        if (d < need || d > most || d + delta < 0 || d + delta > 2)
-            return 0;
-        d += delta;
-    }
-    if (d != 1)
-        return 0;
-    if (getenv("TCC_TRANSPUTER_FPSTACK") &&
-        *getenv("TCC_TRANSPUTER_FPSTACK") == '2')
-        fprintf(stderr, "[FPSTACK] %s moved %d entries above %d\n",
-                funcname, nl, nr);
-
-    ind = tp_hist[s].off;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-    for (j = 0; j < 2; j++) {
-        struct tp_hist_ent *w = j ? lseg : rseg;
-        int n = j ? nl : nr;
-
-        for (i = 0; i < n; i++) {
-            if (w[i].kind == TP_HIST_LOCAL)
-                emit_local_op(w[i].opc, w[i].val);
-            else
-                emit_instr(w[i].opc, w[i].val);
-        }
-    }
-    return 1;
-}
-
-/* sv, about to be loaded onto an empty FPU stack, is a float at the address
- * in register v - an address computed and parked (`ldl a; ldnlp 1; stl 9`)
- * before the other operand's.  If only integer instructions that leave v
- * and the FPU alone came since, load through the address where it was
- * computed instead of parking it: `ldl a; ldnlp 1; fpldnlsn; ldl b; ldnlp
- * 1; fpldnlmulsn` as occam does, where it was `...; stl 9; ldl b; ldnlp 1;
- * fpldnlsn; ldl 9; fpldnlmulsn`.  Returns 1 with the value in FA. */
-static int tp_fpu_load_early(SValue *sv, int is_db)
-{
-    struct tp_hist_ent w[TP_HIST_N];
-    int v = sv->r & VT_VALMASK;
-    int k, i, n;
-    static int off = -1;
-
-    if (off < 0) {
-        const char *e = getenv("TCC_TRANSPUTER_FPSTACK");
-        off = e && *e == '0';
-    }
-    /* A register lvalue is loaded from its register whatever its c.i
-     * (tp_emit_float_addr), and that register is what was parked. */
-    if (off || nocode_wanted || !(sv->r & VT_LVAL) || (sv->r & VT_SYM) ||
-        v >= VT_CONST || tp_hist_n == 0 || tp_hist[0].end != ind ||
-        tp_reg_live_on_vstack(v, sv))
-        return 0;
-    for (k = 0; k < tp_hist_n; k++) {
-        if ((k > 0 && tp_hist[k].end != tp_hist[k - 1].off) ||
-            tp_hist[k].off < func_start_ind)
-            return 0;
-        if (tp_hist[k].kind == TP_HIST_INSTR &&
-            tp_hist[k].opc == TP_OP_STL && tp_hist[k].val == v)
-            break;
-        if (!tp_hist_int_neutral(&tp_hist[k], v))
-            return 0;
-    }
-    if (k >= tp_hist_n || k == 0)
-        return 0;               /* none, or the last: the plain load cancels it */
-    n = k;
-    for (i = 0; i < n; i++)
-        w[i] = tp_hist[k - 1 - i];
-
-    ind = tp_hist[k].off;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-    emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
-    for (i = 0; i < n; i++) {
-        if (w[i].kind == TP_HIST_LOCAL)
-            emit_local_op(w[i].opc, w[i].val);
-        else
-            emit_instr(w[i].opc, w[i].val);
-    }
-    return 1;
-}
-
-ST_DATA int tp_opf_volatile;
-
-/* Does an object of type t hold, at byte off, a scalar of basic type bt that
- * is not volatile?  Through arrays (off modulo the element size) and the
- * members of structs and unions, so `p[1]`, `n.v[2]` and `q.a.x` of a
- * local or global are found as well as plain variables. */
-static int tp_type_holds(CType *t, long off, int bt)
-{
-    CType *e;
-    Sym *f;
-    int size, align;
-
-    if (off < 0 || (t->t & (VT_VOLATILE | VT_VLA)))
-        return 0;
-    if (t->t & VT_ARRAY) {
-        e = pointed_type(t);
-        size = type_size(e, &align);
-        return size > 0 && tp_type_holds(e, off % size, bt);
-    }
-    if ((t->t & VT_BTYPE) == VT_STRUCT) {
-        for (f = t->ref->next; f; f = f->next) {
-            size = type_size(&f->type, &align);
-            if (off >= f->c && off < f->c + size &&
-                tp_type_holds(&f->type, off - f->c, bt))
-                return 1;
-        }
-        return 0;
-    }
-    return off == 0 && (t->t & VT_BTYPE) == bt;
-}
-
-/* Are a and b one non-volatile variable, or one element or member of one:
- * then x * x needs one load.  The vstack types are no help with volatile -
- * tccgen's arithmetic conversion gives both operands the unqualified common
- * type before gen_opf sees them, so gen_op sets tp_opf_volatile - and an
- * identifier's vstack entry keeps its symbol, whose declaration says too:
- * a local or global read at the symbol's own place, or an element or member
- * found in its type (tp_type_holds).  Nothing reached through a pointer,
- * which has no symbol to ask. */
-static int tp_fpu_same_operand(const SValue *a, const SValue *b)
-{
-    int v = a->r & VT_VALMASK;
-    Sym *s = a->sym;
-    long off;
-
-    if (tp_opf_volatile || a->r != b->r || a->sym != b->sym ||
-        a->c.i != b->c.i || !s ||
-        !(a->r & VT_LVAL) || (a->r & (VT_MUSTCAST | VT_MUSTBOUND)) ||
-        (s->type.t & VT_VOLATILE))
-        return 0;
-    if (v == VT_LOCAL)
-        off = (long)a->c.i - s->c;
-    else if (v == VT_CONST && (a->r & VT_SYM))
-        off = (long)a->c.i;
-    else
-        return 0;
-    return tp_type_holds(&s->type, off, a->type.t & VT_BTYPE);
-}
-
-/* The right operand of x * x through a pointer, `p->x * p->x`: its address
- * was just computed and parked (`ldl p; ldnlp 12; stl 10`), and the same
- * computation, entry for entry, sits just before the left operand's load
- * (`ldl p; ldnlp 12; fpldnlsn`), with nothing between them but that load.
- * Both compute one address from the same unchanged locals, so drop the
- * second: the caller follows with fpdup; fpmul.  Returns 1 with the left
- * operand still alone in FA. */
-static int tp_fpu_square_twin(SValue *sv, int is_db)
-{
-    int v = sv->r & VT_VALMASK;
-    int m, i, k, id, idelta, ineed, fdelta;
-
-    if (tp_opf_volatile ||
-        nocode_wanted || !(sv->r & VT_LVAL) || (sv->r & VT_SYM) ||
-        v >= VT_CONST || tp_hist_n < 4 || tp_hist[0].end != ind ||
-        tp_reg_live_on_vstack(v, sv) ||
-        tp_hist[0].kind != TP_HIST_INSTR || tp_hist[0].opc != TP_OP_STL ||
-        tp_hist[0].val != v)
-        return 0;
-    id = 1;                     /* the address, before its `stl` */
-    for (m = 1; m < tp_hist_n; m++) {
-        if (tp_hist[m].end != tp_hist[m - 1].off ||
-            tp_hist[m].off < func_start_ind ||
-            !tp_fpu_pure(&tp_hist[m], &idelta, &ineed, &fdelta) || fdelta ||
-            (tp_hist[m].kind == TP_HIST_INSTR && tp_hist[m].opc == TP_OP_OPR))
-            return 0;
-        id -= idelta;
-        if (id < 0 || id < ineed)
-            return 0;
-        if (id == 0)
-            break;
-    }
-    i = m + 1;                  /* the left operand's load */
-    if (m >= tp_hist_n || i + m >= tp_hist_n ||
-        tp_hist[i].end != tp_hist[m].off ||
-        tp_hist[i].kind != TP_HIST_INSTR || tp_hist[i].opc != TP_OP_OPR ||
-        tp_hist[i].val != (is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN))
-        return 0;
-    for (k = 1; k <= m; k++)
-        if (tp_hist[i + k].end != tp_hist[i + k - 1].off ||
-            tp_hist[i + k].kind != tp_hist[k].kind ||
-            tp_hist[i + k].opc != tp_hist[k].opc ||
-            tp_hist[i + k].val != tp_hist[k].val)
-            return 0;
-    ind = tp_hist[m].off;
-    cur_text_section->data_offset = ind;
-    tp_drop_local_patches_from(ind);
-    tp_hist_rollback(ind);
-    tp_stl_track_clear();
-    tp_areg_invalidate();
-    tp_fpr_reg = -1;
-    return 1;
-}
-
-/* Can the result of an FP operation go to sv's slot?  When sv is a float
- * value the operation consumes and no other vstack entry names: then
- * get_reg need not spill a live value (`ldl 3; stl 12` and a reload) to find
- * a free one.  Single precision only: a double needs the pair. */
-static int tp_fpu_dst_reusable(SValue *sv)
-{
-    int r = sv->r & VT_VALMASK;
-    SValue *p;
-
-    if ((sv->r & (VT_LVAL | VT_SYM)) || r >= VT_CONST ||
-        !(reg_classes[r] & RC_FLOAT))
-        return 0;
-    for (p = vstack; p < vtop - 1; p++)
-        if ((p->r & VT_VALMASK) == r || (p->r2 & VT_VALMASK) == r)
-            return 0;
-    return 1;
-}
-
-/* Is sv an address that was parked in its register by the very last
- * instruction?  Then loading through it first cancels that `stl`. */
-static int tp_fpu_addr_just_parked(SValue *sv)
-{
-    int v = sv->r & VT_VALMASK;
-
-    return (sv->r & VT_LVAL) && !(sv->r & VT_SYM) && v < VT_CONST &&
-           sv->c.i >= 0 && tp_last_stl_reg == v && tp_last_stl_end == ind;
-}
-
-ST_FUNC void gen_opf(int op) {
-    SValue orig_first, orig_second;
-    SValue sv_first, sv_second;
-    int bt;
-    int is_db;
-    int opf_debug = tp_opf_debug;
-
-    /* Unary minus: flip the sign bit.  0.0 - x is not negation: it gives
-     * +0.0 for x = +0.0.  Float values live in workspace slots, low word
-     * first, so the sign is the top bit of the word in the last slot. */
-    if (op == TOK_NEG) {
-        int neg_bt = vtop->type.t & VT_BTYPE;
-        int neg_db = (neg_bt == VT_DOUBLE || neg_bt == VT_LDOUBLE);
-        int hi;
-
-        gv(RC_FLOAT);
-        hi = (vtop->r & VT_VALMASK) + (neg_db ? 1 : 0);
-        abcreg_stack_depth = 0;
-        fpureg_stack_depth = 0;
-        Tp_LDL(hi);
-        Tp_LDC(-0x7fffffff - 1);             /* mint */
-        Tp_XOR();
-        Tp_STL(hi);
-        abcreg_stack_depth = 0;
-        return;
-    }
-
-    if (tp_t425()) {
-        tp_softfp_opf(op);
-        return;
-    }
-
-    orig_first = vtop[-1];
-    orig_second = vtop[0];
-    bt = orig_first.type.t & VT_BTYPE;
-    is_db = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
-
-    /* Direct-addressable operands: skip gv2() materialization entirely and
-     * let the FPU load each operand straight from its home (local slot,
-     * pointer register, global, or constant pool/scratch).  gv2 would copy
-     * each value through a workspace slot with integer ldnl/stl first —
-     * three memory operations per operand where one fpldnl does the job.
-     * Covers float32 and float64 uniformly. */
-    {
-        int v1 = orig_first.r & VT_VALMASK;
-        int v2 = orig_second.r & VT_VALMASK;
-        int p1 = (v1 < VT_CONST || v1 == VT_CONST || v1 == VT_LOCAL ||
-                  v1 == VT_LLOCAL) && !(orig_first.r & VT_MUSTBOUND);
-        int p2 = (v2 < VT_CONST || v2 == VT_CONST || v2 == VT_LOCAL ||
-                  v2 == VT_LLOCAL) && !(orig_second.r & VT_MUSTBOUND);
-
-        if (p1 && p2 &&
-            (op == '+' || op == '-' || op == '*' || op == '/')) {
-            /* Allocate the result register first: get_reg may spill, and a
-             * spill rewrites vstack entries, so re-read the operands from
-             * the vstack afterwards (a spilled operand becomes a LOCAL /
-             * LLOCAL lvalue, which stays directly addressable).  Doubles
-             * are two-word values living in rdst/rdst+1 (gv()'s transputer
-             * convention): evict whatever holds the pair's high slot —
-             * an evicted operand spills to a local and stays pushable. */
-            int comm = (op == '+' || op == '*');
-            int rdst;
-            int in_fa = 0;      /* 1: vtop[-1] is already in FA, 2: vtop[0],
-                                   3: vtop[-1] in FB and vtop[0] in FA */
-
-            if (!is_db && tp_fpu_dst_reusable(&vtop[0]))
-                rdst = vtop[0].r & VT_VALMASK;
-            else if (!is_db && tp_fpu_dst_reusable(&vtop[-1]))
-                rdst = vtop[-1].r & VT_VALMASK;
-            else {
-                rdst = get_reg(RC_FLOAT);
-                if (is_db)
-                    save_reg_upstack(rdst + 1, 0);
-            }
-            /* x * x: one load, then fpdup; fpmul (12 cycles) as occam, where
-             * a second load fused into the multiply costs 13 and its
-             * address.  TCC_TRANSPUTER_FPSTACK=0 keeps two loads. */
-            if (op == '*' && tp_fpu_same_operand(&vtop[-1], &vtop[0]) &&
-                !(getenv("TCC_TRANSPUTER_FPSTACK") &&
-                  *getenv("TCC_TRANSPUTER_FPSTACK") == '0')) {
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-                tp_push_float_sv(&vtop[0]);
-                emit_instr(TP_OP_OPR, TP_FPU_DUP);
-                emit_instr(TP_OP_OPR, TP_FPU_MUL);
-                goto fp_arith_done;
-            }
-            /* After get_reg, whose spills rewrite the vstack. */
-            if (tp_fpu_take_resident(&vtop[0], is_db)) {
-                in_fa = 2;
-                if (tp_fpu_take_under(&vtop[-1], is_db) ||
-                    (comm && tp_fpu_take_moved(&vtop[-1], is_db)))
-                    in_fa = 3;
-            } else if (tp_fpu_take_resident(&vtop[-1], is_db) ||
-                       tp_fpu_load_early(&vtop[-1], is_db))
-                in_fa = 1;
-            abcreg_stack_depth = 0;
-            fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
-            if (op == '*' && in_fa == 1 &&
-                !(getenv("TCC_TRANSPUTER_FPSTACK") &&
-                  *getenv("TCC_TRANSPUTER_FPSTACK") == '0') &&
-                tp_fpu_square_twin(&vtop[0], is_db)) {
-                emit_instr(TP_OP_OPR, TP_FPU_DUP);
-                emit_instr(TP_OP_OPR, TP_FPU_MUL);
-                goto fp_arith_done;
-            }
-
-            /* T9000 monadic idioms (ISM 11.7.2): x*2.0, 2.0*x, x/2.0,
-             * x*0.5, x/0.5 and x+x all scale by an exact power of two, so
-             * fpmulby2/fpdivby2 replace a constant materialization plus a
-             * dyadic op with a single exponent-update instruction.
-             * (Multiplying by 0.5 and dividing by 2 are the same IEEE
-             * operation: scaling by a power of two is always exact apart
-             * from the one rounding at the extreme of the range.)
-             * The T800 has them too, as fpumulby2/fpudivby2 through
-             * fpentry - what occam emits for x * 2.0: `ldc #12; fpentry`
-             * is 10 cycles where `ldc #40000000; stl; ldlp; fpldnlmulsn`
-             * is 23.  Not x + x there: `fpldnladdsn` (8) beats fpentry. */
-            {
-                int t9k = tp_have_t9000_feat(TP_T9K_FPU);
-                SValue *other = NULL;
-                int by2op = 0;
-                int c1 = ((vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST);
-                int c2 = ((vtop[0].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST);
-                double k1 = c1 ? (is_db ? vtop[-1].c.d : (double)vtop[-1].c.f) : 0.0;
-                double k2 = c2 ? (is_db ? vtop[0].c.d : (double)vtop[0].c.f) : 0.0;
-
-                if (op == '*' && c2 && (k2 == 2.0 || k2 == 0.5)) {
-                    other = &vtop[-1];
-                    by2op = (k2 == 2.0) ? TP_OPR_FPMULBY2 : TP_OPR_FPDIVBY2;
-                } else if (op == '*' && c1 && (k1 == 2.0 || k1 == 0.5)) {
-                    other = &vtop[0];
-                    by2op = (k1 == 2.0) ? TP_OPR_FPMULBY2 : TP_OPR_FPDIVBY2;
-                } else if (op == '/' && c2 && (k2 == 2.0 || k2 == 0.5)) {
-                    other = &vtop[-1];
-                    by2op = (k2 == 2.0) ? TP_OPR_FPDIVBY2 : TP_OPR_FPMULBY2;
-                } else if (t9k && op == '+' &&
-                           tp_fpu_same_operand(&vtop[-1], &vtop[0])) {
-                    /* x + x == 2*x exactly; one load instead of two */
-                    other = &vtop[0];
-                    by2op = TP_OPR_FPMULBY2;
-                }
-                if (by2op && in_fa != 3) {
-                    /* `other` is the only non-constant operand, so if
-                     * either is in FA it is this one */
-                    if (!in_fa)
-                        tp_push_float_sv(other);
-                    if (t9k)
-                        emit_instr(TP_OP_OPR, by2op);
-                    else
-                        tp_fpentry(by2op == TP_OPR_FPMULBY2
-                                   ? TP_FPU_OP_MULBY2 & 0xFF
-                                   : TP_FPU_OP_DIVBY2 & 0xFF);
-                    goto fp_arith_done;
-                }
-            }
-
-            {
-                /* `first` goes on the FPU stack, `second` is fused into the
-                 * operation or pushed above it; the IEEE + and * commute, so
-                 * for those either operand may be `first`. */
-                SValue *first = &vtop[-1], *second = &vtop[0];
-                int reversed = 0;
-
-                if (in_fa == 3) {
-                    /* both on the stack, left in FB: FB op FA */
-                    emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_ADD :
-                                          op == '-' ? TP_FPU_SUB :
-                                          op == '*' ? TP_FPU_MUL : TP_FPU_DIV);
-                    fpureg_pop(1);
-                    goto fp_arith_done;
-                }
-                if (in_fa == 2 || (!in_fa && comm &&
-                                   tp_fpu_addr_just_parked(&vtop[0]) &&
-                                   !tp_fpu_addr_just_parked(&vtop[-1]))) {
-                    /* vtop[0] is in FA, or its address was parked by the
-                     * last instruction and loading it first cancels that */
-                    first = &vtop[0];
-                    second = &vtop[-1];
-                    reversed = 1;
-                }
-                if (!in_fa)
-                    tp_push_float_sv(first);
-                if (comm && tp_emit_float_addr(second)) {
-                    /* Fused: load second operand AND operate in one instr */
-                    if (op == '+')
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
-                    else
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
-                    abcreg_pop(1);
-                } else if (comm) {
-                    /* Second operand is const 0.0 (no address): fpldzero + op */
-                    emit_instr(TP_OP_OPR, is_db ? TP_OPR_FPLDZERODB : TP_OPR_FPLDZEROSN);
-                    fpureg_push(1);
-                    emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_ADD : TP_FPU_MUL);
-                    fpureg_pop(1);
-                } else {
-                    /* fpsub/fpdiv compute FBreg op FAreg: the left operand
-                     * must be in FB */
-                    tp_push_float_sv(second);
-                    if (reversed)
-                        emit_instr(TP_OP_OPR, TP_FPU_REV);
-                    emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
-                    fpureg_pop(1);
-                }
-            }
-
-        fp_arith_done:
-            vtop--;
-            vtop->r = rdst;
-            vtop->r2 = is_db ? rdst + 1 : VT_CONST;
-            vtop->sym = NULL;
-            {
-                int store_off = ind;
-
-                tp_store_fpu_result_to_slot(rdst, bt);
-                tp_fpr_reg = rdst;
-                tp_fpr_off = store_off;
-                tp_fpr_end = ind;
-                tp_fpr_db = is_db;
-            }
-            abcreg_stack_depth = 0;
-            fpureg_stack_depth = 0;
-            return;
-        }
-
-        if (p1 && p2 &&
-            (op == TOK_EQ || op == TOK_NE || op == TOK_GT ||
-             op == TOK_LT || op == TOK_GE || op == TOK_LE)) {
-            int in_fa = 0;
-
-            if (tp_fpu_take_resident(&vtop[0], is_db)) {
-                in_fa = 2;
-                if (tp_fpu_take_under(&vtop[-1], is_db))
-                    in_fa = 3;
-            } else if (tp_fpu_take_resident(&vtop[-1], is_db) ||
-                       tp_fpu_load_early(&vtop[-1], is_db))
-                in_fa = 1;
-            abcreg_stack_depth = 0;
-            fpureg_stack_depth = in_fa == 3 ? 2 : in_fa ? 1 : 0;
-            /* Comparisons need no result register: the FPU compare leaves
-             * an int truth value in AReg (VT_CMP).  Push order: first
-             * operand ends in FBreg, second in FAreg, so fpgt/fpeq test
-             * "first OP second" directly. */
-            if (in_fa == 3) {
-                /* both already there */
-            } else if (in_fa == 2) {
-                tp_push_float_sv(&vtop[-1]);
-                emit_instr(TP_OP_OPR, TP_FPU_REV);
-            } else {
-                if (!in_fa)
-                    tp_push_float_sv(&vtop[-1]);
-                tp_push_float_sv(&vtop[0]);
-            }
-            tp_emit_fp_compare(op);
-            fpureg_stack_depth = 0;
-            abcreg_stack_depth = 1;
-            vtop--;
-            vset_VT_CMP(TOK_NE);
-            return;
-        }
-    }
-
-    if (is_db) {
-        /* Direct FPU path for doubles: same as float32 but with db variants */
-        if (op == '+' || op == '*' || op == '-' || op == '/') {
-            int fv1 = orig_first.r & VT_VALMASK;
-            int fv2 = orig_second.r & VT_VALMASK;
-            int f1_local = (orig_first.r & VT_LVAL) && fv1 == VT_LOCAL &&
-                           !(orig_first.r & VT_SYM);
-            int f2_local = (orig_second.r & VT_LVAL) && fv2 == VT_LOCAL &&
-                           !(orig_second.r & VT_SYM);
-
-            if (f1_local && f2_local) {
-                gv2(RC_FLOAT, RC_FLOAT);
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-
-                emit_local_addr(orig_first.c.i);
-                emit_instr(TP_OP_OPR, TP_FPU_LDNLDB);
-                abcreg_pop(1);
-                fpureg_push(1);
-
-                if (op == '+' || op == '*') {
-                    emit_local_addr(orig_second.c.i);
-                    emit_instr(TP_OP_OPR, op == '+' ? TP_FPU_LDNLADDDB : TP_FPU_LDNLMULDB);
-                    abcreg_pop(1);
-                } else {
-                    emit_local_addr(orig_second.c.i);
-                    emit_instr(TP_OP_OPR, TP_FPU_LDNLDB);
-                    abcreg_pop(1);
-                    fpureg_push(1);
-                    emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
-                    fpureg_pop(1);
-                }
-
-                vtop--;
-                tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-                return;
-            }
-        }
-
-        /* Doubles occupy two workspace words.
-         * gv2() may emit overlapping RC_FLOAT reloads (e.g. 3/4 and 4/5),
-         * which can clobber a live intermediate before we consume it.
-         * Preserve both operands into non-overlapping safe pairs first. */
-        sv_first = orig_first;
-        sv_second = orig_second;
-        load(FRAME_SLOT_SCRATCH, &sv_first);      /* words 0..1 */
-        load(FRAME_SLOT_DBL_TMP, &sv_second);     /* words 6..7 */
-
-        /* Keep generic allocator/stack state in sync with backend expectations. */
-        gv2(RC_FLOAT, RC_FLOAT);
-
-        if (opf_debug) {
-            fprintf(stderr,
-                    "[OPF_DB] op=0x%x func=%s first{type=0x%x r=0x%x v=0x%x} "
-                    "second_orig{type=0x%x r=0x%x v=0x%x} second_gv2{type=0x%x r=0x%x v=0x%x} "
-                    "materialized={0..1,6..7}\n",
-                    op, funcname ? funcname : "<unknown>",
-                    sv_first.type.t, sv_first.r, sv_first.r & VT_VALMASK,
-                    orig_second.type.t, orig_second.r, orig_second.r & VT_VALMASK,
-                    vtop[0].type.t, vtop[0].r, vtop[0].r & VT_VALMASK);
-        }
-        sv_first.r = FRAME_SLOT_SCRATCH;
-        sv_second.r = FRAME_SLOT_DBL_TMP;
-    } else {
-        /* Zero-STL for float locals: if both operands are local float/double
-         * variables, emit LDLP+fpldnlsn/db directly with fused ops.
-         * Works for both float32 and float64 (double). */
-        if (op == '+' || op == '*' || op == '-' || op == '/') {
-            int fv1 = orig_first.r & VT_VALMASK;
-            int fv2 = orig_second.r & VT_VALMASK;
-            int f1_local = (orig_first.r & VT_LVAL) && fv1 == VT_LOCAL &&
-                           !(orig_first.r & VT_SYM);
-            int f2_local = (orig_second.r & VT_LVAL) && fv2 == VT_LOCAL &&
-                           !(orig_second.r & VT_SYM);
-
-            if (f1_local && f2_local) {
-                /* Skip gv2 — load directly from local float slots.
-                 * For + and *: use fused form for second operand.
-                 * Pattern: LDLP a; fpldnlsn; LDLP b; fpldnl{add,mul}sn */
-                gv2(RC_FLOAT, RC_FLOAT);  /* still needed for vstack sync */
-                sv_first = vtop[-1];
-                sv_second = vtop[0];
-
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-
-                /* Load first operand from its original local offset */
-                emit_local_addr(orig_first.c.i);
-                emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
-                abcreg_pop(1);
-                fpureg_push(1);
-
-                if (op == '+' || op == '*') {
-                    /* Fused: load second AND operate in one instruction */
-                    emit_local_addr(orig_second.c.i);
-                    if (op == '+')
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
-                    else
-                        emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
-                    abcreg_pop(1);
-                } else {
-                    /* Sub/div: no fused form, load second separately */
-                    emit_local_addr(orig_second.c.i);
-                    emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLDB : TP_FPU_LDNLSN);
-                    abcreg_pop(1);
-                    fpureg_push(1);
-                    emit_instr(TP_OP_OPR, op == '-' ? TP_FPU_SUB : TP_FPU_DIV);
-                    fpureg_pop(1);
-                }
-
-                vtop--;
-                tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-                abcreg_stack_depth = 0;
-                fpureg_stack_depth = 0;
-                return;
-            }
-        }
-
-        /* Standard path */
-        gv2(RC_FLOAT, RC_FLOAT);
-        sv_first = vtop[-1];
-        sv_second = vtop[0];
-    }
-
-    abcreg_stack_depth = 0;
-    fpureg_stack_depth = 0;
-
-    /* Detect fused load-and-operate opportunity for + and * (T800).
-     * fpldnladdsn/fpldnlmulsn load from Mem[AReg] and combine with FAreg
-     * in a single instruction, eliminating FPU stack push overhead.
-     * Now also tries swapping operands (FPREV) to fuse with first operand. */
-    {
-        int fpu_fuse = 0;
-        int fpu_fuse_swap = 0;
-        if (op == '+' || op == '*') {
-            int fv = sv_second.r & VT_VALMASK;
-            int fv1 = sv_first.r & VT_VALMASK;
-            if (!(sv_second.r & VT_LVAL) && fv < VT_CONST)
-                fpu_fuse = 1;
-            else if (!(sv_first.r & VT_LVAL) && fv1 < VT_CONST)
-                fpu_fuse_swap = 1;  /* swap: fuse with first operand */
-        }
-
-        if (fpu_fuse_swap) {
-            /* Load second first, then fuse-load first */
-            tp_push_float_sv(&sv_second);
-            /* fused path handled in switch below */
-        } else {
-            tp_push_float_sv(&sv_first);
-            if (!fpu_fuse)
-                tp_push_float_sv(&sv_second);
-        }
-
-    /* Transputer FPU operations (T800) */
-    switch (op) {
-    case '+':
-        if (fpu_fuse) {
-            /* Fused: LDLP slot → fpldnladdsn/db. FAreg += Mem[AReg]. */
-            Tp_LDLP(sv_second.r & VT_VALMASK);
-            emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
-            abcreg_pop(1);
-        } else if (fpu_fuse_swap) {
-            /* Fused with swapped operands: FBreg has second, fuse-load first.
-             * Addition is commutative so order doesn't matter. */
-            Tp_LDLP(sv_first.r & VT_VALMASK);
-            emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLADDDB : TP_FPU_LDNLADDSN);
-            abcreg_pop(1);
-        } else {
-            emit_instr(TP_OP_OPR, TP_FPU_ADD);
-        }
-        vtop--;
-        tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-        abcreg_stack_depth = 0;
-        fpureg_stack_depth = 0;
-        break;
-    case '-':
-        emit_instr(TP_OP_OPR, TP_FPU_SUB);
-        vtop--;
-        tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-        abcreg_stack_depth = 0;
-        fpureg_stack_depth = 0;
-        break;
-    case '*':
-        if (fpu_fuse) {
-            /* Fused: LDLP slot → fpldnlmulsn/db. FAreg *= Mem[AReg]. */
-            Tp_LDLP(sv_second.r & VT_VALMASK);
-            emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
-            abcreg_pop(1);
-        } else if (fpu_fuse_swap) {
-            /* Fused with swapped operands. Multiplication is commutative. */
-            Tp_LDLP(sv_first.r & VT_VALMASK);
-            emit_instr(TP_OP_OPR, is_db ? TP_FPU_LDNLMULDB : TP_FPU_LDNLMULSN);
-            abcreg_pop(1);
-        } else {
-            emit_instr(TP_OP_OPR, TP_FPU_MUL);
-        }
-        vtop--;
-        tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-        abcreg_stack_depth = 0;
-        fpureg_stack_depth = 0;
-        break;
-    case '/':
-        emit_instr(TP_OP_OPR, TP_FPU_DIV);
-        vtop--;
-        tp_store_fpu_result_to_slot(vtop->r & VT_VALMASK, bt);
-        abcreg_stack_depth = 0;
-        fpureg_stack_depth = 0;
-        break;
-    case TOK_EQ: case TOK_NE: case TOK_GT:
-    case TOK_LT: case TOK_GE: case TOK_LE:
-        tp_emit_fp_compare(op);
-        fpureg_stack_depth = 0;
-        abcreg_stack_depth = 1;
-        vtop--;
-        vset_VT_CMP(TOK_NE);
-        break;
-    default:
-        tcc_error("unsupported float operator 0x%x", op);
-    }
-    } /* fpu_fuse block */
-}
+#include "transputer-fp.h"
 
 #endif /* !TARGET_DEFS_ONLY */

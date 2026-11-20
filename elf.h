@@ -3356,10 +3356,12 @@ typedef Elf32_Addr Elf32_Conflict;
 #define R_TRANSPUTER_TLS_TPOFF	32	/* Offset in static TLS block.  */
 #define R_TRANSPUTER_SYM_DIFF	33	/* Adjustment for next reloc as needed by linker relaxation.  */
 #define R_TRANSPUTER_ALIGN	34	/* Alignment requirement for linker relaxation.  */
-#define R_TRANSPUTER_NUM	35
 #define R_TRANSPUTER_64		36	/* Direct 64 bit.  */
 #define R_TRANSPUTER_ABSOLUTE   37
 #define R_TRANSPUTER_PC_RELATIVE 38
 #define R_TRANSPUTER_LDC_ABS    39  /* Load absolute address via LDC sequence */
+
+#define R_TRANSPUTER_INSN      40  /* Nine-byte instruction, operand is the REL addend */
+#define R_TRANSPUTER_NUM       41
 
 #endif	/* elf.h */

@@ -266,6 +266,25 @@ build_coremark() {
         "Apache-2.0" ""
 }
 
+build_night_relay() {
+    local staging="$PKG_OUT/staging-night-relay"
+    local game="$TRANS_DIR/games/night-relay"
+    local binary="${NIGHT_RELAY_FLT:-$game/night-relay.flt}"
+
+    if [ ! -f "$binary" ]; then
+        echo "  SKIP: night-relay.flt not found. Run transputer/games/night-relay/build.sh"
+        return 0
+    fi
+    rm -rf "$staging"
+    mkdir -p "$staging/usr/games" "$staging/usr/share/doc/night-relay"
+    cp "$binary" "$staging/usr/games/night-relay"
+    chmod 755 "$staging/usr/games/night-relay"
+    cp "$game/README.md" "$staging/usr/share/doc/night-relay/README.md"
+    cp "$ROOT_DIR/COPYING" "$staging/usr/share/doc/night-relay/COPYING"
+    make_tpz "$staging" "night-relay" "0.1.0" \
+        "Night Relay pinball for TransputerOS" "LGPL-2.1-or-later" ""
+}
+
 # -----------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------
@@ -384,8 +403,8 @@ build_tfiles() {
         return 0
     fi
 
-    make_tpz "$staging" "tfiles" "1.0.0" \
-        "TransputerOS file manager with directory browsing and file viewer" \
+    make_tpz "$staging" "tfiles" "1.2.1" \
+        "TransputerOS file manager with recursive folder operations, SD mounting and Packages integration" \
         "MIT" ""
 }
 
@@ -394,6 +413,7 @@ case "${1:-all}" in
     fbwm)              build_fbwm ;;
     doom)              build_doom ;;
     doom-engine)       build_doom_engine ;;
+    night-relay)       build_night_relay ;;
     coremark)          build_coremark ;;
     tpkg)              build_tpkg ;;
     ttop)              build_ttop ;;
@@ -404,6 +424,7 @@ case "${1:-all}" in
         build_fbwm
         build_doom
         build_doom_engine
+        build_night_relay
         build_coremark
         build_tpkg
         build_ttop
@@ -414,6 +435,6 @@ case "${1:-all}" in
         ls -lh "$PKG_OUT"/*.tpz 2>/dev/null || echo "(none built)"
         ;;
     *)
-        echo "Usage: $0 [tcc|fbwm|doom|doom-engine|coremark|tpkg|ttop|tman|tfiles|all]"
+        echo "Usage: $0 [tcc|fbwm|doom|doom-engine|night-relay|coremark|tpkg|ttop|tman|tfiles|all]"
         ;;
 esac

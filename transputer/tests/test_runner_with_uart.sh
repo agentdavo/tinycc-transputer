@@ -63,6 +63,11 @@ require_tools() {
 }
 
 declare -A EXTRA_SOURCES=(
+    [test_double_return_pair]="test_double_return_pair_helper.c"
+    [test_double_param_storage]="test_double_param_storage_helper.c"
+    [test_u64_shift_runtime]="../../lib/transputer/transputer-runtime.c"
+    [test_u64_div_runtime]="../../lib/transputer/transputer-runtime.c"
+    [test_asm_addends]="test_asm_addends_fn.S"
     [main]="support.c"
     [simple_main]="support.c"
     [test_main]="test_functions.c"
@@ -73,10 +78,10 @@ declare -A EXTRA_SOURCES=(
     [test_xfile_a]="test_xfile_b.c"
     [test_longlong]="lib64_runtime.c"
     [test_llong_call_arg_pair]="lib64_runtime.c"
-    [test_conc_alt]="../../lib/transputer-conc.c"
-    [test_return_timeslice]="../../lib/transputer-conc.c"
-    [test_vla]="../../lib/transputer-vla.c ../../lib/transputer-conc.c"
-    [test_xlink]="../../lib/transputer-conc.c"
+    [test_conc_alt]="../../lib/transputer/transputer-conc.c"
+    [test_return_timeslice]="../../lib/transputer/transputer-conc.c"
+    [test_vla]="../../lib/transputer/transputer-vla.c ../../lib/transputer/transputer-conc.c"
+    [test_xlink]="../../lib/transputer/transputer-conc.c"
     [test_reloc_iprel_fwd]="test_reloc_iprel_fwd_helper.c"
     [test_reloc_iprel_bwd]="test_reloc_iprel_bwd_helper.c"
     [test_reloc_duplocal]="test_reloc_duplocal_helper.c"
@@ -93,10 +98,12 @@ declare -A EXTRA_SOURCES=(
 # headers; built for the target they get the libc-free include set software
 # TVX is built with.
 declare -A EXTRA_CFLAGS=(
-    [test_gguf_decode_parts]="-nostdinc -I$ROOT_DIR/lib/transputer-tvx/include"
+    [test_gguf_decode_parts]="-nostdinc -I$ROOT_DIR/lib/transputer/tvx/include"
+    [test_switch_table]="-mjump-tables"
 )
 
 declare -A FORCE_SKIP=(
+    [test_asm_addends_fn]="helper file for test_asm_addends"
     [minimal]="uses its own _start and writes memory, not UART-test oriented"
     [minimal_fp_test]="uses its own _start and debug memory only"
     [simple]="empty host-style stub"
@@ -193,6 +200,7 @@ target_from_comment() {
 
 # A `Needs: fpu` line: any part with an FPU (not -mt425/-mt414).
 # `Needs: t805ops`: the T805/T425 additions such as lddevid (not -mt800/-mt414).
+# `Needs: t800ops`: T425/T800 block-move instructions (not -mt414).
 # `Needs: softfp`: the soft-float runtime, so only -mt425/-mt414.
 needs_from_comment() {
     sed -n '1,24p' "$1" | sed -n 's/.*Needs:[[:space:]]*\([a-z0-9]*\).*/\1/p' | head -n1 || true
@@ -357,7 +365,7 @@ run_one_test() {
         TEST_CFLAGS="$TP_EXTRA_CFLAGS $want"
     fi
     case "$(needs_from_comment "$file"):$TP_TARGET" in
-    fpu:-mt425|fpu:-mt414|t805ops:-mt800|t805ops:-mt414|softfp:|softfp:-mt[89]*)
+    fpu:-mt425|fpu:-mt414|t805ops:-mt800|t805ops:-mt414|t800ops:-mt414|softfp:|softfp:-mt[89]*)
         printf "SKIP %s: needs %s\n" "$name" "$(needs_from_comment "$file")"
         return 0 ;;
     esac

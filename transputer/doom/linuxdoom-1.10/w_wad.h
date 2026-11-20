@@ -68,6 +68,9 @@ extern	int		numlumps;
 
 void    W_InitMultipleFiles (char** filenames);
 void    W_Reload (void);
+#ifdef TRANSPUTER
+void    W_ReleaseFiles(void);
+#endif
 
 int	W_CheckNumForName (char* name);
 int	W_GetNumForName (char* name);

@@ -185,7 +185,15 @@ if [ -d "$PKG_DIR" ]; then
     # Prefer small packages only (skip huge doom full WAD in initramfs).
     # tman is a first-class TPZ app (System icon / live task manager).
     for pkg in fbwm-1.0.0.tpz doom-engine-1.0.0.tpz tpkg-1.2.0.tpz \
-               ttop-1.0.0.tpz tfiles-1.0.0.tpz coremark-1.0.2.tpz; do
+               ttop-1.0.0.tpz tfiles-1.2.1.tpz coremark-1.0.2.tpz; do
+        if [ "${TPOS_SLIM_PACKAGES:-0}" = "1" ]; then
+            case "$pkg" in
+                doom-engine-1.0.0.tpz)
+                    [ ! -x "$STAGE_DIR/usr/games/doom" ] || continue ;;
+                coremark-1.0.2.tpz)
+                    [ ! -x "$STAGE_DIR/usr/bin/coremark" ] || continue ;;
+            esac
+        fi
         if [ -f "$PKG_DIR/$pkg" ]; then
             # Skip if package larger than ~1.5MB (initramfs budget)
             psz=$(stat -c%s "$PKG_DIR/$pkg" 2>/dev/null || echo 99999999)

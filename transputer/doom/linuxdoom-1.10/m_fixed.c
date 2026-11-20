@@ -38,6 +38,9 @@ rcsid[] = "$Id: m_bbox.c,v 1.1 1997/02/03 22:45:10 b1 Exp $";
 
 
 
+// The transputer has these in m_fixed_tp.S (lmul and ldiv).
+#ifndef TRANSPUTER
+
 // Fixme. __USE_C_FIXED__ or something.
 
 fixed_t
@@ -85,3 +88,5 @@ FixedDiv2
 	I_Error("FixedDiv: divide by zero");
     return (fixed_t) c;
 }
+
+#endif /* TRANSPUTER */

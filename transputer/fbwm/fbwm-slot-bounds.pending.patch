@@ -1,0 +1,178 @@
+diff --git a/transputer/fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md b/transputer/fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md
+index c61c9802..29b806eb 100644
+--- a/transputer/fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md
++++ b/transputer/fbwm/SHM-SLOT-OVERFLOW-2026-11-06.md
+@@ -1,9 +1,9 @@
+-# Retained-surface slot 3 exceeds its bank
++# Retained-surface slot 3 bank overflow
+ 
+ The default T4 profile reserves the shared bank at
+ `[0x81c00000, 0x81e00000)`, including a 4096-byte header. The simplefb
+ framebuffer begins at `0x81e00000`. The fixed slot layout in `fbwm_shm.c`
+-currently advertises these pixel extents (end exclusive):
++previously advertised these pixel extents (end exclusive):
+ 
+ | Slot | Capacity | Extent |
+ |---|---:|---|
+@@ -17,7 +17,7 @@ first 6,336 framebuffer pixels. Its zero-based pixel `[284][64]` is the
+ first word at the bank end. In the SPINE profile the same relative overflow
+ is `[0x81400000, 0x81406300)`, overlapping the present-scratch carveout.
+ 
+-This is reachable without malformed metadata. `tpos_shm_claim_slot` returns
++This was reachable without malformed metadata. `tpos_shm_claim_slot` returns
+ the first free slot whose advertised dimensions fit. When slot 3 is selected,
+ `wm_shm_prepare_guest` clears its entire advertised 400×300 capacity, even
+ for a smaller guest, and therefore writes the adjacent bank. FBWM's surface
+@@ -25,22 +25,21 @@ publisher can also copy a full 400×300 surface into it. Doom requests 320×240;
+ its own rows fit within the bank at the slot-3 stride, but the window-manager
+ full-capacity clear still reaches the overflow if that path selected slot 3.
+ 
+-## Canary reproducer
+-
+-`transputer/tests/bench/fbwm_blit.sh t800 row` runs the real shared-memory
+-layout in t4. The benchmark writes a canary at `TPOS_SHM_BASE + TPOS_SHM_SIZE`,
+-writes slot 3 at the corresponding pixel index only if it is within the
+-advertised capacity, and restores the adjacent word. With the current layout
+-it reports `slot3_overflow 1`. This is a diagnostic of the existing layout,
+-not a failure of the compositor's row-copy or MOVE2D comparison. Run only in
+-the emulator: the probe intentionally touches the word after the shared bank.
+-
+-The smallest non-widening safety repair is to reduce slot 3's advertised
+-height from 300 to 284, and add a compile-time or test assertion that the
+-header plus all advertised slot capacities fit in `TPOS_SHM_SIZE`. That
+-leaves 256 bytes unused and prevents the full-capacity clear from crossing
+-the bank. It changes availability: a 400×300 request can still use slot 1
+-when available, but can no longer use slot 3. Preserving every advertised
+-capacity concurrently requires a different, coordinated layout or allocation
+-scheme and an assessment of the cross-process shared-memory contract. This
+-finding does not change the layout or silently enlarge a mapping.
++## Repair and regression checks
++
++Slot 3 is now 400×284; the other slot offsets are unchanged, and a compile-time
++check requires all slots and the header to fit in the existing reservation.
++This leaves 256 bytes unused. A 400×300 request can use slot 1 when available,
++but cannot use slot 3; a fourth 320×240 Doom-sized guest can still use slot 3.
++The Linux reservation remains 2 MiB; no kernel capacity change is required.
++
++`test_fbwm_host.c` fills the first three slots, places a canary at the end of
++the bank, and exercises the real `wm_shm_prepare_guest` clear in slot 3. It also
++checks the 400×300 allocation failure and the 400×284 allocation. The canary
++test fails with the old capacity and passes with the new one. The t4 compositor
++benchmark treats an overflow as a failure; the expected report is
++`slot3_overflow 0`.
++
++FBWM and guests use a shared compiled-in capacity table, so all participating
++programs must be rebuilt together. An older binary still advertises the unsafe
++capacity; the unchanged shared-memory version does not protect mixed builds.
+diff --git a/transputer/fbwm/fbwm_shm.h b/transputer/fbwm/fbwm_shm.h
+index ac12ff15..ce8b94f3 100644
+--- a/transputer/fbwm/fbwm_shm.h
++++ b/transputer/fbwm/fbwm_shm.h
+@@ -33,7 +33,13 @@
+ #define TPOS_SHM_SLOT2_W          320
+ #define TPOS_SHM_SLOT2_H          240
+ #define TPOS_SHM_SLOT3_W          400
+-#define TPOS_SHM_SLOT3_H          300
++#define TPOS_SHM_SLOT3_H          284
++
++#if TPOS_SHM_HEADER_BYTES + 4 * (TPOS_SHM_SLOT0_W * TPOS_SHM_SLOT0_H + \
++    TPOS_SHM_SLOT1_W * TPOS_SHM_SLOT1_H + TPOS_SHM_SLOT2_W * TPOS_SHM_SLOT2_H + \
++    TPOS_SHM_SLOT3_W * TPOS_SHM_SLOT3_H) > TPOS_SHM_SIZE
++#error "Shared surface slots exceed the reserved compositor bank"
++#endif
+ 
+ #define TPOS_SHM_WF_USED          0x0001
+ #define TPOS_SHM_WF_MAPPED        0x0002
+diff --git a/transputer/fbwm/test_fbwm_host.c b/transputer/fbwm/test_fbwm_host.c
+index ec7c5ded..d34449e0 100644
+--- a/transputer/fbwm/test_fbwm_host.c
++++ b/transputer/fbwm/test_fbwm_host.c
+@@ -489,6 +489,34 @@ static void render_canonical_scene(void)
+     fb_draw_cursor(FBWM_FB_WIDTH - 12, FBWM_WORK_H - 16);
+ }
+ 
++static void test_shm_slot_bounds(void)
++{
++    static unsigned int source[400 * 300];
++    volatile unsigned int *boundary =
++        (volatile unsigned int *)(unsigned long)(TPOS_SHM_BASE + TPOS_SHM_SIZE);
++    const unsigned int canary = 0x13579bdfu;
++    int i;
++
++    tpos_shm_reset();
++    for (i = 0; i < 3; i++)
++        CHECK(tpos_shm_claim_slot(320, 240) == i, "first-fit slot order");
++    *boundary = canary;
++    CHECK(wm_shm_prepare_guest(9001, 320, 240, "slot bounds") == 3,
++          "fourth Doom-sized guest uses slot 3");
++    CHECK(*boundary == canary, "guest clear stays inside shared bank");
++    source[400 * 283 + 399] = 0x2468ace0u;
++    tpos_shm_blit_to_slot(3, source, 400, 400, 300);
++    CHECK(*boundary == canary, "surface copy stays inside shared bank");
++    CHECK(tpos_shm_slot_pixels(3)[400 * 283 + 399] == 0x2468ace0u,
++          "surface copy reaches last row of slot 3");
++    tpos_shm_reset();
++    CHECK(tpos_shm_claim_slot(400, 300) == 1, "large surface uses slot 1");
++    CHECK(tpos_shm_claim_slot(400, 300) == -1,
++          "large surface fails when slot 1 is occupied");
++    CHECK(tpos_shm_claim_slot(400, 284) == 3, "slot 3 fits bounded surface");
++    tpos_shm_reset();
++}
++
+ int main(void)
+ {
+     const char *golden;
+@@ -521,6 +549,7 @@ int main(void)
+     test_window_geometry();
+     test_widgets();
+     test_retained_surfaces();
++    test_shm_slot_bounds();
+     test_shm_compose();
+     test_phase2_wm();
+     test_phase2_3_4();
+diff --git a/transputer/tests/bench/bench_fbwm_blit.c b/transputer/tests/bench/bench_fbwm_blit.c
+index da5b38ed..05b351c7 100644
+--- a/transputer/tests/bench/bench_fbwm_blit.c
++++ b/transputer/tests/bench/bench_fbwm_blit.c
+@@ -1,4 +1,4 @@
+-/* Exercise the actual compositor blit with padded, clipped and out-of-bank
++/* Exercise the actual compositor blit with padded, clipped and bounded
+  * surfaces. Compare every destination pixel with an independent reference. */
+ #include <stddef.h>
+ #include "../../fbwm/fbwm_shm.c"
+@@ -74,20 +74,18 @@ void test_main(void)
+     reference(&w, 9, 11, 100, 80);
+     for (i = 0; i < TPOS_FB_WIDTH * TPOS_FB_HEIGHT; i++)
+         if (alternate[i] != expected[i]) bad++;
+-    /* Slot 3's advertised maximum extends beyond the reserved SHM bank.
+-     * Its rows remain on the fallback; the destination is below the source
+-     * tail in framebuffer coordinates, so this case has no per-row overlap. */
+-    w.slot = 3; w.surf_w = 400; w.surf_h = 300; w.surf_stride = 400;
++    /* Exercise the full advertised capacity of the last slot. */
++    w.slot = 3; w.surf_w = TPOS_SHM_SLOT3_W;
++    w.surf_h = TPOS_SHM_SLOT3_H; w.surf_stride = TPOS_SHM_SLOT3_W;
+     src = tpos_shm_slot_pixels(3);
+-    for (i = 0; i < 400 * 300; i++) src[i] = 0x12340000u ^ (u32)i;
++    for (i = 0; i < TPOS_SHM_SLOT3_W * TPOS_SHM_SLOT3_H; i++) src[i] = 0x12340000u ^ (u32)i;
+     for (i = 0; i < TPOS_FB_WIDTH * TPOS_FB_HEIGHT; i++)
+         expected[i] = fb[i] = 0xabcdef00u ^ (u32)i;
+-    reference(&w, 10, 100, 400, 300);
+-    blit_surface(fb, &w, 10, 100, 400, 300);
++    reference(&w, 10, 100, TPOS_SHM_SLOT3_W, TPOS_SHM_SLOT3_H);
++    blit_surface(fb, &w, 10, 100, TPOS_SHM_SLOT3_W, TPOS_SHM_SLOT3_H);
+     for (i = 0; i < TPOS_FB_WIDTH * TPOS_FB_HEIGHT; i++)
+         if (fb[i] != expected[i]) bad++;
+-    /* Diagnostic canary for the existing slot layout, not a pass condition
+-     * for the compositor copy. Restore the adjacent word after probing it. */
++    /* Check the first word after the bank against the slot capacity. */
+     {
+         volatile u32 *boundary = (volatile u32 *)(unsigned long)(TPOS_SHM_BASE + TPOS_SHM_SIZE);
+         u32 saved = *boundary;
+@@ -98,6 +96,7 @@ void test_main(void)
+         bank_overflow = (*boundary != 0x13579bdfu);
+         *boundary = saved;
+     }
++    if (bank_overflow) bad++;
+     put("cycles "); num(elapsed); put("\nhash "); num(hash(fb, TPOS_FB_WIDTH * TPOS_FB_HEIGHT));
+     put("\n16x16 "); num(t16); put("\n32x16 "); num(t32);
+     put("\n64x32 "); num(t64);

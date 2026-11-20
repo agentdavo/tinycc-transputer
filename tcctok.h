@@ -432,6 +432,8 @@
      DEF(TOK___norm, "__norm")
      DEF(TOK___bitcnt, "__bitcnt")
      DEF(TOK___bitrevword, "__bitrevword")
+     DEF(TOK_builtin_rotateleft32, "__builtin_rotateleft32")
+     DEF(TOK_builtin_rotateright32, "__builtin_rotateright32")
      DEF(TOK___bitrevnbits, "__bitrevnbits")
      /* Bounds checking */
      DEF(TOK___csub0, "__csub0")
@@ -448,6 +450,8 @@
         the T425 and T414 have no FPU) */
      DEF(TOK___fpchkerr, "__fpchkerr")
      DEF(TOK___fptesterr, "__fptesterr")
+     DEF(TOK___ldflags, "__ldflags")
+     DEF(TOK___stflags, "__stflags")
      DEF(TOK___fpseterr, "__fpseterr")
      DEF(TOK___fpclrerr, "__fpclrerr")
      DEF(TOK___fpint, "__fpint")

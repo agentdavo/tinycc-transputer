@@ -1,0 +1,17 @@
+S2K performance run parameters for coremark.
+CoreMark Size    : 666
+Total ticks      : 58904229
+Total time (secs): 3769.870656
+Iterations/Sec   : 0.018568
+Iterations       : 70
+Compiler version : Transputer TCC
+Compiler flags   : "transputer-tcc"
+Memory location  : STACK
+seedcrc          : 0xe9f5
+[0]crclist       : 0xe714
+[0]crcmatrix     : 0x1fd7
+[0]crcstate      : 0x8e3a
+[0]crcfinal      : 0x3978
+Correct operation validated. See README.md for run and reporting rules.
+CoreMark 1.0 : 0.018568 / Transputer TCC "transputer-tcc" / STACK
+H

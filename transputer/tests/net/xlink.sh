@@ -26,7 +26,7 @@ printf '%s\n' "Connect HOST to processor 0 link 0" \
     "Connect processor 0 link 2 to processor 1 link 2" > xlink.map
 for n in 0 1; do
     "$R/transputer-tcc" -mt9000 -static -nostdlib -I"$R/include" -DNODE=$n -o n$n.elf \
-        "$T/test_boot.S" "$HERE/xlink.c" "$R/lib/transputer-conc.c" "$R/transputer-libtcc1.a" &&
+        "$T/test_boot.S" "$HERE/xlink.c" "$R/lib/transputer/transputer-conc.c" "$R/transputer-libtcc1.a" &&
     "$R/transputer-netload" n$n.elf n$n.btl >/dev/null 2>&1 || { echo "node $n: build failed"; exit 1; }
 done
 rm -f xlink.uart

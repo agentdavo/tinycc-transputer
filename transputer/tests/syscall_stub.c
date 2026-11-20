@@ -69,6 +69,7 @@ static void uart_hex8(unsigned long v)
 #define __NR_munmap         215
 #define __NR_execve         221
 #define __NR_mmap2          222
+#define __NR_fadvise64_64   223
 #define __NR_wait4          260
 #define __NR_getcwd        1029
 #define __NR_open          1024
@@ -78,10 +79,12 @@ static void uart_hex8(unsigned long v)
 #define __NR_lstat         1039
 #define __NR_pipe          1040
 #define __NR_dup2          1041
+#define __NR_fcntl64        25
 #define __NR_fcntl         1052
 #define __NR_lseek         1057
 #define __NR_vfork         1071
 #define __NR_tp_spawn      2000
+#define __NR_tp_munmap_owned 2002
 #define __NR_uname          160
 #define __NR_getdents64     61
 #define __NR_getdents       1065
@@ -199,6 +202,41 @@ long __transputer_mmap2_flags;
 long __transputer_mmap2_fd;
 long __transputer_mmap2_offset;
 
+/*
+ * Opt-in P trap ABI v1: A = number, B = user pointer to six words,
+ * resumed A = signed result. The published ABI word is constant during
+ * a call. Older kernels publish an aligned pointer here, never this tag.
+ */
+#ifndef TP_USE_T9K_SYSCALL
+#define TP_USE_T9K_SYSCALL 0
+#endif
+
+#if TP_USE_T9K_SYSCALL
+#define TP_TRAP_ABI_ADDR 0x8000006CUL
+#define TP_TRAP_ABI_V1   0x54504601u
+
+static int tp_has_frame_syscall(void)
+{
+	return *(volatile const unsigned int *)TP_TRAP_ABI_ADDR == TP_TRAP_ABI_V1;
+}
+
+extern long tp_trap_frame(long number, const long *args);
+extern void tp_rt_sigreturn(void);
+__asm__(
+".text\n"
+".global tp_trap_frame\n"
+"tp_trap_frame:\n"
+"  .byte 0x72, 0x71\n" /* ldl 2; ldl 1 */
+"  .byte 0x60, 0xf8\n" /* syscall */
+"  .byte 0x22, 0xf0\n" /* ret, with the supervisor result in A */
+".global tp_rt_sigreturn\n"
+"tp_rt_sigreturn:\n"
+"  .byte 0x20, 0x28, 0x4b\n" /* ldc 139 (__NR_rt_sigreturn) */
+"  .byte 0x60, 0xf8\n" /* syscall, with the signal frame below Wptr */
+"  .byte 0x00\n" /* sigreturn must not resume here */
+);
+#endif
+
 long __transputer_mmap2_packed(const long *args)
 {
 	static unsigned long mmap_bump = 0;
@@ -208,6 +246,11 @@ long __transputer_mmap2_packed(const long *args)
 
 	if (!args)
 		return -EFAULT;
+
+#if TP_USE_T9K_SYSCALL
+	if (tp_has_frame_syscall())
+		return tp_trap_frame(__NR_mmap2, args);
+#endif
 
 	/*
 	 * Prefer the kernel gate (real pages via __get_free_pages).
@@ -246,61 +289,19 @@ long __transputer_mmap2_globals(void)
 	return __transputer_mmap2_packed(args);
 }
 
-/*
- * T9000 protect ABI (Phase 10 trap-first):
- *   Kernel publishes hard_p at TP_HARD_P_FLAG_ADDR and trap return at
- *   TP_SYSCALL_RET_ADDR.  Under hard P, emit real `syscall` (60 F8); the
- *   supervisor dispatches, stores the result, and re-goprot.  Under L /
- *   no protect, fall through to the C gate.
- *
- * Compile-time force: -DTP_USE_T9K_SYSCALL=1 always attempts the insn
- * (still falls back to gate when hard_p flag is clear).
- */
-#ifndef TP_USE_T9K_SYSCALL
-/* Default off until trap ABI is solid under full init; enable with -DTP_USE_T9K_SYSCALL=1 */
-#define TP_USE_T9K_SYSCALL 0
-#endif
-
-#define TP_HARD_P_FLAG_ADDR  0x80000064UL
-#define TP_SYSCALL_RET_ADDR  0x80000068UL
-#define TP_SYSCALL_ARGS_PTR  0x8000006CUL	/* -> 7×u32 in kernel BSS */
-
-#if TP_USE_T9K_SYSCALL
-/*
- * Stage args through kernel-published pointer, emit syscall; supervisor
- * runs the real gate and writes TP_SYSCALL_RET_ADDR before re-goprot.
- */
-static long tp_t9k_trap_syscall(long number, long a1, long a2, long a3,
-				long a4, long a5, long a6)
-{
-	volatile unsigned int *stage =
-		*(volatile unsigned int *volatile *)TP_SYSCALL_ARGS_PTR;
-
-	if (!stage)
-		return -38; /* ENOSYS — gate not published */
-
-	stage[0] = (unsigned int)number;
-	stage[1] = (unsigned int)a1;
-	stage[2] = (unsigned int)a2;
-	stage[3] = (unsigned int)a3;
-	stage[4] = (unsigned int)a4;
-	stage[5] = (unsigned int)a5;
-	stage[6] = (unsigned int)a6;
-
-	/* ISM 60F8 → OReg -8 (syscall). */
-	__asm__ volatile(".byte 0x60, 0xF8" ::: "memory");
-
-	return (long)(*(volatile unsigned int *)TP_SYSCALL_RET_ADDR);
-}
-#endif
-
 long __transputer_syscall(long number, long a1, long a2, long a3,
 			  long a4, long a5, long a6)
 {
 #if TP_USE_T9K_SYSCALL
-	/* Trap-first under hard P — kernel already ran the VFS gate once. */
-	if (*(volatile unsigned int *)TP_HARD_P_FLAG_ADDR)
-		return tp_t9k_trap_syscall(number, a1, a2, a3, a4, a5, a6);
+	if (tp_has_frame_syscall()) {
+		const long args[6] = {
+			a1, a2, a3, a4,
+			number == __NR_rt_sigaction ? (long)tp_rt_sigreturn : a5,
+			a6,
+		};
+
+		return tp_trap_frame(number, args);
+	}
 #endif
 	/*
 	 * L-mode / no hard P: C-call gate (and local brk/mmap handling).
@@ -343,20 +344,39 @@ long __transputer_syscall(long number, long a1, long a2, long a3,
 	case __NR_lseek:
 	case __NR_ioctl:
 	case __NR_fcntl:
+	case __NR_fcntl64:
+	case __NR_fadvise64_64:
 	case __NR_uname:
 	case __NR_getdents64:
 	case __NR_getdents:
 	case __NR_unlinkat:
+	case 36:  /* symlinkat */
 	case __NR_renameat:
+	case 276: /* renameat2 */
+	case 39:  /* umount2 */
+	case 82:  /* fsync */
 	case __NR_faccessat:
 	case __NR_readlinkat:
 	case __NR_fchmodat:
 	case __NR_fchownat:
 	case __NR_utimensat:
 	case __NR_statx:
+	case __NR_tp_munmap_owned:
+	case 20:  /* epoll_create1 */
+	case 21:  /* epoll_ctl */
+	case 22:  /* epoll_pwait */
+	case 441: /* epoll_pwait2 */
+	case 107: /* timer_create */
+	case 108: /* timer_gettime */
+	case 109: /* timer_getoverrun */
+	case 110: /* timer_settime */
+	case 111: /* timer_delete */
+	case 408: /* timer_gettime64 */
+	case 409: /* timer_settime64 */
 		return tp_kernel_syscall(number, a1, a2, a3, a4, a5, a6);
 
 	case __NR_brk:
+	case __NR_munmap:
 	case __NR_mmap2: {
 		/*
 		 * Under the kernel: use mm-relative sys_brk/sys_mmap_pgoff.

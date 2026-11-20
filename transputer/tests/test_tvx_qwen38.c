@@ -9,7 +9,7 @@
  * small dyadic steps, and full-mantissa values that round on every step.
  *
  * No Target line: at -mt9000tvx t4 executes QDOT, on every other part it is
- * software TVX (lib/transputer-tvx-qdot.c), against the same expectations.
+ * software TVX (lib/transputer/transputer-tvx-qdot.c), against the same expectations.
  * test_gguf_decode_parts.c runs the same blocks through the C decoders on
  * every part, without TVX.
  */

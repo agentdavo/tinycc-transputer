@@ -5,25 +5,38 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRANS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$TRANS_DIR/.." && pwd)"
-UCLIBC="$TRANS_DIR/uClibc-ng"
+UCLIBC="${UCLIBC:-$TRANS_DIR/uClibc-ng}"
 INITRAMFS="$TRANS_DIR/initramfs"
-TCC="$ROOT_DIR/transputer-tcc"
-ELF2FLT="$ROOT_DIR/transputer-elf2flt"
+TCC="${TCC:-$ROOT_DIR/transputer-tcc}"
+ELF2FLT="${ELF2FLT:-$ROOT_DIR/transputer-elf2flt}"
+LIBTCC1="${LIBTCC1:-$ROOT_DIR/transputer-libtcc1.a}"
 KERNEL_TREE="${KERNEL_TREE:-linux-7}"
 KERNEL_INCLUDE="$TRANS_DIR/$KERNEL_TREE/include"
+KERNEL_UAPI="$TRANS_DIR/$KERNEL_TREE-headers/include"
+INFLATE="$TRANS_DIR/$KERNEL_TREE/lib/zlib_inflate"
+
+# Reuse the kernel's workspace-based zlib decoder with libc's string API.
+for unit in inflate inffast inftrees tpz; do
+    source="$INFLATE/$unit.c"
+    if [ "$unit" = tpz ]; then source="$SCRIPT_DIR/tpz.c"; fi
+    "$TCC" -mt9000 -w -nostdinc \
+        -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
+        -I"$UCLIBC/include" -I"$UCLIBC/libc/sysdeps/linux/transputer" \
+        -I"$UCLIBC/libc/sysdeps/linux/common" -I"$KERNEL_INCLUDE" -I"$INFLATE" \
+        -D_LINUX_KERNEL_H -D_LINUX_STRING_H_ -Dfallthrough= '-DIS_ENABLED(x)=0' \
+        -include string.h \
+        -c -o "/tmp/tpkg_$unit.o" "$source"
+done
 
 echo "=== Building tpkg ==="
 
-# Compile
-$TCC -mt9000 -w \
-    -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0 \
-    -nostdinc \
-    -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
-    -I"$UCLIBC/include" \
-    -I"$UCLIBC/libc/sysdeps/linux/transputer" \
-    -I"$UCLIBC/libc/sysdeps/linux/common" \
-    -I"$KERNEL_INCLUDE" \
-    -c -o /tmp/tpkg.o "$SCRIPT_DIR/tpkg.c"
+manager_flags=(-mt9000 -w -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0
+    -nostdinc -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include"
+    -I"$UCLIBC/include" -I"$UCLIBC/libc/sysdeps/linux/transputer"
+    -I"$UCLIBC/libc/sysdeps/linux/common" -I"$KERNEL_UAPI" -I"$KERNEL_INCLUDE")
+decoder_objects=(/tmp/tpkg_tpz.o /tmp/tpkg_inflate.o /tmp/tpkg_inffast.o /tmp/tpkg_inftrees.o)
+
+"$TCC" "${manager_flags[@]}" -c -o /tmp/tpkg.o "$SCRIPT_DIR/tpkg.c"
 
 # Link
 local_crt1=""
@@ -54,6 +67,7 @@ if [ -f "$TRANS_DIR/tests/syscall_stub.c" ]; then
         -I"$UCLIBC/libc/sysdeps/linux/transputer" \
         -I"$UCLIBC/libc/sysdeps/linux/common" \
         -I"$KERNEL_INCLUDE" \
+        "-DTP_USE_T9K_SYSCALL=${TP_USE_T9K_SYSCALL:-0}" \
         -c -o /tmp/tpkg_syscall.o "$TRANS_DIR/tests/syscall_stub.c"
     local_syscall="/tmp/tpkg_syscall.o"
 fi
@@ -63,26 +77,22 @@ $TCC -nostdlib -nostdinc \
     $local_crt1 \
     $local_crt_bridge \
     /tmp/tpkg.o \
+    "${decoder_objects[@]}" \
     $local_syscall \
-    "$UCLIBC/lib/libc.a"
+    "$UCLIBC/lib/libc.a" "$LIBTCC1"
 
 # Convert to bFLT
 $ELF2FLT /tmp/tpkg.elf /tmp/tpkg.flt
 
 echo "  tpkg.flt: $(du -sh /tmp/tpkg.flt | cut -f1)"
+if [ "${1:-}" = --cli ]; then exit 0; fi
 
 echo "=== Building tpkg-ui ==="
 
-# Compile UI
-$TCC -mt9000 -w \
-    -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0 \
-    -nostdinc \
-    -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
-    -I"$UCLIBC/include" \
-    -I"$UCLIBC/libc/sysdeps/linux/transputer" \
-    -I"$UCLIBC/libc/sysdeps/linux/common" \
-    -I"$KERNEL_INCLUDE" \
-    -c -o /tmp/tpkg_ui.o "$SCRIPT_DIR/tpkg_ui.c"
+"$TCC" "${manager_flags[@]}" -DTPKG_EMBEDDED \
+    -c -o /tmp/tpkg_embedded.o "$SCRIPT_DIR/tpkg.c"
+if [ "${SPINE:-0}" = 1 ]; then manager_flags+=(-DTPOS_SPINE_CHIP); fi
+"$TCC" "${manager_flags[@]}" -c -o /tmp/tpkg_ui.o "$SCRIPT_DIR/tpkg_ui.c"
 
 # Link UI
 $TCC -nostdlib -nostdinc \
@@ -90,13 +100,15 @@ $TCC -nostdlib -nostdinc \
     $local_crt1 \
     $local_crt_bridge \
     /tmp/tpkg_ui.o \
+    /tmp/tpkg_embedded.o "${decoder_objects[@]}" \
     $local_syscall \
-    "$UCLIBC/lib/libc.a"
+    "$UCLIBC/lib/libc.a" "$LIBTCC1"
 
 # Convert to bFLT
 $ELF2FLT /tmp/tpkg_ui.elf /tmp/tpkg_ui.flt
 
 echo "  tpkg-ui.flt: $(du -sh /tmp/tpkg_ui.flt | cut -f1)"
+if [ "${1:-}" = --manager ]; then exit 0; fi
 
 # Build ttop if source exists
 if [ -f "$SCRIPT_DIR/ttop.c" ]; then
@@ -129,15 +141,7 @@ fi
 if [ -f "$SCRIPT_DIR/tfiles.c" ]; then
     echo "=== Building tfiles ==="
 
-    $TCC -mt9000 -w \
-        -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0 \
-        -nostdinc \
-        -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
-        -I"$UCLIBC/include" \
-        -I"$UCLIBC/libc/sysdeps/linux/transputer" \
-        -I"$UCLIBC/libc/sysdeps/linux/common" \
-        -I"$KERNEL_INCLUDE" \
-        -c -o /tmp/tfiles.o "$SCRIPT_DIR/tfiles.c"
+    "$TCC" "${manager_flags[@]}" -c -o /tmp/tfiles.o "$SCRIPT_DIR/tfiles.c"
 
     $TCC -nostdlib -nostdinc \
         -o /tmp/tfiles.elf \
@@ -145,7 +149,7 @@ if [ -f "$SCRIPT_DIR/tfiles.c" ]; then
         $local_crt_bridge \
         /tmp/tfiles.o \
         $local_syscall \
-        "$UCLIBC/lib/libc.a"
+        "$UCLIBC/lib/libc.a" "$LIBTCC1"
 
     $ELF2FLT /tmp/tfiles.elf /tmp/tfiles.flt
 

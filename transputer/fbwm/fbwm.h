@@ -283,6 +283,7 @@ void wm_draw_taskbar(void);
 #define FBWM_MAX_SURFACES   FBWM_MAX_WINDOWS
 
 /* Allocate a pool-backed surface matching the window's current client size.
+ * Recreating the surface clears its pixels to the window background.
  * Returns 0 on success, -1 if the window is missing or no pool slot fits. */
 int wm_surface_create(int win_id);
 

@@ -25,7 +25,7 @@
    transputer/t4/tvx.h so the compiler builds without transputer/ (synced by
    transputer/scripts/sync-tvx-headers.sh).  Used here to fold __bf16
    conversions of constants. */
-#include "lib/transputer-tvx/tvx.h"
+#include "lib/transputer/tvx/tvx.h"
 #endif
 
 /********************************************************/
@@ -93,13 +93,15 @@ ST_DATA int func_ind; /* function start address */
 static int func_old;
 ST_DATA const char *funcname;
 #ifdef TCC_TARGET_TRANSPUTER
+#include "transputer-knobs.h"
+
 static int tcc_trace_func_enabled = -1;
 static char tcc_trace_func_name[64];
 
 static int tcc_trace_func_active(void) {
     const char *env;
     if (tcc_trace_func_enabled == -1) {
-        env = getenv("TCC_TRACE_FUNC");
+        env = tp_knob(TPK_TCC_TRACE_FUNC);
         if (env && *env) {
             pstrcpy(tcc_trace_func_name, sizeof(tcc_trace_func_name), env);
             tcc_trace_func_enabled = 1;
@@ -112,19 +114,6 @@ static int tcc_trace_func_active(void) {
     return strcmp(funcname, tcc_trace_func_name) == 0;
 }
 
-/* TCC_TRANSPUTER_WSUB_OPT=0 (bsub=0) or TCC_TRANSPUTER_BSUB_OPT=0 (bsub=1)
-   turns an indexed pointer-add lowering off, for A/B measurement.  Read
-   once: this is asked on every pointer addition. */
-static int tp_ptradd_opt_off(int bsub)
-{
-    static int off[2] = { -1, -1 };
-    if (off[bsub] < 0) {
-        const char *e = getenv(bsub ? "TCC_TRANSPUTER_BSUB_OPT"
-                                    : "TCC_TRANSPUTER_WSUB_OPT");
-        off[bsub] = e && !strcmp(e, "0");
-    }
-    return off[bsub];
-}
 #endif
 ST_DATA CType int_type, func_old_type, char_type, char_pointer_type;
 static CString initstr;
@@ -215,10 +204,6 @@ static void vpush(CType *type);
 static int gvtst(int inv, int t);
 static void gen_inline_functions(TCCState *s);
 static void free_inline_functions(TCCState *s);
-#ifdef TCC_TARGET_TRANSPUTER
-static void note_inline_call_section(SValue *call_target);
-static void resolve_inline_sections(TCCState *s);
-#endif
 static void skip_or_save_block(TokenString **str);
 static void gv_dup(void);
 static int get_temp_local_var(int size,int align,int *r2);
@@ -739,102 +724,9 @@ ST_FUNC void put_extern_sym(Sym *sym, Section *s, addr_t value, unsigned long si
 ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
                      addr_t addend)
 {
-#ifdef TCC_TARGET_TRANSPUTER
-    static int reloc_log = -1;
-    static const char *reloc_sym_filter;
-    static int reloc_type_filter;
-    static int sym_trace = -1;
-    static const char *sym_trace_filter;
-    static int iprel_nonfunc_warn = -1;
-    static int greloc_warn = -1;
-    static int iprel_diag = -1;
-#endif
     int c = 0;
 #ifdef TCC_TARGET_TRANSPUTER
-    if (reloc_log < 0) {
-        const char *env = getenv("T4_RELOC_LOG");
-        reloc_log = env && *env;
-        reloc_sym_filter = getenv("T4_RELOC_SYM");
-        reloc_type_filter = -1;
-        env = getenv("T4_RELOC_TYPE");
-        if (env && *env)
-            reloc_type_filter = (int)strtol(env, NULL, 0);
-    }
-    if (sym_trace < 0) {
-        const char *env = getenv("T4_SYM_TRACE");
-        sym_trace = env && *env;
-        sym_trace_filter = env;
-    }
-    if (iprel_nonfunc_warn < 0) {
-        const char *env = getenv("T4_IPREL_NONFUNC_WARN");
-        iprel_nonfunc_warn = env && *env;
-    }
-    if (greloc_warn < 0) {
-        const char *env = getenv("T4_GRELOC_WARN");
-        greloc_warn = env && *env;
-    }
-    if (iprel_diag < 0) {
-        const char *env = getenv("T4_IPREL_DIAG");
-        iprel_diag = env && *env;
-    }
-
-    /* Bug detection: IPREL32 should only be used for function calls */
-    if (type == R_TRANSPUTER_IPREL32 && sym) {
-        int bt = sym->type.t & VT_BTYPE;
-        /* IPREL32 is only valid for function calls (bt == VT_FUNC).
-         * If we're emitting IPREL32 for a non-function symbol, that's a bug! */
-        if (bt != VT_FUNC && iprel_nonfunc_warn) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            fprintf(stderr,
-                    "BUG_IPREL32_NONFUNCTION: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx\n",
-                    get_tok_str(sym->v, NULL), bt, func, fname,
-                    file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset);
-        }
-        if (iprel_diag) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            uint8_t op = 0;
-            if (s && s->data && offset < s->data_offset)
-                op = ((uint8_t *)s->data)[offset];
-            fprintf(stderr,
-                    "IPREL_DIAG: sym=%s bt=0x%x func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
-                    get_tok_str(sym->v, NULL), bt, func, fname,
-                    file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset, op);
-        }
-    }
-    if ((type == R_TRANSPUTER_IPREL32 || type == R_TRANSPUTER_LDC_ABS) && sym && reloc_log) {
-        const char *name = get_tok_str(sym->v, NULL);
-        if ((!reloc_sym_filter || strstr(name, reloc_sym_filter)) &&
-            (reloc_type_filter < 0 || reloc_type_filter == type)) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            uint8_t op = 0;
-            if (s && s->data && offset < s->data_offset)
-                op = ((uint8_t *)s->data)[offset];
-            fprintf(stderr,
-                    "RELOC_EMIT: sym=%s type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
-                    name, type, func, fname, file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset, op);
-        }
-    }
-    if (sym && sym_trace && sym_trace_filter) {
-        const char *name = get_tok_str(sym->v, NULL);
-        if (name && strstr(name, sym_trace_filter)) {
-            const char *fname = file ? file->filename : "<unknown>";
-            const char *func = funcname ? funcname : "<no func>";
-            uint8_t op = 0;
-            int bt = sym->type.t & VT_BTYPE;
-            if (s && s->data && offset < s->data_offset)
-                op = ((uint8_t *)s->data)[offset];
-            fprintf(stderr,
-                    "SYM_RELOC: sym=%s bt=0x%x type=%d func=%s file=%s line=%d section=%s offset=0x%lx op=0x%02x\n",
-                    name, bt, type, func, fname, file ? file->line_num : -1,
-                    s ? s->name : "<no-section>", offset, op);
-        }
-    }
+    tp_greloca_trace(s, sym, offset, type);
 #endif
 
     if (nocode_wanted && s == cur_text_section)
@@ -853,7 +745,7 @@ ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
             /* This indicates memory corruption - skip creating relocation */
             const char *name = (sym->v > 0 && sym->v < 100000) ?
                 get_tok_str(sym->v, NULL) : "<corrupt>";
-            if (greloc_warn) {
+            if (tp_knob_on(TPK_T4_GRELOC_WARN)) {
                 tcc_warning("greloca: symbol %s has corrupt index %d, skipping relocation",
                             name, sym->c);
             }
@@ -867,7 +759,7 @@ ST_FUNC void greloca(Section *s, Sym *sym, unsigned long offset, int type,
                 if (IS_ENUM_VAL(sym->type.t)) {
                     return;
                 }
-                if (greloc_warn) {
+                if (tp_knob_on(TPK_T4_GRELOC_WARN)) {
                     tcc_warning("greloca: symbol %s has invalid index %d (max=%d), recreating",
                                 sym->v ? get_tok_str(sym->v, NULL) : "<unknown>",
                                 sym->c, max_syms);
@@ -1584,204 +1476,6 @@ static void merge_attr(AttributeDef *ad, AttributeDef *ad1)
       ad->asm_label = ad1->asm_label;
     if (ad1->attr_mode)
       ad->attr_mode = ad1->attr_mode;
-#ifdef TCC_TARGET_TRANSPUTER
-}
-
-/* TinyCC does not perform general source-level inlining.  It records an
-   inline definition and emits one out-of-line copy if the definition is
-   referenced.  Record the sections of calls from normal functions here;
-   resolve_inline_sections later combines these roots with the complete graph
-   of deferred inline bodies before any outline is emitted. */
-static void note_inline_call_section(SValue *call_target)
-{
-    Sym *call_sym;
-    int i;
-
-    if (!cur_text_section || nocode_wanted
-        || !(call_target->r & VT_SYM) || !call_target->sym)
-        return;
-
-    call_sym = call_target->sym;
-    for (i = 0; i < tcc_state->nb_inline_fns; ++i) {
-        InlineFunc *fn = tcc_state->inline_fns[i];
-        Sym *inline_sym = fn->sym;
-
-        if (!inline_sym)
-            continue;
-        if (inline_sym != call_sym
-            && (!inline_sym->v || inline_sym->v != call_sym->v))
-            continue;
-        if (fn->section || fn->call_section_conflict)
-            return;
-        if (!fn->call_section)
-            fn->call_section = cur_text_section;
-        else if (fn->call_section != cur_text_section)
-            fn->call_section_conflict = 1;
-        return;
-    }
-}
-
-typedef struct InlineSectionEdge {
-    int callee;
-    unsigned char indirect;
-} InlineSectionEdge;
-
-typedef struct InlineSectionNode {
-    InlineSectionEdge *edges;
-    int nb_edges;
-    Section *placement;
-    unsigned char reachable;
-} InlineSectionNode;
-
-static void add_inline_section_edge(InlineSectionNode *node, int callee,
-                                    int indirect)
-{
-    InlineSectionEdge *edge;
-    int i;
-
-    for (i = 0; i < node->nb_edges; ++i) {
-        edge = &node->edges[i];
-        if (edge->callee == callee) {
-            if (indirect)
-                edge->indirect = 1;
-            return;
-        }
-    }
-    node->edges = tcc_realloc(node->edges,
-                              (node->nb_edges + 1) * sizeof *node->edges);
-    edge = &node->edges[node->nb_edges++];
-    edge->callee = callee;
-    edge->indirect = indirect;
-}
-
-/* Build a conservative call graph from the already-preprocessed token
-   strings.  A function-name token immediately followed by '(' is a direct
-   edge.  Any other reference may escape through a pointer, so it forces the
-   referenced outline to ordinary .text once its containing function is
-   reachable. */
-static void scan_inline_section_edges(TCCState *s, InlineSectionNode *nodes,
-                                      int *by_token, int caller)
-{
-    TokenString stream;
-    int pending = -1;
-
-    stream = *s->inline_fns[caller]->func_str;
-    begin_macro(&stream, 0);
-    next();
-    while (tok != TOK_EOF) {
-        if (pending >= 0) {
-            add_inline_section_edge(&nodes[caller], pending, tok != '(');
-            pending = -1;
-        }
-        if (tok >= TOK_IDENT && tok < tok_ident && by_token[tok])
-            pending = by_token[tok] - 1;
-        next();
-    }
-    if (pending >= 0)
-        add_inline_section_edge(&nodes[caller], pending, 1);
-    end_macro();
-}
-
-static Section *join_inline_section(Section *old, Section *incoming)
-{
-    if (!old)
-        return incoming;
-    if (old == incoming)
-        return old;
-    /* Ordinary .text is the conservative top of the placement lattice. */
-    return text_section;
-}
-
-/* Resolve all deferred-inline placements before emitting any of them.
-
-   Parsing an outline can make another outline live.  Deciding placement at
-   that point is order-dependent: an .init.text path may be seen before a
-   later permanent path to the same callee.  Instead, seed this graph with
-   calls from normal functions, then propagate reachability and section joins
-   to a fixed point.  Explicit section attributes are barriers and remain
-   authoritative.  Address escapes, conflicting callers, and unknown roots
-   use ordinary .text. */
-static void resolve_inline_sections(TCCState *s)
-{
-    InlineSectionNode *nodes;
-    int *by_token;
-    int changed, i, j;
-
-    nodes = tcc_mallocz(s->nb_inline_fns * sizeof *nodes);
-    by_token = tcc_mallocz(tok_ident * sizeof *by_token);
-    for (i = 0; i < s->nb_inline_fns; ++i) {
-        InlineFunc *fn = s->inline_fns[i];
-        if (fn->sym && fn->sym->v >= TOK_IDENT && fn->sym->v < tok_ident)
-            by_token[fn->sym->v] = i + 1;
-    }
-    for (i = 0; i < s->nb_inline_fns; ++i)
-        scan_inline_section_edges(s, nodes, by_token, i);
-    tcc_free(by_token);
-
-    for (i = 0; i < s->nb_inline_fns; ++i) {
-        InlineFunc *fn = s->inline_fns[i];
-        Sym *sym = fn->sym;
-
-        if (!sym)
-            continue;
-        if (sym->c || !(sym->type.t & VT_INLINE)) {
-            nodes[i].reachable = 1;
-            if (fn->section)
-                nodes[i].placement = fn->section;
-            else if (sym->a.addrtaken || fn->call_section_conflict
-                     || !fn->call_section)
-                nodes[i].placement = text_section;
-            else
-                nodes[i].placement = fn->call_section;
-        }
-    }
-
-    do {
-        changed = 0;
-        for (i = 0; i < s->nb_inline_fns; ++i) {
-            InlineSectionNode *caller = &nodes[i];
-
-            if (!caller->reachable || !caller->placement)
-                continue;
-            for (j = 0; j < caller->nb_edges; ++j) {
-                InlineSectionEdge *edge = &caller->edges[j];
-                InlineSectionNode *callee = &nodes[edge->callee];
-                InlineFunc *callee_fn = s->inline_fns[edge->callee];
-                Sym *callee_sym = callee_fn->sym;
-                Section *incoming, *joined;
-
-                if (!callee_sym)
-                    continue;
-                if (!callee->reachable) {
-                    callee->reachable = 1;
-                    changed = 1;
-                }
-                if (callee_fn->section) {
-                    joined = callee_fn->section;
-                } else {
-                    incoming = edge->indirect ? text_section
-                                              : caller->placement;
-                    if (callee_sym->a.addrtaken)
-                        incoming = text_section;
-                    joined = join_inline_section(callee->placement, incoming);
-                }
-                if (joined != callee->placement) {
-                    callee->placement = joined;
-                    changed = 1;
-                }
-            }
-        }
-    } while (changed);
-
-    for (i = 0; i < s->nb_inline_fns; ++i) {
-        InlineFunc *fn = s->inline_fns[i];
-        if (!fn->section && nodes[i].reachable)
-            fn->call_section = nodes[i].placement ? nodes[i].placement
-                                                  : text_section;
-        tcc_free(nodes[i].edges);
-    }
-    tcc_free(nodes);
-#endif
 }
 
 /* Merge some type attributes.  */
@@ -2308,11 +2002,19 @@ static void tcc_debug_end_scope(Sym *b, int bounds)
 static void incr_offset(int offset)
 {
     int t = vtop->type.t;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* gen_op() builds a new SValue: keep the second word of a packed
+       member's long long or double known to be unaligned as well. */
+    int unaligned = vtop->r & VT_UNALIGNED;
+#endif
     gaddrof(); /* remove VT_LVAL */
     vtop->type.t = VT_PTRDIFF_T; /* set scalar type */
     vpushs(offset);
     gen_op('+');
     vtop->r |= VT_LVAL;
+#ifdef TCC_TARGET_TRANSPUTER
+    vtop->r |= unaligned;
+#endif
     vtop->type.t = t;
 }
 
@@ -2412,11 +2114,13 @@ ST_FUNC int gv(int rc)
     int bit_pos, bit_size, size, align;
 
 #ifdef TCC_TARGET_TRANSPUTER
+    if ((vtop->r & VT_LVAL) && (vtop->type.t & VT_VOLATILE))
+        tp_note_volatile();
     if ((vtop->r & VT_VALMASK) == VT_CONST
         && vtop->sym
         && !(vtop->r & VT_SYM)
         && !IS_ENUM_VAL(vtop->sym->type.t)) {
-        const char *diag = getenv("T4_LDC_SYM_DIAG");
+        const char *diag = tp_knob(TPK_T4_LDC_SYM_DIAG);
         if (diag && *diag) {
             const char *fname = file ? file->filename : "<unknown>";
             const char *func = funcname ? funcname : "<no func>";
@@ -2465,7 +2169,10 @@ ST_FUNC int gv(int rc)
         }
         r = gv(rc);
     } else {
-        if (is_float(vtop->type.t) && 
+        if (is_float(vtop->type.t) &&
+#ifdef TCC_TARGET_TRANSPUTER
+            (vtop->type.t & VT_BTYPE) != VT_FLOAT &&
+#endif
             (vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
             /* CPUs usually cannot use float constants, so we store them
                generically in data segment */
@@ -2921,86 +2628,6 @@ static void gen_opl(int op)
 #endif
             save_regs(4);
         }
-#ifdef TCC_TARGET_TRANSPUTER
-        /* Transputer-specific 64-bit comparison.
-         *
-         * The generic algorithm (below in #else) relies on CPU flags
-         * persisting across conditional jumps.  On transputer, CJ consumes
-         * AReg, destroying the comparison result.  The "non-equal test"
-         * (vpushi(0) + vset_VT_CMP(TOK_NE)) therefore tests a constant 0
-         * instead of the actual comparison flags.
-         *
-         * Fix: save copies of the H1/H2 SValues (which still live in
-         * workspace after save_regs), and re-push them for an explicit
-         * NE test after the widened comparison's CJ.
-         *
-         * Algorithm (for LT, similar for GT/LE/GE/unsigned variants):
-         *   a = CJ when H1 LE H2 is FALSE → H1 > H2 → overall FALSE
-         *   b = CJ when H1 NE H2 is TRUE  → H1 < H2 → overall TRUE
-         *   fall-through: H1 == H2 → compare L1 ULT L2
-         */
-        {
-            /* compare high */
-            op1 = op;
-            if (op1 == TOK_LT)
-                op1 = TOK_LE;
-            else if (op1 == TOK_GT)
-                op1 = TOK_GE;
-            else if (op1 == TOK_ULT)
-                op1 = TOK_ULE;
-            else if (op1 == TOK_UGT)
-                op1 = TOK_UGE;
-            a = 0;
-            b = 0;
-
-            if (op != TOK_NE && op != TOK_EQ) {
-                /* The widened compare consumes H1/H2, and the explicit NE
-                 * test after its CJ needs them again (on x86 the flags
-                 * persist; on transputer CJ destroys them).
-                 *
-                 * The first version stashed the two SValues in locals and
-                 * re-pushed them for the NE test.  That is invisible to the
-                 * back end: its emit-time STL cancellation decides a spill
-                 * is dead by scanning the *vstack*, so the workspace slot
-                 * the saved copies named had its store deleted, and the NE
-                 * test compared uninitialised memory.  Kernel-visible as
-                 * every `loff_t < 0` guard flipping at random - /init's
-                 * exec failed in generic_file_read_iter with -EINVAL.
-                 *
-                 * Duplicating the operands *on the vstack* keeps them live
-                 * in the only place the back end looks. */
-                vpushv(&vtop[-1]);          /* H1 copy */
-                vpushv(&vtop[-1]);          /* H2 copy */
-                gen_op(op1);                /* consumes the copies */
-                a = gvtst(1, 0);
-                gen_op(TOK_NE);             /* consumes the originals */
-                b = gvtst(0, 0);
-            } else {
-                gen_op(op1);
-                if (op == TOK_NE)
-                    b = gvtst(0, 0);
-                else
-                    a = gvtst(1, 0);
-            }
-            /* compare low. Always unsigned */
-            op1 = op;
-            if (op1 == TOK_LT)
-                op1 = TOK_ULT;
-            else if (op1 == TOK_LE)
-                op1 = TOK_ULE;
-            else if (op1 == TOK_GT)
-                op1 = TOK_UGT;
-            else if (op1 == TOK_GE)
-                op1 = TOK_UGE;
-            gen_op(op1);
-#if 0//def TCC_TARGET_I386
-            if (op == TOK_NE) { gsym(b); break; }
-            if (op == TOK_EQ) { gsym(a); break; }
-#endif
-            gvtst_set(1, a);
-            gvtst_set(0, b);
-        }
-#else
         /* compare high */
         op1 = op;
         /* when values are equal, we need to compare low words. since
@@ -3015,6 +2642,20 @@ static void gen_opl(int op)
             op1 = TOK_UGE;
         a = 0;
         b = 0;
+#ifdef TCC_TARGET_TRANSPUTER
+        /* A relational test needs the high words twice: for the widened
+           compare here and for the "not equal" test after its jump, which
+           other targets take from flags the jump left alone.  cj consumes
+           what it tests, so the high words are compared again - and they
+           are duplicated on the vstack, the only place the back end looks
+           when it decides a spilled word is dead.  (Copies kept in locals
+           had their stores cancelled, and every `loff_t < 0` in the kernel
+           compared uninitialised memory.) */
+        if (op != TOK_NE && op != TOK_EQ) {
+            vpushv(&vtop[-1]);          /* H1 copy */
+            vpushv(&vtop[-1]);          /* H2 copy */
+        }
+#endif
         gen_op(op1);
         if (op == TOK_NE) {
             b = gvtst(0, 0);
@@ -3022,8 +2663,12 @@ static void gen_opl(int op)
             a = gvtst(1, 0);
             if (op != TOK_EQ) {
                 /* generate non equal test */
+#ifdef TCC_TARGET_TRANSPUTER
+                gen_op(TOK_NE);             /* on the original high words */
+#else
                 vpushi(0);
                 vset_VT_CMP(TOK_NE);
+#endif
                 b = gvtst(0, 0);
             }
         }
@@ -3044,7 +2689,6 @@ static void gen_opl(int op)
 #endif
         gvtst_set(1, a);
         gvtst_set(0, b);
-#endif /* TCC_TARGET_TRANSPUTER */
         break;
     }
 }
@@ -3812,10 +3456,10 @@ ST_FUNC void gen_op(int op)
     /* The arithmetic conversion gives both operands the unqualified common
        type before the back end sees them: tell it whether either was a
        volatile read, which must not be merged with another. */
-    int saved_volatile = tp_opf_volatile;
-    tp_opf_volatile = ((vtop[-1].type.t | vtop[0].type.t) & VT_VOLATILE) != 0;
+    int saved_volatile = tp_opf_set_volatile(
+        ((vtop[-1].type.t | vtop[0].type.t) & VT_VOLATILE) != 0);
     gen_op1(op);
-    tp_opf_volatile = saved_volatile;
+    tp_opf_set_volatile(saved_volatile);
     if (narrow)
         gen_cast_s(VT_FLOAT16);
 }
@@ -3919,92 +3563,33 @@ op_err:
 #endif
             type1 = vtop[-1].type;
 #ifdef TCC_TARGET_TRANSPUTER
-            {
-                int tp_ptradd_fast = 0;
-                /* A VLA element (a row of int m[r][c]) has a size known
-                   only at run time; its static size is that of a pointer,
-                   which would pass for a word and take wsub below. */
-                int tp_elem_size = pointed_type(&vtop[-1].type)->t & VT_VLA
-                                   ? 0 : pointed_size(&vtop[-1].type);
-#ifdef CONFIG_TCC_BCHECK
-                int tp_bounds_active = tcc_state->do_bounds_check && !CONST_WANTED;
-#else
-                int tp_bounds_active = 0;
-#endif
-                /* WSUB/WSUBDB compute base + index*4 (or *8) in one
-                 * instruction — the whole point of the transputer's indexed
-                 * addressing. Enabled by default; set
-                 * TCC_TRANSPUTER_WSUB_OPT=0 to fall back to the generic
-                 * multiply-then-add lowering. */
-                {
-                    int tp_wsub_enabled = !tp_ptradd_opt_off(0);
-
-                    /* None of these may fire while a constant expression is
-                     * being built. `&arr[1]` in a static initialiser is an
-                     * address constant that the generic lowering folds; the
-                     * indexed paths emit instructions instead, and the result
-                     * is rejected with "initializer element is not constant".
-                     *
-                     * nocode_wanted alone does NOT cover this: CONST_WANTED is
-                     * a distinct field of it (CONST_WANTED_MASK), and it is
-                     * what initialiser parsing sets. Guarding only on
-                     * nocode_wanted closed the offsetof case — a literal base —
-                     * but left this one open, and it reappeared the moment
-                     * symbol bases were allowed through. */
-                    if (CONST_WANTED)
-                        tp_wsub_enabled = 0;
-                    if (tp_wsub_enabled && op == '+' && tp_elem_size == 4 && !tp_bounds_active)
-                        tp_ptradd_fast = gen_ptradd_wsub();
-                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 8 && !tp_bounds_active)
-                        tp_ptradd_fast = gen_ptradd_wsubdb();
-                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 1
-                             && !tp_bounds_active) {
-                        /* separately gateable so the A/B can be measured */
-                        if (!tp_ptradd_opt_off(1))
-                            tp_ptradd_fast = gen_ptradd_bsub();
-                    }
-                    /* T9000 ssub (base + index*2); returns 0 unless -mt9000.
-                     * Distinct element size from the bsub path above, so the
-                     * two coexist. */
-                    else if (tp_wsub_enabled && op == '+' && tp_elem_size == 2 && !tp_bounds_active)
-                        tp_ptradd_fast = gen_ptradd_ssub();
-                }
-                if (!tp_ptradd_fast) {
-                    vpush_type_size(pointed_type(&vtop[-1].type), &align);
-                    vtop->type.t &= ~VT_UNSIGNED;
-                    gen_op('*');
+            /* One indexed instruction where the element size has one.
+               Not while a constant expression is being built: `&arr[1]` in
+               a static initialiser is an address constant that the generic
+               lowering folds, and instructions would make it "not
+               constant".  nocode_wanted alone does not cover that;
+               CONST_WANTED is the field of it that initialiser parsing
+               sets.  Not for `-` either.  A VLA element (a row of
+               int m[r][c]) has a size known only at run time; its static
+               size is a pointer's, which would pass for a word. */
+            if (op == '+' && !CONST_WANTED
+                && gen_ptradd_indexed(
+                       pointed_type(&vtop[-1].type)->t & VT_VLA
+                       ? 0 : pointed_size(&vtop[-1].type))) {
+                /* the address is on vtop */
+            } else {
+                vpush_type_size(pointed_type(&vtop[-1].type), &align);
+                vtop->type.t &= ~VT_UNSIGNED;
+                gen_op('*');
+                /* `bsub` computes A+B, so `-` stays a `diff` */
+                tp_ptradd_addr(op == '+');
+                gen_opic(op);
+                tp_ptradd_addr(0);
+            }
 #else
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             vtop->type.t &= ~VT_UNSIGNED;
             gen_op('*');
-#endif
-#ifdef TCC_TARGET_TRANSPUTER
-#ifdef CONFIG_TCC_BCHECK
-            if (tcc_state->do_bounds_check && !CONST_WANTED) {
-                /* if bounded pointers, we generate a special code to
-                   test bounds */
-                        if (op == '-') {
-                            vpushi(0);
-                            vswap();
-                            gen_op('-');
-                        }
-                        gen_bounded_ptr_add();
-                    } else
-#endif
-                    {
-                        /* The result of this add is an address, so it can go
-                         * on the T9000's spare stage-2 address slot instead
-                         * of the contended stage-4 ALU.  Only for `+`:
-                         * `bsub` computes A+B, so `-` must stay a `diff`. */
-                        int tp_saved = tp_ptr_add_is_addr;
-                        if (op == '+' && !tp_bounds_active
-                            && !tp_ptradd_opt_off(1))
-                            tp_ptr_add_is_addr = 1;
-                        gen_opic(op);
-                        tp_ptr_add_is_addr = tp_saved;
-                    }
-                }
-#else
 #ifdef CONFIG_TCC_BCHECK
             if (tcc_state->do_bounds_check && !CONST_WANTED) {
                 /* if bounded pointers, we generate a special code to
@@ -4019,8 +3604,8 @@ op_err:
 #endif
             {
                 gen_opic(op);
-#endif
             }
+#endif
             type1.t &= ~(VT_ARRAY|VT_VLA);
             /* put again type if gen_opic() swaped operands */
             vtop->type = type1;
@@ -4679,7 +4264,14 @@ static void gen_assign_cast(CType *dt)
 /* store vtop in lvalue pushed on stack */
 ST_FUNC void vstore(void)
 {
+#ifdef TCC_TARGET_TRANSPUTER
+    if (vtop[-1].type.t & VT_VOLATILE)
+        tp_note_volatile();
+#endif
     int sbt, dbt, ft, r, size, align, bit_size, bit_pos, delayed_cast;
+#ifdef TCC_TARGET_TRANSPUTER
+    int double_copy;
+#endif
 
     ft = vtop[-1].type.t;
     sbt = vtop->type.t & VT_BTYPE;
@@ -4786,6 +4378,15 @@ ST_FUNC void vstore(void)
     } else if (dbt == VT_VOID) {
         --vtop;
     } else {
+#ifdef TCC_TARGET_TRANSPUTER
+            /* Save the source's memory type before the cast and gv turn
+               it into an ordinary workspace pair. */
+            double_copy = sbt == VT_DOUBLE && dbt == VT_DOUBLE &&
+                !((vtop->type.t | ft) & VT_VOLATILE) &&
+                ((vtop->type.t ^ ft) & VT_LONG) == 0 &&
+                (vtop->r & (VT_LVAL | VT_UNALIGNED)) == VT_LVAL &&
+                ((vtop->r & VT_VALMASK) != VT_LOCAL || !(vtop->c.i & 3));
+#endif
             /* optimize char/short casts */
             delayed_cast = 0;
 #ifdef TCC_TARGET_TRANSPUTER
@@ -4838,7 +4439,14 @@ ST_FUNC void vstore(void)
             }
 
             /* if lvalue was saved on stack, must read it */
+#ifdef TCC_TARGET_TRANSPUTER
+            /* store() reads the pointer from its word itself, right
+               before the store; a two-word value still wants it in a
+               register for the second word's address. */
+            if ((vtop[-1].r & VT_VALMASK) == VT_LLOCAL && USING_TWO_WORDS(dbt)) {
+#else
             if ((vtop[-1].r & VT_VALMASK) == VT_LLOCAL) {
+#endif
                 SValue sv;
                 r = get_reg(RC_INT);
                 sv.type.t = VT_PTRDIFF_T;
@@ -4846,10 +4454,22 @@ ST_FUNC void vstore(void)
                 sv.c.i = vtop[-1].c.i;
 		sv.sym = NULL;
                 load(r, &sv);
+#ifdef TCC_TARGET_TRANSPUTER
+                /* still a packed member's address if it was one */
+                vtop[-1].r = r | VT_LVAL | (vtop[-1].r & VT_UNALIGNED);
+#else
                 vtop[-1].r = r | VT_LVAL;
+#endif
             }
 
             r = vtop->r & VT_VALMASK;
+#ifdef TCC_TARGET_TRANSPUTER
+            if (double_copy && tp_store_double_copy(vtop, vtop - 1)) {
+                vtop[-1] = *vtop;
+                vtop--;
+                return;
+            }
+#endif
             /* two word case handling :
                store second register at word + 4 (or +8 for x86-64)  */
             if (USING_TWO_WORDS(dbt)) {
@@ -4875,6 +4495,32 @@ ST_FUNC void inc(int post, int c)
 {
     test_lvalue();
     vdup(); /* save lvalue */
+#ifdef TCC_TARGET_TRANSPUTER
+    /* x++ / x-- used for its value (`while (count--)`, `*p++ = v`) on a
+       word that is not volatile: the saved value is a load of its own and
+       the add reads x again.  gv_dup's copy of the loaded register costs
+       a store and a load more, through a second workspace slot.  Not for
+       a global: reading it again costs another eight-byte ldc of its
+       address, and `g++;` as a statement keeps the extra load. */
+    if (post && (vtop->r & VT_LVAL) && !(vtop->r & VT_SYM) &&
+        !(vtop->type.t & VT_VOLATILE) &&
+        !(vtop->type.t & VT_BITFIELD) &&
+        ((vtop->type.t & VT_BTYPE) == VT_INT ||
+         (vtop->type.t & VT_BTYPE) == VT_PTR)) {
+        int from = ind;
+        gv(RC_INT);         /* lv val */
+        /* `p->n++;` as a statement never reads the saved value:
+           tp_stmt_end deletes the load if nothing used it */
+        tp_hist_mark_pure(from);
+        vswap();            /* val lv */
+        vdup();             /* val lv lv */
+        vpushi(c - TOK_MID);
+        gen_op('+');
+        vstore();           /* val (x + c) */
+        vpop();             /* val */
+        return;
+    }
+#endif
     if (post) {
         gv_dup(); /* duplicate value */
         vrotb(3);
@@ -6449,6 +6095,25 @@ ST_FUNC void indir(void)
             return;
         expect("pointer");
     }
+#ifdef TCC_TARGET_TRANSPUTER
+    /* *p, p a pointer local that is not volatile, to a word or narrower
+       integer or pointer: the lvalue goes through p's own word (VT_LLOCAL),
+       and the pointer is read where the access happens - `ldl p; sb` -
+       rather than loaded into a register first and parked across the other
+       operand (`ldl p; stl 9; <value>; ldl 9; sb`). */
+    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == (VT_LOCAL | VT_LVAL) &&
+        !(vtop->type.t & VT_VOLATILE)) {
+        int pbt = pointed_type(&vtop->type)->t;
+        if (!(pbt & (VT_ARRAY | VT_VLA | VT_BITFIELD)) &&
+            ((pbt & VT_BTYPE) == VT_BYTE || (pbt & VT_BTYPE) == VT_SHORT ||
+             (pbt & VT_BTYPE) == VT_INT || (pbt & VT_BTYPE) == VT_PTR ||
+             (pbt & VT_BTYPE) == VT_BOOL)) {
+            vtop->r = (vtop->r & ~VT_VALMASK) | VT_LLOCAL;
+            vtop->type = *pointed_type(&vtop->type);
+            return;
+        }
+    }
+#endif
     if (vtop->r & VT_LVAL)
         gv(RC_INT);
     vtop->type = *pointed_type(&vtop->type);
@@ -6469,6 +6134,13 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
 {
     int func_type;
     CType type;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* Structure arguments remain lvalues until the backend copies them.
+       Preserve source volatility across the assignment cast until that read. */
+    int tp_struct_volatile = (vtop->r & VT_LVAL) &&
+        (vtop->type.t & VT_BTYPE) == VT_STRUCT &&
+        (vtop->type.t & VT_VOLATILE);
+#endif
 
     func_type = func->f.func_type;
     if (func_type == FUNC_OLD ||
@@ -6509,6 +6181,9 @@ static void gfunc_param_typed(Sym *func, Sym *arg)
         gen_assign_cast(&type);
     }
 #ifdef TCC_TARGET_TRANSPUTER
+    if (tp_struct_volatile && (vtop->r & VT_LVAL) &&
+        (vtop->type.t & VT_BTYPE) == VT_STRUCT)
+        vtop->type.t |= VT_VOLATILE;
     if (!(vtop->r & VT_LVAL) &&
         ((vtop->type.t & VT_BTYPE) == VT_LLONG ||
          (vtop->type.t & VT_BTYPE) == VT_DOUBLE ||
@@ -6782,6 +6457,10 @@ static const char *cstr_from_sv(SValue *sv)
 #endif
 }
 
+#ifdef TCC_TARGET_TRANSPUTER
+#include "transputer-front.h"
+#endif
+
 ST_FUNC void unary(void)
 {
     int n, t, align, size, r;
@@ -7003,179 +6682,6 @@ ST_FUNC void unary(void)
 	parse_builtin_params(0, "ee");
 	vpop();
         break;
-#ifdef TCC_TARGET_TRANSPUTER
-    case TOK_builtin_clz:
-    case TOK_builtin_clzl:
-    case TOK_builtin_clzll:
-        {
-            int bits = tok == TOK_builtin_clzll ? 64 :
-                       tok == TOK_builtin_clzl ? LONG_SIZE * 8 : 32;
-            unsigned long long value;
-
-            next();
-            skip('(');
-            expr_eq();
-            skip(')');
-            /* Convert to the parameter type before widening: __builtin_clz
-               takes an unsigned int, so the high half of a wider argument
-               must not reach the 64-bit helper. */
-            if (bits < 64)
-                gen_cast_s(VT_INT | VT_UNSIGNED);
-            gen_cast_s(VT_LLONG | VT_UNSIGNED);
-
-            if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
-                value = vtop->c.i;
-                if (bits < 64)
-                    value &= (1ULL << bits) - 1;
-                n = 0;
-                if (!value) {
-                    n = bits;
-                } else {
-                    unsigned long long mask = 1ULL << (bits - 1);
-                    while (!(value & mask))
-                        ++n, mask >>= 1;
-                }
-                vpop();
-                vpushi(n);
-            } else {
-                /* libtcc1 and the Transputer kernel both provide the 64-bit
-                   helper.  Narrow variants are zero-extended and adjusted. */
-                vpush_helper_func(tok_alloc_const("__builtin_clzll"));
-                vrott(2);
-                gfunc_call(1);
-                vpushi(0);
-                PUT_R_RET(vtop, VT_INT);
-                if (bits < 64) {
-                    vpushi(bits - 64);
-                    gen_op('+');
-                }
-            }
-        }
-        break;
-    case TOK_builtin_strlen:
-        next();
-        skip('(');
-        if (tok == TOK_STR) {
-            CString *literal = parse_mult_str("string constant");
-            n = strlen(literal->data);
-            skip(')');
-            vpushs(n);
-        } else {
-            expr_eq();
-            skip(')');
-            vpush_helper_func(tok_alloc_const("strlen"));
-            vrott(2);
-            gfunc_call(1);
-            type.t = VT_SIZE_T;
-            type.ref = NULL;
-            vpush(&type);
-            PUT_R_RET(vtop, type.t);
-        }
-        break;
-    case TOK_builtin_strcmp:
-    case TOK_builtin_strncmp:
-        {
-            /* GCC folds strcmp/strncmp of constant C strings.  Linux
-             * vruntime_cmp/vruntime_op are written as
-             *   if (!__builtin_strcmp(OP, "-")) ...
-             *   else __BUILD_BUG_vruntime_op();
-             * so the undefined BUILD_BUG symbol is only a link-time
-             * assertion.  Without the fold TCC emits a runtime strcmp
-             * plus a CALL whose reloc target is 0 (Iptr := 0). */
-            int is_ncmp = tok == TOK_builtin_strncmp;
-            const char *sa, *sb;
-            int narg = is_ncmp ? 3 : 2;
-
-            next();
-            skip('(');
-            expr_eq();
-            skip(',');
-            expr_eq();
-            if (is_ncmp) {
-                skip(',');
-                expr_eq();
-            }
-            skip(')');
-
-            sa = cstr_from_sv(&vtop[is_ncmp ? -2 : -1]);
-            sb = cstr_from_sv(&vtop[is_ncmp ? -1 : 0]);
-            if (sa && sb && (!is_ncmp
-                             || ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM))
-                                 == VT_CONST))) {
-                int r = is_ncmp
-                    ? strncmp(sa, sb, (size_t)vtop->c.i)
-                    : strcmp(sa, sb);
-                while (narg--)
-                    vpop();
-                vpushi(r);
-            } else {
-                vpush_helper_func(tok_alloc_const(is_ncmp ? "strncmp"
-                                                          : "strcmp"));
-                vrott(narg + 1);
-                gfunc_call(narg);
-                vpushi(0);
-                PUT_R_RET(vtop, VT_INT);
-            }
-        }
-        break;
-    case TOK_builtin_add_overflow:
-    case TOK_builtin_sub_overflow:
-    case TOK_builtin_mul_overflow:
-        {
-            int overflow_tok = tok;
-            int bt, bits, is_unsigned;
-            CType result_type;
-            char helper[48];
-
-            /* GCC's overflow builtins are type-generic, with the result
-               pointer selecting the arithmetic width and signedness.  Lower
-               the operation to a small typed runtime helper.  This also
-               avoids depending on target condition-code conventions. */
-            next();
-            skip('(');
-            expr_eq();
-            skip(',');
-            expr_eq();
-            skip(',');
-            expr_eq();
-            skip(')');
-
-            if ((vtop->type.t & VT_BTYPE) != VT_PTR)
-                tcc_error("third argument to %s must be a pointer",
-                          get_tok_str(overflow_tok, 0));
-            result_type = *pointed_type(&vtop->type);
-            bt = result_type.t & VT_BTYPE;
-            if (bt != VT_BYTE && bt != VT_SHORT && bt != VT_INT
-                && bt != VT_LLONG)
-                tcc_error("result of %s must point to an integer type",
-                          get_tok_str(overflow_tok, 0));
-
-            bits = bt == VT_BYTE ? 8 : bt == VT_SHORT ? 16
-                   : bt == VT_INT ? 32 : 64;
-            is_unsigned = !!(result_type.t & VT_UNSIGNED);
-
-            /* Cast both operands to the result type.  Linux's checked
-               arithmetic interfaces use matching operand/result types; the
-               casts also give old-style helper calls the correct 64-bit ABI. */
-            vrotb(3);              /* b, result pointer, a */
-            gen_cast(&result_type);
-            vrott(3);              /* a, b, result pointer */
-            vswap();               /* a, result pointer, b */
-            gen_cast(&result_type);
-            vswap();               /* a, b, result pointer */
-
-            snprintf(helper, sizeof(helper), "__tcc_%s_overflow_%c%d",
-                     overflow_tok == TOK_builtin_add_overflow ? "add" :
-                     overflow_tok == TOK_builtin_sub_overflow ? "sub" : "mul",
-                     is_unsigned ? 'u' : 's', bits);
-            vpush_helper_func(tok_alloc_const(helper));
-            vrott(4);
-            gfunc_call(3);
-            vpushi(0);
-            PUT_R_RET(vtop, VT_INT);
-        }
-        break;
-#endif
     case TOK_builtin_types_compatible_p:
 	parse_builtin_params(0, "tt");
 	n = compare_types(&vtop[-1].type, &vtop[0].type, 1);
@@ -7240,6 +6746,12 @@ ST_FUNC void unary(void)
         break;
     case TOK_builtin_unreachable:
 	parse_builtin_params(0, ""); /* just skip '()' */
+#ifdef TCC_TARGET_TRANSPUTER
+        /* directly under `default:`, with no code between */
+        if (cur_switch && !nocode_wanted && cur_switch->def_sym > 0
+            && cur_switch->def_sym == ind)
+            cur_switch->def_unreachable = 1;
+#endif
         type.t = VT_VOID;
         vpush(&type);
         CODE_OFF();
@@ -7359,173 +6871,6 @@ ST_FUNC void unary(void)
     }
 #endif
 
-#ifdef TCC_TARGET_TRANSPUTER
-#endif
-#ifdef TCC_TARGET_TRANSPUTER
-    case TOK___out:
-    case TOK___in:
-    case TOK___outbyte:
-    case TOK___outword:
-    case TOK___tin:
-    case TOK___resetch:
-    case TOK___move:
-    case TOK___move2dinit:
-    case TOK___move2dall:
-    case TOK___move2dnonzero:
-    case TOK___move2dzero:
-    case TOK___crcbyte:
-    case TOK___crcword:
-    case TOK___ldtimer:
-    case TOK___sttimer:
-    case TOK___mint:
-    case TOK___ldpri:
-    case TOK___startp:
-    case TOK___endp:
-    case TOK___runp:
-    case TOK___stopp:
-    case TOK___alt:
-    case TOK___altwt:
-    case TOK___altend:
-    case TOK___talt:
-    case TOK___taltwt:
-    case TOK___enbc:
-    case TOK___enbs:
-    case TOK___enbt:
-    case TOK___disc:
-    case TOK___diss:
-    case TOK___dist:
-    case TOK___saveh:
-    case TOK___savel:
-    case TOK___sthf:
-    case TOK___sthb:
-    case TOK___stlf:
-    case TOK___stlb:
-    case TOK___gajw:
-    case TOK___wcnt:
-    case TOK___seterr:
-    case TOK___testerr:
-    case TOK___sethalterr:
-    case TOK___clrhalterr:
-    case TOK_builtin_popcount:
-    case TOK_builtin_popcountl:
-    case TOK___norm:
-    case TOK___bitcnt:
-    case TOK___bitrevword:
-    case TOK___bitrevnbits:
-    case TOK___csub0:
-    case TOK___fmul:
-    case TOK___lddevid:
-    case TOK___fpsqrt:
-    case TOK___fpabs:
-    case TOK___testhalterr:
-    case TOK___stoperr:
-    case TOK___testpranal:
-    case TOK___fpchkerr:
-    case TOK___fptesterr:
-    case TOK___fpseterr:
-    case TOK___fpclrerr:
-    case TOK___fpint:
-    case TOK___fpintrp:
-    case TOK___fpintrm:
-    case TOK___fpintrz:
-    case TOK___fprem:
-    case TOK___bf16tof32:
-    case TOK___f32tobf16:
-    case TOK___bf16pack:
-    case TOK___bf16unpkh:
-    case TOK___mxfp4tof32:
-    case TOK___f32tomxfp4:
-    case TOK___mxe8m0tof32:
-    case TOK___mxe8m0of:
-    case TOK___mxfp4dot:
-    case TOK___bf16dot:
-    case TOK___mxfp4gemv:
-    case TOK___mxfp4unpk8:
-    case TOK___f32tomxfp4x8:
-    case TOK___bf16mul2:
-    case TOK___bf16add2:
-    case TOK___vsetlen:
-    case TOK___mxfp4gemvbf:
-    case TOK___vadd:
-    case TOK___vmul:
-    case TOK___vsilu:
-    case TOK___vrmsnorm:
-    case TOK___vsoftmax:
-    case TOK___f16tof32:
-    case TOK___f32tof16:
-    case TOK___q8dot:
-    case TOK___q8dotbf:
-    case TOK___iq1mdot:
-    case TOK___iq2xxsdot:
-    case TOK___iq3xxsdot:
-    case TOK___qsetfmt:
-    case TOK___qdot:
-    case TOK___vhad32:
-    case TOK___mxqrot:
-    case TOK___mxqrotbf:
-    case TOK___ftsetvp:
-    case TOK___ftransp:
-    case TOK___ftranspb:
-    case TOK___fsincos:
-    case TOK___frsqrtb:
-    case TOK___frecipb:
-    case TOK___fsincosb:
-    case TOK___vsetstride:
-    case TOK___ftcull:
-    case TOK___tskin:
-    case TOK___vsetfmt:
-    case TOK___ftsetlit:
-    case TOK___flitb:
-    case TOK___qgemm:
-    case TOK___vblend8:
-    case TOK___vfill:
-    case TOK___vfill2d:
-    case TOK___csumb:
-    case TOK___vblend2d:
-    case TOK___stvxstate:
-    case TOK___csumcpy:
-    case TOK___vq8k:
-    case TOK___vq80:
-    case TOK___vcvt:
-    case TOK___vxfer:
-    case TOK___ldconf:
-    case TOK___stconf:
-    case TOK___initvlcb:
-    case TOK___sethdr:
-    case TOK___writehdr:
-    case TOK___readhdr:
-    case TOK___setchmode:
-    case TOK___stopch:
-    case TOK___swapbfr:
-    case TOK___vin:
-    case TOK___vout:
-    case TOK___ldchstatus:
-    case TOK___chantype:
-    case TOK___semwait:
-    case TOK___semsignal:
-    case TOK___mkrc:
-    case TOK___unmkrc:
-    case TOK___grant:
-    case TOK___enbg:
-    case TOK___disg:
-    case TOK___irdsq:
-    case TOK___erdsq:
-    case TOK___ldresptr:
-    case TOK___stresptr:
-    case TOK___tld:
-    case TOK___tst:
-    case TOK___tclr:
-    case TOK___f2ldm:
-    case TOK___f4ldm:
-    case TOK___f2ldma:
-    case TOK___f2stm:
-    case TOK___fmvmul4:
-    case TOK___fmvmul4st:
-    case TOK___fpoly3:
-        if (!gen_transputer_builtin_call(tok))
-            expect("transputer intrinsic");
-        break;
-#endif
 
     /* atomic operations */
     case TOK___atomic_store:
@@ -7669,6 +7014,11 @@ special_math_val:
 	goto special_math_val;
 
     default:
+#ifdef TCC_TARGET_TRANSPUTER
+        /* the name may be one of the back end's builtins */
+        if (tp_unary_builtin())
+            break;
+#endif
     tok_identifier:
         if (tok < TOK_UIDENT)
             tcc_error("expression expected before '%s'", get_tok_str(tok, &tokc));
@@ -7747,13 +7097,23 @@ special_math_val:
                    (struct_layout stores the struct alignment in ref->r), so
                    nothing can be said about the parity of the base address; or
                  - the member sits at an odd offset (an individually packed
-                   member inside an otherwise aligned struct).
+                   member inside an otherwise aligned struct); or
+                 - the member's own alignment is more than the containing
+                   struct's, or more than its offset's: a 4-aligned member
+                   at offset 2 of a #pragma pack(2) struct, which the word
+                   accesses (a struct copied by ldnl/stnl) need to know.
                Backends only consult this for accesses that have an alignment
                precondition, so over-approximating costs code size, never
                correctness. */
-            unaligned = (vtop->r & VT_UNALIGNED)
-                        || (vtop->type.ref->r < 2)
-                        || (cumofs & 1);
+            {
+                int malign;
+                type_size(&s->type, &malign);
+                unaligned = (vtop->r & VT_UNALIGNED)
+                            || (vtop->type.ref->r < 2)
+                            || (cumofs & 1)
+                            || vtop->type.ref->r < malign
+                            || (cumofs & (malign - 1));
+            }
 #endif
             /* add field offset to pointer */
             gaddrof();
@@ -7904,7 +7264,8 @@ special_math_val:
             next();
             vcheck_cmp(); /* the generators don't like VT_CMP on vtop */
 #ifdef TCC_TARGET_TRANSPUTER
-            note_inline_call_section(vtop - nb_args);
+            if (tp_inline_call(s, nb_args, ret_nregs > 0))
+                continue;
 #endif
             gfunc_call(nb_args);
 
@@ -8747,51 +8108,6 @@ static void prev_scope_s(struct scope *o)
 /* ------------------------------------------------------------------------- */
 /* call block from 'for do while' loops */
 
-#ifdef TCC_TARGET_TRANSPUTER
-/* Record the tokens of one loop clause - a for(;;) init/test/increment, or a
-   while() test - *without* parsing them, so the clause can be generated later,
-   at a different point in the instruction stream (see TOK_FOR and TOK_WHILE).
-   Stops on `term' at bracket level 0.  Unlike skip_or_save_block(), a
-   top-level ',' is not a terminator: these clauses may legally be comma
-   expressions.  Returns NULL for an empty clause.
-
-   Sets *tag_decl if the clause defines an enum (`enum {' or `enum tag {') or
-   a tagged struct/union (`struct tag {'): the enumerators or tag are in scope
-   in the loop body, so such a clause cannot be moved after the body.  An
-   anonymous `struct {' declares no name - the kernel's ARRAY_SIZE() puts one
-   in many loop tests - and anything nested in it is scanned anyway. */
-static TokenString *for_clause_save(int term, int *tag_decl)
-{
-    TokenString *str;
-    int level = 0, prev = 0, prev2 = 0;
-
-#define IS_TAG_KW(t) ((t) == TOK_STRUCT || (t) == TOK_UNION || (t) == TOK_ENUM)
-    if (tok == term)
-        return NULL;
-    str = tok_str_alloc();
-    for (;;) {
-        int t = tok;
-        if (level == 0 && t == term)
-            break;
-        if (t == TOK_EOF)
-            tcc_error("unexpected end of file");
-        if (t == '(' || t == '[' || t == '{')
-            level++;
-        else if (t == ')' || t == ']' || t == '}')
-            level--;
-        if (t == '{' && (prev == TOK_ENUM
-                         || (prev >= TOK_UIDENT && IS_TAG_KW(prev2))))
-            *tag_decl = 1;
-        prev2 = prev, prev = t;
-        tok_str_add_tok(str);
-        next();
-    }
-#undef IS_TAG_KW
-    tok_str_add(str, TOK_EOF);
-    return str;
-}
-#endif
-
 static void lblock(int *bsym, int *csym)
 {
     struct scope *lo = loop_scope, *co = cur_scope;
@@ -8861,64 +8177,7 @@ again:
 
     } else if (t == TOK_WHILE) {
 #ifdef TCC_TARGET_TRANSPUTER
-        /* Same rotation as TOK_FOR: record the controlling expression and
-           generate it after the body, so a running iteration executes only the
-           backward conditional branch and no unconditional jump.
-
-                     j    test              ; once, on entry
-              body:  BODY
-              test:  CONDITION              ; `continue' lands here
-                     cj   body
-        */
-        int body_addr, tag_decl = 0;
-        TokenString *cond_str;
-
-        new_scope_s(&o);
-        skip('(');
-        cond_str = for_clause_save(')', &tag_decl);
-        if (!cond_str)
-            expect("expression");
-        skip(')');
-        a = b = 0;
-        TP_LOOP_POOL_OPEN();    /* preheader: dominates the loop */
-        if (tag_decl) {
-            /* The condition declares something the body can see: parse it
-               first and keep the test at the top. */
-            d = gind();
-            unget_tok(0);
-            begin_macro(cond_str, 1);
-            next();
-            gexpr();
-            a = gvtst(1, 0);
-            if (tok != TOK_EOF)
-                expect(")");
-            end_macro();
-            next();
-            lblock(&a, &b);
-            gjmp_addr(d);
-        } else {
-            e = gjmp(0);            /* entry -> test */
-            body_addr = gind();
-            lblock(&a, &b);
-            gsym(e);                /* test label; also re-enables codegen */
-            d = gind();             /* `continue' target is the test */
-            unget_tok(0);
-            begin_macro(cond_str, 1);
-            next();
-            TP_CMP_BRANCH_TRUE_BEGIN();  /* the back-edge branches when true */
-            gexpr();
-            TP_CMP_BRANCH_TRUE_END();
-            c = gvtst(0, 0);
-            if (tok != TOK_EOF)
-                expect(")");
-            end_macro();
-            next();                 /* restore the token after the loop */
-            gsym_addr(c, body_addr);
-        }
-        gsym_addr(b, d);
-        gsym(a);
-        TP_LOOP_POOL_CLOSE();
-        prev_scope_s(&o);
+        tp_block_while();
 #else
 
         new_scope_s(&o);
@@ -9068,132 +8327,8 @@ again:
 
     } else if (t == TOK_FOR) {
 #ifdef TCC_TARGET_TRANSPUTER
-        /* Rotated layout.  The straightforward one-pass emission order
-           (test, jump-over-increment, increment, jump-back-to-test, body,
-           jump-to-increment) costs two taken unconditional jumps on every
-           iteration on top of the conditional one.  Instead record the
-           controlling expression and the increment as token strings and
-           generate them *after* the body:
-
-                     j    test              ; once, on entry
-              body:  BODY
-              incr:  INCREMENT              ; `continue' lands here
-              test:  CONDITION
-                     cj   body              ; taken while the loop runs
-
-           so a running iteration executes no unconditional jump at all.  The
-           clauses are lexed once and parsed once — only the point at which
-           they are parsed moves — so this is not a second pass and nothing is
-           evaluated twice at compile time or at run time. */
-        int body_addr, tag_decl = 0;
-        TokenString *cond_str, *incr_str;
-
-        new_scope(&o);
-
-        skip('(');
-        if (tok != ';') {
-            /* c99 for-loop init decl? */
-            if (!decl(VT_JMP)) {
-                /* no, regular for-loop init expr */
-                gexpr();
-                vpop();
-#ifdef TCC_TARGET_TRANSPUTER
-                tp_stmt_end();
-#endif
-            }
-        }
-        skip(';');
-        a = b = 0;
-        cond_str = for_clause_save(';', &tag_decl);
-        skip(';');
-        incr_str = for_clause_save(')', &tag_decl);
-        skip(')');
-
-        TP_LOOP_POOL_OPEN();            /* preheader: dominates the loop */
-        if (tag_decl) {
-            /* A clause declares something the body can see: parse the
-               clauses first, in source order, and keep the plain layout. */
-            unget_tok(0);
-            c = d = gind();
-            if (cond_str) {
-                begin_macro(cond_str, 1);
-                next();
-                gexpr();
-                a = gvtst(1, 0);
-                if (tok != TOK_EOF)
-                    expect(";");
-                end_macro();
-            }
-            if (incr_str) {
-                e = gjmp(0);
-                d = gind();
-                begin_macro(incr_str, 1);
-                next();
-                gexpr();
-                vpop();
-#ifdef TCC_TARGET_TRANSPUTER
-                tp_stmt_end();
-#endif
-                if (tok != TOK_EOF)
-                    expect(")");
-                end_macro();
-                gjmp_addr(c);
-                gsym(e);
-            }
-            next();
-            lblock(&a, &b);
-            gjmp_addr(d);
-        } else {
-            e = cond_str ? gjmp(0) : 0;     /* entry -> test */
-            body_addr = gind();
-            lblock(&a, &b);
-            /* gind() is also what re-enables code generation when the body
-               ended with a return/goto: the increment and the test are still
-               reachable, from the `continue' edge and from the entry jump,
-               so they must be emitted even then. */
-            d = gind();                     /* `continue' target */
-
-            if (cond_str || incr_str) {
-                /* Replaying a token string clobbers the current token; stash
-                   it and restore it with the final next(). */
-                unget_tok(0);
-                if (incr_str) {
-                    begin_macro(incr_str, 1);
-                    next();
-                    gexpr();
-                    vpop();
-#ifdef TCC_TARGET_TRANSPUTER
-                    tp_stmt_end();
-#endif
-                    if (tok != TOK_EOF)
-                        expect(")");
-                    end_macro();
-                }
-                if (cond_str) {
-                    gsym(e);                /* test label */
-                    begin_macro(cond_str, 1);
-                    next();
-                    TP_CMP_BRANCH_TRUE_BEGIN();  /* branches when true */
-                    gexpr();
-                    TP_CMP_BRANCH_TRUE_END();
-                    c = gvtst(0, 0);        /* jump back into the body if true */
-                    if (tok != TOK_EOF)
-                        expect(";");
-                    end_macro();
-                    gsym_addr(c, body_addr);
-                } else {
-                    gjmp_addr(body_addr);   /* for (init; ; incr) */
-                }
-                next();                     /* restore the token after the loop */
-            } else {
-                gjmp_addr(body_addr);       /* for (;;) */
-            }
-        }
-
-        gsym_addr(b, d);
-        gsym(a);
-        TP_LOOP_POOL_CLOSE();
-        prev_scope(&o, 0);
+        (void)e;                /* only the #else below uses it */
+        tp_block_for();
 #else
 
         new_scope(&o);
@@ -9299,13 +8434,15 @@ again:
 #ifdef TCC_TARGET_TRANSPUTER
         {
             /*
-             * Jump-table switches default OFF.  Fixed-slot J/GCALL dispatch
-             * has been implicated in intermittent maple_tree wr_invalid BUGs
-             * (enum store_type) during early kernel boot.  Comparison-chain
-             * gcase() is slower but correct.  Set T4_SWITCH_JT=1 to re-enable.
+             * A dense switch goes through a jump table unless
+             * -mno-jump-tables (or T4_SWITCH_JT=0) says to compare with
+             * gcase().  They were off until 2026-11-10: the first version
+             * was suspected of intermittent maple_tree wr_invalid BUGs
+             * during early kernel boot, which the reworked tables do not
+             * show.
              */
-            const char *jt = getenv("T4_SWITCH_JT");
-            int use_jt = 0;
+            const char *jt = tp_knob(TPK_T4_SWITCH_JT);
+            int use_jt = tcc_state->tp_jump_tables;
             if (jt && *jt)
                 use_jt = (int)strtoul(jt, NULL, 0) != 0;
             d = 0;
@@ -10319,6 +9456,15 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
 
     if (!v && NODATA_WANTED)
         size = 0, align = 1;
+#ifdef TCC_TARGET_TRANSPUTER
+    /* String literals (has_init == 2 comes only from unary()'s TOK_STR
+       path) of a word or more start on a word boundary, as GCC aligns
+       string constants.  Word-at-a-time string routines then take their
+       aligned path: Dhrystone's strcpy from a literal 3 bytes off a word
+       ran a 53-instruction shift-merge per word instead of 24. */
+    if (has_init == 2 && size >= 4 && align < 4)
+        align = 4;
+#endif
 
     if ((r & VT_VALMASK) == VT_LOCAL) {
         sec = NULL;
@@ -10608,6 +9754,9 @@ static void gen_function(Sym *sym)
     local_scope = 0;
     rsym = 0;
     nb_temp_local_vars = 0;
+#ifdef TCC_TARGET_TRANSPUTER
+    tp_inline_function_start();
+#endif
 
     gfunc_prolog(sym);
     tcc_debug_prolog_epilog(tcc_state, 0);

@@ -1,0 +1,11 @@
+{
+  "format": "bf16",
+  "source_sha256": "08c457e8a174f7bdf6e78ff487d4a310bf49835704d27f76b7688028ec49d39d",
+  "specialization": "supplied root headers: RISC-V/default NaN",
+  "rounding": "nearest-even",
+  "widen_patterns": 65536,
+  "widen_nan_policy_cases": 254,
+  "widen_sha256": "7d7854aa323826cf745bfe886d4d582ae1a11efc8eb081851c2d2be0bbb9b486",
+  "narrow_vectors": 13312,
+  "header_sha256": "d49853041d8a8799cfc332ea3b32259bd092242c941511bf9ce4b023d1d8ebbb"
+}

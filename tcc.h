@@ -527,6 +527,9 @@ struct switch_t {
     struct scope *scope;
     struct switch_t *prev;
     SValue sv;
+    /* `default: __builtin_unreachable();`: the selector is always a case,
+       so a jump table needs no range test */
+    int def_unreachable;
 };
 #endif
 
@@ -814,29 +817,16 @@ struct TCCState {
     unsigned char gnu89_inline; /* treat 'extern inline' like 'static inline' */
     unsigned char unwind_tables; /* create eh_frame section */
 #ifdef TCC_TARGET_TRANSPUTER
-    /* -mt9000: allow the IMS T9000-only opcodes (ls/ss/lsx/lbx/xsword/
-       xbword/ssub).  Default 0 == plain T805 codegen.  -mt805/-mt800/-mt425/
-       -mt414 clear it again (last option on the command line wins). */
-    unsigned char tp_t9000;
-    /* -mt425: the IMS T425 - the T805's integer instructions and no FPU.
-       Floating point becomes calls to the soft-float helpers in
-       transputer-libtcc1-t425.a.  Also clears tp_t9000.  -mt414 sets it
-       too, and tp_t414 as well. */
-    unsigned char tp_t425;
-    /* -mt414: the IMS T414 - the T425 without dup, wsubdb, pop, the
-       move2d group, crcword/crcbyte, bitcnt and the bit reversals. */
-    unsigned char tp_t414;
-    /* -mt800: the original IMS T800 - the T805 without what the T805
-       shares with the T425 and the T800 lacks: pop, the timer enables,
-       ldmemstartval, the j0 break group, lddevid and start.  -mt805 is
-       the T805, as -mt800 was before. */
-    unsigned char tp_t800;
-    /* -mt9000tvx: the T9000 with the TVX extension (opr #1C0-#1FA), the
-       only target whose TVX builtins compile; predefines __TVX__. */
-    unsigned char tp_tvx;
+    /* The part compiled for, as the set of what it has beyond the T414
+       (TP_EF_*, one of TP_ISA_*).  -m<part> chooses it and the last one on
+       the command line wins (tp_select_target); the default is the T9000. */
+    unsigned char tp_isa;
     /* A -mt option was given, so a link refuses objects compiled for a
        part with more than that one (TP_EF_* in their e_flags). */
     unsigned char tp_link_check;
+    /* -mjump-tables: dense switches dispatch through a table of jumps
+       (gen_switch_jump_table); -mno-jump-tables, the default, compares. */
+    unsigned char tp_jump_tables;
     /* TP_EF_* of what this output holds: the target of every function
        compiled or assembled here, and the e_flags of every object loaded.
        Written as the output's e_flags. */
@@ -1454,6 +1444,7 @@ ST_FUNC int tcc_add_crt(TCCState *s, const char *filename);
 #endif
 ST_FUNC int tcc_add_dll(TCCState *s, const char *filename, int flags);
 ST_FUNC int tcc_add_support(TCCState *s1, const char *filename);
+ST_FUNC const char *tcc_runtime_library(TCCState *s1);
 #ifdef CONFIG_TCC_BCHECK
 ST_FUNC void tcc_add_bcheck(TCCState *s1);
 #endif
@@ -1726,10 +1717,8 @@ ST_FUNC void relocate_sections(TCCState *s1);
 ST_FUNC ssize_t full_read(int fd, void *buf, size_t count);
 ST_FUNC void *load_data(int fd, unsigned long file_offset, unsigned long size);
 ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h);
-ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset);
-#ifdef TCC_TARGET_TRANSPUTER
-ST_FUNC void tcc_clear_archive_context(void);
-#endif
+ST_FUNC int tcc_load_object_file(TCCState *s1, int fd, unsigned long file_offset,
+                                const char *member_name);
 ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte);
 ST_FUNC void add_array(TCCState *s1, const char *sec, int c);
 
@@ -1927,68 +1916,34 @@ ST_FUNC void tp_cmp_hint_branch_true(int on);
 #define TP_LOOP_POOL_CLOSE()  tp_loop_pool_close()
 #define TP_LOOP_POOL_UNSAFE() tp_loop_pool_unsafe()
 
-/* Transputer intrinsic generator functions (called from tccgen.c) */
-/* Channel I/O */
-void gen_builtin_in(void);
-void gen_builtin_out(void);
-void gen_builtin_outbyte(void);
-void gen_builtin_outword(void);
-void gen_builtin_tin(void);
-void gen_builtin_resetch(void);
-/* Memory operations */
-void gen_builtin_move(void);
-void gen_builtin_move2dinit(void);
-void gen_builtin_move2dall(void);
-void gen_builtin_move2dnonzero(void);
-void gen_builtin_move2dzero(void);
-/* T805 CRC */
-void gen_builtin_crcbyte(void);
-void gen_builtin_crcword(void);
-/* Timer */
-void gen_builtin_ldtimer(void);
-void gen_builtin_sttimer(void);
-/* Utility */
-void gen_builtin_mint(void);
-void gen_builtin_wcnt(void);
-/* Process/scheduler */
-void gen_builtin_ldpri(void);
-void gen_builtin_startp(void);
-void gen_builtin_endp(void);
-void gen_builtin_runp(void);
-void gen_builtin_stopp(void);
-/* ALT operations */
-void gen_builtin_alt(void);
-void gen_builtin_altwt(void);
-void gen_builtin_altend(void);
-void gen_builtin_talt(void);
-void gen_builtin_taltwt(void);
-void gen_builtin_enbc(void);
-void gen_builtin_enbs(void);
-void gen_builtin_enbt(void);
-void gen_builtin_disc(void);
-void gen_builtin_diss(void);
-void gen_builtin_dist(void);
-/* Workspace */
-void gen_builtin_gajw(void);
-/* Error handling */
-void gen_builtin_seterr(void);
-void gen_builtin_testerr(void);
-void gen_builtin_sethalterr(void);
-void gen_builtin_clrhalterr(void);
+/* A call to a transputer builtin: parse its arguments and generate it.
+   Returns 0 if `tok` is not one. */
 ST_FUNC int gen_transputer_builtin_call(int tok);
-/* T800 pointer arithmetic fast paths */
-ST_DATA int tp_ptr_add_is_addr;       /* final `+` of a pointer computation */
-ST_FUNC int gen_ptradd_bsub(void);    /* base + index   via BSUB */
-ST_FUNC int gen_ptradd_wsub(void);    /* base + index*4 via WSUB */
-ST_FUNC int gen_ptradd_wsubdb(void);  /* base + index*8 via WSUBDB */
-ST_FUNC int gen_ptradd_ssub(void);    /* base + index*2 via SSUB (T9000, -mt9000) */
+/* Pointer + integer: vtop[-1] is the pointer, vtop[0] the unscaled index.
+   gen_ptradd_indexed() returns 1 having left base + index*elem_size on
+   vtop with one indexed instruction (wsub, wsubdb, bsub, ssub or ldnlp),
+   or 0 having emitted nothing.  The caller then scales the index and
+   adds, and brackets that add with tp_ptradd_addr(1) .. tp_ptradd_addr(0)
+   to say its result is an address. */
+ST_FUNC int gen_ptradd_indexed(int elem_size);
+ST_FUNC void tp_ptradd_addr(int on);
 ST_FUNC int gen_switch_jump_table(struct switch_t *sw, int *pdsym);
 /* an expression statement, or a for loop's init or step, is complete */
 ST_FUNC void tp_stmt_end(void);
+/* the code emitted since `from` only loads a value (a post-increment's) */
+ST_FUNC void tp_hist_mark_pure(int from);
+/* a volatile object was read or written in this function */
+ST_FUNC void tp_note_volatile(void);
+/* Store an already loaded double copy through a parked destination address. */
+ST_FUNC int tp_store_double_copy(const SValue *src, const SValue *dst);
 /* the current pc is a jump target (gind(): loop heads, case labels) */
 ST_FUNC void tp_label_here(void);
-/* an operand of the binary operation gen_op is doing is volatile */
-ST_DATA int tp_opf_volatile;
+/* gen_op says whether an operand of the binary operation it is about to do
+   is a volatile read; returns the previous setting, to give back after it */
+ST_FUNC int tp_opf_set_volatile(int on);
+/* greloca() is about to emit this relocation: the back end's traces */
+ST_FUNC void tp_greloca_trace(Section *s, Sym *sym, unsigned long offset,
+                              int type);
 /* char/short to int conversion via XWORD sign extension */
 ST_FUNC void gen_cvt_csti(int t);
 
@@ -2002,10 +1957,59 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
 #define TP_EF_FPU     0x04  /* the T800 floating-point unit */
 #define TP_EF_T9000   0x08  /* T9000 instructions */
 #define TP_EF_TVX     0x10  /* the TVX extension */
-ST_FUNC unsigned tp_target_flags(TCCState *s1);
+/* The parts -m selects, as what each has:
+     T414   the base instruction set
+     T425   + dup, wsubdb, ... and pop, lddevid, ...; still no FPU, so
+            floating point is calls into transputer-libtcc1-t425.a
+     T800   the T414 + dup, wsubdb, ... and the FPU, without pop, lddevid
+     T805   the T425 with the FPU
+     T9000  + ls/ss/lsx/lbx/xsword/xbword/ssub and the T9000 FPU additions
+     T9000TVX  + the TVX extension (opr #1C0-#1FA); predefines __TVX__ */
+#define TP_ISA_T414     0
+#define TP_ISA_T425     (TP_EF_T800OPS | TP_EF_T805OPS)
+#define TP_ISA_T800     (TP_EF_T800OPS | TP_EF_FPU)
+#define TP_ISA_T805     (TP_ISA_T425 | TP_EF_FPU)
+#define TP_ISA_T9000    (TP_ISA_T805 | TP_EF_T9000)
+#define TP_ISA_T9000TVX (TP_ISA_T9000 | TP_EF_TVX)
+/* Does the part compiled for have all of the TP_EF_* in `f`? */
+#define tp_has(s1, f) (((s1)->tp_isa & (f)) == (f))
+/* Take `name` ("t800", "t9000tvx", ...) as the part to compile for;
+   0 if it does not name one. */
+ST_FUNC int tp_select_target(TCCState *s1, const char *name);
+ST_FUNC int tp_select_option(TCCState *s1, const char *name);
+/* The -m option that selects the current part, less its "-m". */
 ST_FUNC const char *tp_target_name(TCCState *s1);
 ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
                                   const char *member);
+
+/* One object file while tcc_load_object_file merges it: what the hooks
+   below may look at.  They check each relocation against its section and
+   do the T4_RELOC_* and T4_SYMMERGE_DEBUG tracing. */
+struct tp_objload {
+    TCCState *s1;
+    const char *member;         /* archive member name, or NULL */
+    ElfW(Shdr) *shdr;           /* the object's section headers */
+    int shnum;
+    const char *strsec;         /* section names */
+    ElfW(Sym) *symtab;          /* the object's symbols */
+    int nb_syms;
+    const char *strtab;         /* symbol names */
+    int *old_to_new_syms;
+    /* the hooks' own */
+    const char **iprel_syms;
+    int *iprel_counts;
+    int iprel_count, iprel_cap;
+};
+/* symbol `i` of the object has become symbol `new_index` of the output */
+ST_FUNC void tp_objload_sym(struct tp_objload *o, int i, int new_index);
+/* `rel`, of relocation section `sh`, before it is rebased: `ts` is the
+   output section it applies to and `offseti` where the object's part of
+   that begins.  -1 after reporting an error. */
+ST_FUNC int tp_objload_reloc(struct tp_objload *o, ElfW(Shdr) *sh,
+                             ElfW_Rel *rel, Section *ts,
+                             unsigned long offseti);
+/* the object is merged */
+ST_FUNC void tp_objload_end(struct tp_objload *o);
 #endif
 
 /* ------------ c67-gen.c ------------ */

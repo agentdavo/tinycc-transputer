@@ -41,14 +41,22 @@ typedef ee_u32 CORE_TICKS;
 /* Seeds from volatile (no argc/argv on bare metal) */
 #define SEED_METHOD SEED_VOLATILE
 
-/* Static memory (no malloc) */
-#define MEM_METHOD MEM_STATIC
-
-/* Single thread */
+#ifndef MULTITHREAD
 #define MULTITHREAD 1
+#endif
+#ifndef USE_PTHREAD
 #define USE_PTHREAD 0
+#endif
 #define USE_FORK    0
 #define USE_SOCKET  0
+
+#if MULTITHREAD > 1 && USE_PTHREAD
+#include <pthread.h>
+#define PARALLEL_METHOD "PThreads"
+#define MEM_METHOD MEM_STACK
+#else
+#define MEM_METHOD MEM_STATIC
+#endif
 
 /* No argc/argv, main returns int */
 #define MAIN_HAS_NOARGC   1
@@ -58,6 +66,9 @@ extern ee_u32 default_num_contexts;
 
 typedef struct CORE_PORTABLE_S {
     ee_u8 portable_id;
+#if MULTITHREAD > 1 && USE_PTHREAD
+    pthread_t thread;
+#endif
 } core_portable;
 
 void portable_init(core_portable *p, int *argc, char *argv[]);

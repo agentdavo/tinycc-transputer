@@ -71,6 +71,13 @@ static __inline__ int init_address_path(int value)
     return fn(value);
 }
 
+/* This deferred body is unreachable and must not change mixed_shared's
+   placement or cause its own outline to be emitted. */
+static __inline__ int unused_inline_path(int value)
+{
+    return mixed_shared(value);
+}
+
 __attribute__((section(".init.text")))
 int init_caller(int value)
 {

@@ -15,6 +15,7 @@ cc -std=c99 -D_GNU_SOURCE -DFBWM_HOST -Wall -Wextra \
   -I"$SCRIPT_DIR" \
   "$SCRIPT_DIR/test_fbwm_host.c" "$SCRIPT_DIR/fbwm.c" \
   "$SCRIPT_DIR/fbwm_shm.c" \
+  -Wl,--wrap=mmap,--wrap=munmap \
   -o "$TEST_BIN"
 
 FBWM_GOLDEN_OUT="$FRAME" "$TEST_BIN"

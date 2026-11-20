@@ -50,7 +50,10 @@ void test_main(void)
 {
     Channel *set[2];
     int got, sel, t0;
-    static int wsc[128];
+    static int wsc[130];
+    char *raw = (char *)wsc;
+    PDes desc;
+    int offset;
 
     set[0] = &ca;
     set[1] = &cb;
@@ -58,10 +61,17 @@ void test_main(void)
     /* 1. Nothing ready: must return immediately, not block. */
     check("skip-empty", ChanSkipAlt(set, 2) == -1);
 
-    /* 5. A process started by PSetup/PRun runs. */
-    PRun(PSetup(wsc, sizeof wsc, announcer) | PRI_LOW);
-    ChanIn(&started, &got, 4);
-    check("psetup-runs", got == 1);
+    /* All four byte alignments of a caller-supplied workspace. */
+    for (offset = 0; offset < 4; offset++) {
+        desc = PSetup(raw + offset, 513, announcer);
+        check("psetup-aligned", desc && !(desc & 3));
+        if (desc && !(desc & 3)) {
+            PRun(desc | PRI_LOW);
+            ChanIn(&started, &got, 4);
+            check("psetup-runs", got == 1);
+        }
+    }
+    check("psetup-short", !PSetup(raw + 1, 32, announcer));
 
     /* 4. Timer guard fires when no channel becomes ready. */
     t0 = Time();

@@ -9,15 +9,15 @@
  *
  * No TVX: this is plain C, so it runs on every part.  On the T9000, T805 and
  * T800 the float work goes through the FPU; with -mt425 or -mt414 through
- * lib/transputer-softfp.c, and the binary16 scales through
- * lib/transputer-f16.c everywhere.  Per entry it checks a hash of every
+ * lib/transputer/transputer-softfp.c, and the binary16 scales through
+ * lib/transputer/transputer-f16.c everywhere.  Per entry it checks a hash of every
  * decoded binary32 value, so a single wrong bit in decode shows up, and the
  * dot against two activation vectors, one of which rounds on every step.
  *
  *   TP_EXTRA_CFLAGS=-mt414 T4_CPU=-s414 \
  *     bash transputer/tests/test_runner_with_uart.sh test_gguf_decode_parts
  *
- * Built with -nostdinc against lib/transputer-tvx/include, the libc-free
+ * Built with -nostdinc against lib/transputer/tvx/include, the libc-free
  * headers software TVX is built with (the runner adds it).
  */
 #include "../t4/tvx_gguf_decode.h"

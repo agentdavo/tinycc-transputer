@@ -23,7 +23,10 @@ Examples:
     etc/...
 
 All file paths are **relative** — no leading `/`. Installation extracts
-to the root filesystem: `tar xzf package.tpz -C /`
+to the root filesystem. Use `tpkg install /sd/package.tpz` on
+TransputerOS. The installer reads gzip and records the payload file list
+itself, so the minimal guest can use the same archive. A host with
+gzip-aware tar can also unpack it with `tar xzf package.tpz -C /path/to/root`.
 
 ## .tpz-info Manifest
 
@@ -67,6 +70,22 @@ This allows `tpkg remove` to know which files to delete and
     tpkg list                     # List installed packages
     tpkg info <package>           # Show package details
     tpkg files <package>          # List files owned by package
+
+The 32 MiB T4 validation installed Night Relay from its original
+`night-relay-0.1.0.tpz`, played a ball, quit to fbwm, and removed the
+package in one boot. The probe checked the executable, documentation
+and database records before and after removal. Both desktop comparisons
+matched outside the taskbar clock.
+
+From fbwm, open **Packages** or press **P** on the desktop. Press **I**,
+type the archive name after the prefilled `/sd/` path, and press
+**Enter**. Use the arrow keys to select an installed package, **R** to
+remove it, and **Q** or **Escape** to return to fbwm.
+
+The Packages GUI uses the same installer as the CLI. The 32 MiB
+validation installed Night Relay from the GUI, played and quit the game,
+then removed it from the GUI. Both desktop comparisons matched outside
+the taskbar clock.
 
 ## Compression
 

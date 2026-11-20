@@ -26,6 +26,9 @@ static const char
 rcsid[] = "$Id: w_wad.c,v 1.5 1997/02/03 16:47:57 b1 Exp $";
 
 
+#if defined(TRANSPUTER) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #ifdef NORMALUNIX
 #include <ctype.h>
 #include <sys/types.h>
@@ -65,6 +68,25 @@ void**			lumpcache;
 
 
 #define strcmpi	strcasecmp
+
+#ifdef TRANSPUTER
+void W_ReleaseFiles(void)
+{
+    int i;
+    int previous = -1;
+
+    /* W_AddFile appends one group of lumps for each opened file. */
+    for (i = 0; i < numlumps; ++i)
+    {
+        int fd = lumpinfo[i].handle;
+        if (fd < 0 || fd == previous)
+            continue;
+        posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        close(fd);
+        previous = fd;
+    }
+}
+#endif
 
 void strupr (char* s)
 {

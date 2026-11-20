@@ -127,6 +127,8 @@ R_MapPlane
     fixed_t	distance;
     fixed_t	length;
     unsigned	index;
+    fixed_t     height;
+    lighttable_t *colormap;
 	
 #ifdef RANGECHECK
     if (x2 < x1
@@ -138,10 +140,11 @@ R_MapPlane
     }
 #endif
 
-    if (planeheight != cachedheight[y])
+    height = planeheight;
+    if (height != cachedheight[y])
     {
-	cachedheight[y] = planeheight;
-	distance = cacheddistance[y] = FixedMul (planeheight, yslope[y]);
+	cachedheight[y] = height;
+	distance = cacheddistance[y] = FixedMul (height, yslope[y]);
 	ds_xstep = cachedxstep[y] = FixedMul (distance,basexscale);
 	ds_ystep = cachedystep[y] = FixedMul (distance,baseyscale);
     }
@@ -157,8 +160,9 @@ R_MapPlane
     ds_xfrac = viewx + FixedMul(finecosine[angle], length);
     ds_yfrac = -viewy - FixedMul(finesine[angle], length);
 
-    if (fixedcolormap)
-	ds_colormap = fixedcolormap;
+    colormap = fixedcolormap;
+    if (colormap)
+	ds_colormap = colormap;
     else
     {
 	index = distance >> LIGHTZSHIFT;

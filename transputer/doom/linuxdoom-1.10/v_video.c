@@ -187,6 +187,26 @@ V_CopyRect
     src = screens[srcscrn]+SCREENWIDTH*srcy+srcx; 
     dest = screens[destscrn]+SCREENWIDTH*desty+destx; 
 
+#if defined(__TRANSPUTER__) && TPOS_HAVE_MOVE2D && DOOM_RECT_MOVE2D
+    /* The short status-bar widgets are faster with the row loop. */
+    if (height >= 8 && width > 0 && width < SCREENWIDTH && height <= SCREENHEIGHT)
+    {
+	unsigned long s = (unsigned long)src, d = (unsigned long)dest;
+	unsigned long span = (height - 1) * SCREENWIDTH + width;
+	unsigned long gap = s < d ? d - s : s - d;
+
+	/* Prove the whole spans disjoint, including every future source row.
+	 * Screen indices alone cannot prove this. The enabled runtime must
+	 * preserve MOVE2D state across any preemption of this sequence. */
+	if (gap >= span)
+	{
+	    __move2dinit(height, SCREENWIDTH, SCREENWIDTH);
+	    __move2dall(width, dest, src);
+	    return;
+	}
+    }
+#endif
+
     for ( ; height>0 ; height--) 
     { 
 	memcpy (dest, src, width); 

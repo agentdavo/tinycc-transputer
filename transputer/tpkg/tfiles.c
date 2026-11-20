@@ -1,19 +1,21 @@
 /*
  * tfiles.c - TransputerOS File Manager
  *
- * A simple dual-pane-style file manager rendering directly to the 800x600
- * ARGB framebuffer at 0x81e00000 with INMOS-teal styled window chrome.
+ * A single-pane file manager rendering directly to the target framebuffer.
  *
  * Features:
  *   - Directory listing with file sizes and types
  *   - Keyboard navigation (arrows, Enter, Backspace)
  *   - File type icons (dir, file, executable, symlink)
  *   - Status bar with path, file count, selected file info
- *   - Delete files (d key), view files (v key)
+ *   - Copy, move, rename, delete, preview and SD management
+ *   - Open .tpz archives in Packages through fbwm
  *
  * TCC constraints: no VLAs, functions under ~80 lines, int counters.
  */
 
+#include "tfiles.h"
+#include "../fbwm/fbwm_theme.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -28,7 +30,14 @@ extern long __transputer_syscall(long, long, long, long, long, long, long);
 #define __NR_read           63
 #define __NR_write          64
 #define __NR_getdents64     61
-#define __NR_stat           1038
+#define __NR_lstat          1039
+#define __NR_mount          40
+#define __NR_umount2        39
+#define __NR_mkdir          1030
+#define __NR_fsync          82
+#define __NR_renameat2      276
+#define __NR_symlinkat       36
+#define __NR_readlinkat      78
 #define __NR_chdir          49
 #define __NR_getcwd         1029
 #define __NR_unlinkat       35
@@ -36,6 +45,21 @@ extern long __transputer_syscall(long, long, long, long, long, long, long);
 #define __NR_lseek          1057
 
 #define O_RDONLY            0
+#define O_WRONLY            1
+#define O_CREAT             0100
+#define O_EXCL              0200
+#define O_NOFOLLOW          0400000
+#define O_NONBLOCK          04000
+#define RENAME_NOREPLACE   1
+#define EXDEV              18
+#define EEXIST             17
+#define EBUSY              16
+#define EINVAL             22
+#define ENAMETOOLONG       36
+#define ELOOP              40
+#define ENOTEMPTY          39
+#define EOPNOTSUPP         95
+#define EIO                 5
 #define O_DIRECTORY         0200000
 #define AT_FDCWD            (-100)
 #define AT_REMOVEDIR        0x200
@@ -57,26 +81,18 @@ struct linux_dirent64 {
     char               d_name[256];
 };
 
-/* Minimal stat structure — only the fields we need */
+/* The legacy stat and lstat slots return the uClibc 32-bit LFS layout. */
 struct tp_stat {
-    unsigned long st_dev;
-    unsigned long st_ino;
-    unsigned long st_nlink;
-    unsigned int  st_mode;
-    unsigned int  st_uid;
-    unsigned int  st_gid;
-    unsigned int  __pad0;
-    unsigned long st_rdev;
-    long          st_size;
-    long          st_blksize;
-    long          st_blocks;
-    long          st_atime_sec;
-    long          st_atime_nsec;
-    long          st_mtime_sec;
-    long          st_mtime_nsec;
-    long          st_ctime_sec;
-    long          st_ctime_nsec;
-};
+    unsigned long long st_dev;
+    unsigned int pad1, old_ino, st_mode, st_nlink, st_uid, st_gid;
+    unsigned long long st_rdev;
+    unsigned int pad2;
+    long long st_size;
+    int st_blksize;
+    long long st_blocks;
+    int st_atime, atime_nsec, st_mtime, mtime_nsec, st_ctime, ctime_nsec;
+    unsigned long long st_ino;
+} __attribute__((packed));
 
 /* -------------------------------------------------------------------------
  * Syscall wrappers
@@ -101,9 +117,9 @@ static int tp_getdents64(int fd, void *buf, int count)
     return (int)__transputer_syscall(__NR_getdents64, fd, (long)buf, count, 0, 0, 0);
 }
 
-static int tp_stat(const char *path, struct tp_stat *buf)
+static int tp_lstat(const char *path, struct tp_stat *buf)
 {
-    return (int)__transputer_syscall(__NR_stat, (long)path, (long)buf, 0, 0, 0, 0);
+    return (int)__transputer_syscall(__NR_lstat, (long)path, (long)buf, 0, 0, 0, 0);
 }
 
 static int tp_chdir(const char *path)
@@ -135,9 +151,9 @@ static void tp_exit(int code)
 /* -------------------------------------------------------------------------
  * Framebuffer hardware
  * ------------------------------------------------------------------------- */
-#define FB_BASE         0x81E00000
-#define FB_WIDTH        800
-#define FB_HEIGHT       600
+#define FB_BASE         TPOS_FB_BASE
+#define FB_WIDTH        TPOS_FB_WIDTH
+#define FB_HEIGHT       TPOS_FB_HEIGHT
 
 /* Keyboard UART */
 #define KBD_DATA        0x11000000
@@ -448,12 +464,15 @@ static int read_key(void)
  * File entry storage
  * ------------------------------------------------------------------------- */
 #define MAX_ENTRIES     256
-#define MAX_NAME        64
+#define MAX_NAME        256
+#define PATH_SIZE       512
+#define TREE_LEVELS     32
 
 #define FTYPE_DIR       0
 #define FTYPE_FILE      1
 #define FTYPE_EXEC      2
 #define FTYPE_LINK      3
+#define FTYPE_OTHER     4
 
 typedef struct {
     char name[MAX_NAME];
@@ -465,7 +484,14 @@ static fentry_t entries[MAX_ENTRIES];
 static int nentries = 0;
 static int selected = 0;
 static int scroll = 0;
-static char cwd[256];
+static char cwd[PATH_SIZE];
+static char original_cwd[PATH_SIZE];
+static char source_path[PATH_SIZE], target_path[PATH_SIZE], input[PATH_SIZE];
+static const char *status_message;
+static unsigned input_length;
+enum { COPY_FILE = 1, MOVE_FILE, RENAME_FILE, DELETE_FILE, GO_DIRECTORY };
+static int operation;
+
 
 /* Getdents buffer */
 static char dents_buf[4096];
@@ -568,32 +594,30 @@ static void stat_entry(fentry_t *e, const char *fullpath)
     int rc;
 
     e->size = 0;
-    e->type = FTYPE_FILE;
+    e->type = FTYPE_OTHER;
 
-    rc = tp_stat(fullpath, &st);
+    rc = tp_lstat(fullpath, &st);
     if (rc < 0)
         return;
 
-    e->size = st.st_size;
+    e->size = st.st_size > 0x7fffffffLL ? 0x7fffffffL : (long)st.st_size;
 
     if ((st.st_mode & S_IFMT) == S_IFDIR)
         e->type = FTYPE_DIR;
     else if ((st.st_mode & S_IFMT) == S_IFLNK)
         e->type = FTYPE_LINK;
-    else if (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH))
-        e->type = FTYPE_EXEC;
+    else if ((st.st_mode & S_IFMT) == S_IFREG)
+        e->type = st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH) ? FTYPE_EXEC : FTYPE_FILE;
 }
 
 static void read_directory(void)
 {
     int fd, nread;
-    char pathbuf[320];
+    static char pathbuf[PATH_SIZE];
 
     nentries = 0;
     selected = 0;
     scroll = 0;
-
-    tp_getcwd(cwd, sizeof(cwd));
 
     fd = tp_open(cwd, O_RDONLY | O_DIRECTORY);
     if (fd < 0) {
@@ -608,26 +632,24 @@ static void read_directory(void)
 
         {
             int pos = 0;
-            while (pos < nread && nentries < MAX_ENTRIES) {
+            while (pos + 19 < nread && nentries < MAX_ENTRIES) {
                 struct linux_dirent64 *d = (struct linux_dirent64 *)(dents_buf + pos);
                 char *name = d->d_name;
 
-                /* Skip "." */
-                if (name[0] == '.' && name[1] == 0) {
-                    pos += d->d_reclen;
+                if (d->d_reclen <= 19 || d->d_reclen > nread - pos)
+                    break;
+                pos += d->d_reclen;
+                if (!memchr(name, 0, d->d_reclen - 19) ||
+                    !strcmp(name, ".") || strlen(name) >= MAX_NAME)
                     continue;
-                }
 
-                /* Copy name (truncate if needed) */
-                strncpy(entries[nentries].name, name, MAX_NAME - 1);
-                entries[nentries].name[MAX_NAME - 1] = 0;
-
-                /* Stat for size and type */
                 build_path(pathbuf, sizeof(pathbuf), cwd, name);
+                if (!pathbuf[0])
+                    continue;
+                strcpy(entries[nentries].name, name);
                 stat_entry(&entries[nentries], pathbuf);
 
                 nentries++;
-                pos += d->d_reclen;
             }
         }
     }
@@ -646,6 +668,7 @@ static void vga_init(void)
 
 static void vga_flip(void)
 {
+    mmio_w(0xA0000014, FB_BASE);
 }
 
 /* -------------------------------------------------------------------------
@@ -820,6 +843,7 @@ static void draw_entry_row(int idx, int row_y)
     if (e->type == FTYPE_DIR) typelbl = "DIR";
     else if (e->type == FTYPE_EXEC) typelbl = "EXE";
     else if (e->type == FTYPE_LINK) typelbl = "LNK";
+    else if (e->type == FTYPE_OTHER) typelbl = "DEV";
     else typelbl = "FILE";
     draws(CLIENT_X + COL_TYPE_X, row_y + 2, typelbl, COL_SIZE_CLR, bg);
 }
@@ -864,37 +888,22 @@ static void draw_scrollbar(void)
  * ------------------------------------------------------------------------- */
 static void draw_status(void)
 {
-    char buf[128];
-    char numbuf[12];
-
+    const char *hint = "C Copy  M Move  R Rename  D Delete  S SD  G Go  V Preview  Q Quit";
+    int maxchars = (CLIENT_W - 8) / 6;
     fill(CLIENT_X, STATUS_Y, CLIENT_W, 14, COL_STATUSBAR);
-
-    /* File count */
-    int_to_str(nentries, numbuf, sizeof(numbuf));
-    strcpy(buf, numbuf);
-    strcat(buf, " items");
-
-    /* Selected file info */
-    if (selected >= 0 && selected < nentries) {
-        strcat(buf, "  |  ");
-        {
-            int space = sizeof(buf) - (int)strlen(buf) - 1;
-            int nlen = (int)strlen(entries[selected].name);
-            if (nlen < space) {
-                strcat(buf, entries[selected].name);
-            } else if (space > 4) {
-                strncat(buf, entries[selected].name, space - 4);
-                strcat(buf, "...");
-            }
-        }
-    }
-
-    draws(CLIENT_X + 4, STATUS_Y + 3, buf, COL_VERSION, COL_STATUSBAR);
-
-    /* Key hints on right side */
-    draws(CLIENT_X + CLIENT_W - 210, STATUS_Y + 3,
-          "Enter:open  BS:up  d:del  v:view  q:quit",
-          COL_SIZE_CLR, COL_STATUSBAR);
+    if (operation == DELETE_FILE)
+        hint = entries[selected].type == FTYPE_DIR ?
+               "Delete folder and ALL its contents? Y confirms, Esc cancels" :
+               "Delete selected item? Y confirms, Esc cancels";
+    else if (operation) {
+        unsigned start = input_length > (unsigned)(maxchars - 6) ?
+                         input_length - (maxchars - 6) : 0;
+        draws(CLIENT_X + 4, STATUS_Y + 3, operation == GO_DIRECTORY ? "Go: " : "To: ", COL_ACCENT, COL_STATUSBAR);
+        draws(CLIENT_X + 28, STATUS_Y + 3, input + start, COL_VERSION, COL_STATUSBAR);
+        return;
+    } else if (status_message)
+        hint = status_message;
+    draws(CLIENT_X + 4, STATUS_Y + 3, hint, COL_VERSION, COL_STATUSBAR);
 }
 
 /* -------------------------------------------------------------------------
@@ -989,43 +998,411 @@ static void view_file(const char *path, const char *name)
 /* -------------------------------------------------------------------------
  * Navigate into directory
  * ------------------------------------------------------------------------- */
+static void report(const char *message)
+{
+    status_message = message;
+    uart_puts("TFILES: ");
+    uart_puts(message);
+    uart_puts("\r\n");
+}
+
 static void enter_directory(const char *name)
 {
-    if (tp_chdir(name) < 0) {
-        uart_puts("tfiles: chdir failed\r\n");
+    static char next[PATH_SIZE];
+    int result;
+    if (name[0] == '/') {
+        if (strlen(name) >= sizeof(next))
+            return;
+        strcpy(next, name);
+    } else {
+        build_path(next, sizeof(next), cwd, name);
+    }
+    if (!next[0] || tp_chdir(next) < 0) {
+        report("Cannot open directory");
         return;
+    }
+    result = tp_getcwd(next, sizeof(next));
+    tp_chdir(original_cwd);
+    if (result < 0) {
+        report("Directory path is too long");
+        return;
+    }
+    strcpy(cwd, next);
+    read_directory();
+    uart_puts("TFILES_DIR: ");
+    uart_puts(cwd);
+    uart_puts("\r\n");
+}
+
+static fentry_t *current_entry(void)
+{
+    if (selected < 0 || selected >= nentries || !strcmp(entries[selected].name, ".."))
+        return NULL;
+    return &entries[selected];
+}
+
+static int write_all(int fd, const char *bytes, int length)
+{
+    while (length > 0) {
+        int written = __transputer_syscall(__NR_write, fd, (long)bytes, length, 0, 0, 0);
+        if (written <= 0 || written > length)
+            return -1;
+        bytes += written;
+        length -= written;
+    }
+    return 0;
+}
+
+static int copy_file(unsigned mode)
+{
+    static char buffer[8192];
+    int src, dst, count, error = 0;
+
+    src = tp_open(source_path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (src < 0)
+        return src;
+    dst = __transputer_syscall(__NR_open, (long)target_path,
+                               O_WRONLY | O_CREAT | O_EXCL, mode & 0777, 0, 0, 0);
+    if (dst >= 0) {
+        while ((count = tp_read(src, buffer, sizeof(buffer))) > 0) {
+            if (write_all(dst, buffer, count)) {
+                error = -1;
+                break;
+            }
+        }
+        if (count < 0 || __transputer_syscall(__NR_fsync, dst, 0, 0, 0, 0, 0))
+            error = -1;
+        if (tp_close(dst))
+            error = -1;
+        if (error)
+            tp_unlinkat(AT_FDCWD, target_path, 0);
+    } else {
+        error = dst;
+    }
+    tp_close(src);
+    return error;
+}
+
+static int copy_symlink(void)
+{
+    /* Linux accepts at most 4095 bytes plus NUL when creating a symlink. */
+    static char link_target[4096];
+    int length = __transputer_syscall(__NR_readlinkat, AT_FDCWD, (long)source_path,
+                                      (long)link_target, sizeof(link_target), 0, 0);
+    if (length < 0)
+        return length;
+    if (length >= sizeof(link_target))
+        return -ENAMETOOLONG;
+    link_target[length] = 0;
+    return __transputer_syscall(__NR_symlinkat, (long)link_target, AT_FDCWD,
+                                (long)target_path, 0, 0, 0);
+}
+
+enum tree_action { TREE_COPY, TREE_CHECK, TREE_REMOVE };
+static unsigned long long tree_device;
+static int created_tree;
+static char tree_dents[TREE_LEVELS][512];
+
+static int walk_tree(int level, enum tree_action action);
+
+static int walk_children(int fd, int level, enum tree_action action)
+{
+    char *buffer = tree_dents[level];
+    int src_len = strlen(source_path), dst_len = strlen(target_path);
+    int bytes;
+
+    while ((bytes = tp_getdents64(fd, buffer, sizeof(tree_dents[0]))) > 0) {
+        int pos = 0;
+        while (pos < bytes) {
+            struct linux_dirent64 *entry = (struct linux_dirent64 *)(buffer + pos);
+            const char *name;
+            int length, result;
+            if (bytes - pos < 20 || entry->d_reclen < 20 || entry->d_reclen > bytes - pos)
+                return -EIO;
+            name = entry->d_name;
+            if (!memchr(name, 0, entry->d_reclen - 19))
+                return -EIO;
+            pos += entry->d_reclen;
+            if (!strcmp(name, ".") || !strcmp(name, ".."))
+                continue;
+            length = strlen(name);
+            if (src_len + 1 + length >= PATH_SIZE ||
+                (action == TREE_COPY && dst_len + 1 + length >= PATH_SIZE))
+                return -ENAMETOOLONG;
+            source_path[src_len] = '/';
+            strcpy(source_path + src_len + 1, name);
+            if (action == TREE_COPY) {
+                target_path[dst_len] = '/';
+                strcpy(target_path + dst_len + 1, name);
+            }
+            result = walk_tree(level + 1, action);
+            source_path[src_len] = 0;
+            target_path[dst_len] = 0;
+            if (result)
+                return result;
+        }
+    }
+    return bytes;
+}
+
+static int walk_tree(int level, enum tree_action action)
+{
+    static struct tp_stat st;
+    int result, fd, type;
+
+    result = tp_lstat(source_path, &st);
+    if (result)
+        return result;
+    if (st.st_dev != tree_device)
+        return -EBUSY;
+    type = st.st_mode & S_IFMT;
+    if (type != S_IFDIR) {
+        if (action == TREE_COPY) {
+            if (type == S_IFLNK)
+                return copy_symlink();
+            return type == S_IFREG ? copy_file(st.st_mode) : -EOPNOTSUPP;
+        }
+        return action == TREE_REMOVE ? tp_unlinkat(AT_FDCWD, source_path, 0) : 0;
+    }
+    if (level >= TREE_LEVELS)
+        return -ELOOP;
+    fd = tp_open(source_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0)
+        return fd;
+    if (action == TREE_COPY) {
+        result = __transputer_syscall(__NR_mkdir, (long)target_path, 0777, 0, 0, 0, 0);
+        if (!result && !level)
+            created_tree = 1;
+    }
+    if (!result)
+        result = walk_children(fd, level, action);
+    tp_close(fd);
+    if (!result && action == TREE_REMOVE)
+        result = tp_unlinkat(AT_FDCWD, source_path, AT_REMOVEDIR);
+    return result;
+}
+
+/* Resolve the destination parent before checking whether it is inside the source. */
+static int prepare_tree_target(const struct tp_stat *source, struct tp_stat *parent_stat)
+{
+    static char parent[PATH_SIZE], leaf[MAX_NAME];
+    struct tp_stat ancestor;
+    char *slash;
+    int result, length = strlen(target_path);
+
+    while (length > 1 && target_path[length - 1] == '/')
+        target_path[--length] = 0;
+    slash = strrchr(target_path, '/');
+    if (!slash || !slash[1] || strlen(slash + 1) >= sizeof(leaf) ||
+        !strcmp(slash + 1, ".") || !strcmp(slash + 1, ".."))
+        return -EINVAL;
+    strcpy(leaf, slash + 1);
+    length = slash == target_path ? 1 : slash - target_path;
+    memcpy(parent, target_path, length);
+    parent[length] = 0;
+    result = tp_chdir(parent);
+    if (result)
+        return result;
+    result = tp_getcwd(parent, sizeof(parent));
+    tp_chdir(original_cwd);
+    if (result < 0)
+        return result;
+    build_path(target_path, sizeof(target_path), parent, leaf);
+    if (!target_path[0])
+        return -ENAMETOOLONG;
+    result = tp_lstat(parent, parent_stat);
+    if (result)
+        return result;
+    ancestor = *parent_stat;
+    for (;;) {
+        if (ancestor.st_dev == source->st_dev && ancestor.st_ino == source->st_ino)
+            return -EINVAL;
+        if (!strcmp(parent, "/"))
+            return 0;
+        slash = strrchr(parent, '/');
+        slash[slash == parent ? 1 : 0] = 0;
+        result = tp_lstat(parent, &ancestor);
+        if (result)
+            return result;
+    }
+}
+
+static int copy_selection(void)
+{
+    struct tp_stat source, parent;
+    int result = tp_lstat(source_path, &source);
+    if (result)
+        return result;
+    if ((source.st_mode & S_IFMT) == S_IFDIR) {
+        result = prepare_tree_target(&source, &parent);
+        if (result)
+            return result;
+    }
+    tree_device = source.st_dev;
+    created_tree = 0;
+    result = walk_tree(0, TREE_COPY);
+    if (result && created_tree) {
+        strcpy(source_path, target_path);
+        tree_device = parent.st_dev;
+        if (walk_tree(0, TREE_REMOVE))
+            return -ENOTEMPTY;
+    }
+    return result;
+}
+
+static int remove_selection(void)
+{
+    struct tp_stat parent;
+    int result = tp_lstat(cwd, &parent);
+    if (result)
+        return result;
+    tree_device = parent.st_dev;
+    result = walk_tree(0, TREE_CHECK);
+    return result ? result : walk_tree(0, TREE_REMOVE);
+}
+
+static void apply_operation(void)
+{
+    fentry_t *entry = current_entry();
+    int result;
+    if (!entry || !input[0])
+        return;
+    if (operation == RENAME_FILE &&
+        (strchr(input, '/') || !strcmp(input, ".") || !strcmp(input, ".."))) {
+        report("Enter a new name without /");
+        return;
+    }
+    build_path(source_path, sizeof(source_path), cwd, entry->name);
+    if (input[0] == '/')
+        strcpy(target_path, input);
+    else
+        build_path(target_path, sizeof(target_path), cwd, input);
+    result = -1;
+    if (source_path[0] && target_path[0]) {
+        if (operation == COPY_FILE)
+            result = copy_selection();
+        else
+            result = __transputer_syscall(__NR_renameat2, AT_FDCWD, (long)source_path,
+                                          AT_FDCWD, (long)target_path, RENAME_NOREPLACE, 0);
+        if (result == -EXDEV && operation == MOVE_FILE) {
+            result = copy_selection();
+            if (!result && remove_selection()) {
+                operation = 0;
+                report("Copied, but source could not be removed");
+                read_directory();
+                return;
+            }
+        }
+    }
+    if (!result)
+        report(operation == COPY_FILE ? "Copied" : operation == MOVE_FILE ? "Moved" : "Renamed");
+    else
+        report(result == -EEXIST ? "Destination exists" :
+               result == -EINVAL ? "Invalid destination" :
+               result == -EOPNOTSUPP ? "Folder contains an unsupported item" :
+               result == -ENOTEMPTY ? "Copy failed. Partial destination remains" :
+               result == -EBUSY ? "Cannot cross a mounted filesystem" :
+               result == -ELOOP || result == -ENAMETOOLONG ? "Folder path is too deep or long" :
+               "File operation failed");
+    operation = 0;
+    read_directory();
+}
+
+static void edit_operation(int key)
+{
+    if (key == 27) {
+        operation = 0;
+        status_message = NULL;
+    } else if (operation == DELETE_FILE) {
+        if (key == 'y' || key == 'Y') {
+            fentry_t *entry = current_entry();
+            int result;
+            build_path(source_path, sizeof(source_path), cwd, entry->name);
+            result = source_path[0] ? remove_selection() : -ENAMETOOLONG;
+            report(!result ? "Deleted" : result == -EBUSY ?
+                   "Cannot delete a mounted filesystem" : "Could not finish deleting item");
+            operation = 0;
+            read_directory();
+        }
+    } else if (key == '\r' || key == '\n') {
+        if (operation == GO_DIRECTORY) {
+            operation = 0;
+            if (input[0])
+                enter_directory(input);
+        } else {
+            apply_operation();
+        }
+    } else if (key == 8 || key == 127) {
+        if (input_length)
+            input[--input_length] = 0;
+    } else if (key >= ' ' && key < 127 && input_length + 1 < sizeof(input)) {
+        input[input_length++] = key;
+        input[input_length] = 0;
+    }
+}
+
+static void toggle_sd(void)
+{
+    struct tp_stat root, sd;
+    long result;
+    if (tp_lstat("/", &root) || tp_lstat("/sd", &sd)) {
+        report("Cannot read SD mount point");
+        return;
+    }
+    if (root.st_dev == sd.st_dev) {
+        result = __transputer_syscall(__NR_mount, (long)"/dev/t4sd1", (long)"/sd",
+                                      (long)"ext2", 0, 0, 0);
+        report(result == 0 ? "SD mounted" : "Cannot mount SD");
+    } else {
+        /* A regular unmount flushes the filesystem and rejects busy mounts. */
+        result = __transputer_syscall(__NR_umount2, (long)"/sd", 0, 0, 0, 0, 0);
+        if (!result && (!strcmp(cwd, "/sd") || !strncmp(cwd, "/sd/", 4)))
+            strcpy(cwd, "/");
+        report(result == 0 ? "SD unmounted. Safe to remove" :
+               result == -EBUSY ? "SD is busy" : "Cannot unmount SD");
     }
     read_directory();
 }
 
-/* -------------------------------------------------------------------------
- * Delete file/directory
- * ------------------------------------------------------------------------- */
-static void delete_selected(void)
+static void open_package(const char *path)
 {
-    fentry_t *e;
-    char fullpath[320];
-    int flags;
+    int fd;
+    unsigned length = strlen(path);
+    if (!length || length >= TFILES_PACKAGE_PATH_SIZE) {
+        report("Package path is too long");
+        return;
+    }
+    fd = __transputer_syscall(__NR_open, (long)TFILES_PACKAGE_REQUEST,
+                               O_WRONLY | O_CREAT | O_EXCL, 0600, 0, 0, 0);
+    if (fd >= 0) {
+        int error = write_all(fd, path, length + 1);
+        if (tp_close(fd))
+            error = -1;
+        if (!error)
+            tp_exit(TFILES_OPEN_PACKAGE);
+        tp_unlinkat(AT_FDCWD, TFILES_PACKAGE_REQUEST, 0);
+    }
+    report("Cannot open Packages");
+}
 
+static void open_selected(void)
+{
+    fentry_t *entry;
+    unsigned length;
     if (selected < 0 || selected >= nentries)
         return;
-
-    e = &entries[selected];
-
-    /* Don't delete ".." */
-    if (strcmp(e->name, "..") == 0)
-        return;
-
-    build_path(fullpath, sizeof(fullpath), cwd, e->name);
-
-    flags = 0;
-    if (e->type == FTYPE_DIR)
-        flags = AT_REMOVEDIR;
-
-    if (tp_unlinkat(AT_FDCWD, fullpath, flags) == 0) {
-        read_directory();
-        if (selected >= nentries && nentries > 0)
-            selected = nentries - 1;
+    entry = &entries[selected];
+    if (entry->type == FTYPE_DIR) {
+        enter_directory(entry->name);
+    } else if (entry->type == FTYPE_FILE || entry->type == FTYPE_EXEC) {
+        length = strlen(entry->name);
+        if (length > 4 && !strcmp(entry->name + length - 4, ".tpz")) {
+            build_path(source_path, sizeof(source_path), cwd, entry->name);
+            if (!source_path[0])
+                report("Package path is too long");
+            else
+                open_package(source_path);
+        }
     }
 }
 
@@ -1052,6 +1429,9 @@ int main(void)
     uart_puts("TFILES_START\r\n");
 
     vga_init();
+    if (tp_getcwd(original_cwd, sizeof(original_cwd)) < 0)
+        return 1;
+    strcpy(cwd, original_cwd);
     read_directory();
     redraw_all();
 
@@ -1065,6 +1445,17 @@ int main(void)
             continue;
         }
 
+        if (operation) {
+            edit_operation(key);
+            if (operation) {
+                draw_status();
+                vga_flip();
+            } else {
+                redraw_all();
+            }
+            continue;
+        }
+        status_message = NULL;
         if (key == 'q' || key == 'Q' || key == 27) {
             running = 0;
             continue;
@@ -1104,38 +1495,29 @@ int main(void)
             ensure_visible();
         }
 
-        if (key == '\r' || key == '\n' || key == KEY_RIGHT) {
-            if (selected >= 0 && selected < nentries) {
-                if (entries[selected].type == FTYPE_DIR)
-                    enter_directory(entries[selected].name);
-            }
-        }
-
-        if (key == 8 || key == 127 || key == KEY_LEFT) {
-            /* Backspace / Left: go up */
+        if (key == '\r' || key == '\n' || key == KEY_RIGHT)
+            open_selected();
+        if (key == 8 || key == 127 || key == KEY_LEFT)
             enter_directory("..");
+        if (key == 's')
+            toggle_sd();
+        if (key == 'g' || (current_entry() &&
+            (key == 'c' || key == 'm' || key == 'r' || key == 'd'))) {
+            operation = key == 'g' ? GO_DIRECTORY : key == 'c' ? COPY_FILE :
+                        key == 'm' ? MOVE_FILE : key == 'r' ? RENAME_FILE : DELETE_FILE;
+            input_length = 0;
+            input[0] = 0;
         }
-
-        if (key == 'd' || key == 'D') {
-            delete_selected();
-        }
-
         if (key == 'v' || key == 'V') {
-            if (selected >= 0 && selected < nentries) {
-                if (entries[selected].type != FTYPE_DIR) {
-                    char fullpath[320];
-                    build_path(fullpath, sizeof(fullpath),
-                               cwd, entries[selected].name);
-                    view_file(fullpath, entries[selected].name);
-                }
+            fentry_t *entry = current_entry();
+            if (entry && (entry->type == FTYPE_FILE || entry->type == FTYPE_EXEC)) {
+                build_path(source_path, sizeof(source_path), cwd, entry->name);
+                view_file(source_path, entry->name);
             }
         }
 
         /* Refresh display */
-        draw_list();
-        draw_scrollbar();
-        draw_status();
-        vga_flip();
+        redraw_all();
     }
 
     uart_puts("TFILES_DONE\r\n");

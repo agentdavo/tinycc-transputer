@@ -17,18 +17,18 @@
 #define PCRELATIVE_DLLPLT 1
 #define RELOCATE_DLLPLT 1
 ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename);
+ST_FUNC int tp_reloc_width(int type, int executable);
+ST_FUNC int tp_data_layout_reloc(int type);
 #else /* !TARGET_DEFS_ONLY */
 #include "tcc.h"
 #include "transputer-enc.h"  /* Unified prefix encoding */
 #include "transputer-opcodes.h"
 
 /* Forward declaration */
-static int tp_env_enabled(const char *name);
+#include "transputer-knobs.h"
 static const char *tp_reloc_symbol_name(Section *symtab_sec, ElfW(Sym) *sym);
-static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_addr,
-                            uint32_t addr, uint32_t val);
-static int tp_patch_iprel(uint8_t *image, size_t total_size, uint32_t base_addr,
-                          uint32_t addr, uint32_t val);
+static int tp_patch_ldc_abs(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val);
+static int tp_patch_iprel(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val);
 
 /*
  * Which part code is for.  Every object records, in its ELF e_flags, what
@@ -38,36 +38,54 @@ static int tp_patch_iprel(uint8_t *image, size_t total_size, uint32_t base_addr,
  * one, TVX code anywhere but -mt9000tvx.  A link without -m takes anything.
  * Objects from before 2026-11-03 carry 0 and so pass everywhere.
  */
-ST_FUNC unsigned tp_target_flags(TCCState *s1)
-{
-    unsigned f;
+static const struct { const char *name; unsigned char isa; } tp_parts[] = {
+    { "t9000tvx", TP_ISA_T9000TVX },
+    { "t9000",    TP_ISA_T9000 },
+    { "t805",     TP_ISA_T805 },
+    { "no-t9000", TP_ISA_T805 },
+    { "t800",     TP_ISA_T800 },
+    { "t425",     TP_ISA_T425 },
+    { "t414",     TP_ISA_T414 },
+};
 
-    if (s1->tp_t414)
-        return 0;
-    if (s1->tp_t425)
-        return TP_EF_T800OPS | TP_EF_T805OPS;
-    if (s1->tp_t800)
-        return TP_EF_T800OPS | TP_EF_FPU;
-    f = TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU;      /* the T805 */
-    if (s1->tp_t9000)
-        f |= TP_EF_T9000;
-    if (s1->tp_tvx)
-        f |= TP_EF_TVX;
-    return f;
+/* The first name in tp_parts for a part with exactly `isa`, or NULL. */
+static const char *tp_part_name(unsigned isa)
+{
+    int k;
+
+    for (k = 0; k < countof(tp_parts); k++)
+        if (tp_parts[k].isa == isa)
+            return tp_parts[k].name;
+    return NULL;
 }
 
-/* The -m option that selects the current target, less its "-m". */
+ST_FUNC int tp_select_target(TCCState *s1, const char *name)
+{
+    int k;
+
+    for (k = 0; k < countof(tp_parts); k++)
+        if (!strcmp(name, tp_parts[k].name)) {
+            s1->tp_isa = tp_parts[k].isa;
+            return 1;
+        }
+    return 0;
+}
+
+/* The -m options that are not parts. */
+ST_FUNC int tp_select_option(TCCState *s1, const char *name)
+{
+    int on = strncmp(name, "no-", 3) != 0;
+
+    if (!strcmp(name + (on ? 0 : 3), "jump-tables")) {
+        s1->tp_jump_tables = on;
+        return 1;
+    }
+    return 0;
+}
+
 ST_FUNC const char *tp_target_name(TCCState *s1)
 {
-    if (s1->tp_t414)
-        return "t414";
-    if (s1->tp_t425)
-        return "t425";
-    if (s1->tp_t800)
-        return "t800";
-    if (!s1->tp_t9000)
-        return "t805";
-    return s1->tp_tvx ? "t9000tvx" : "t9000";
+    return tp_part_name(s1->tp_isa);
 }
 
 /* An object being linked carries `flags` in its e_flags; `member` names it
@@ -79,17 +97,10 @@ ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
         "T800 instructions", "T805 instructions", "the FPU",
         "T9000 instructions", "TVX"
     };
-    static const struct { unsigned flags; const char *name; } parts[] = {
-        { TP_EF_T800OPS | TP_EF_T805OPS, "-mt425" },
-        { TP_EF_T800OPS | TP_EF_FPU, "-mt800" },
-        { TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU, "-mt805" },
-        { TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU | TP_EF_T9000, "-mt9000" },
-        { TP_EF_T800OPS | TP_EF_T805OPS | TP_EF_FPU | TP_EF_T9000 | TP_EF_TVX,
-          "-mt9000tvx" },
-    };
-    unsigned extra = flags & ~tp_target_flags(s1) & ((TP_EF_TVX << 1) - 1);
+    unsigned extra = flags & ~s1->tp_isa & ((TP_EF_TVX << 1) - 1);
     char needs[96];
-    const char *built = NULL;
+    /* 0 is also what objects from before the flags existed carry */
+    const char *built = flags ? tp_part_name(flags) : NULL;
     int k;
 
     s1->tp_isa_used |= flags;
@@ -105,174 +116,263 @@ ST_FUNC int tp_check_object_flags(TCCState *s1, unsigned flags,
             pstrcat(needs, sizeof needs,
                     (extra & (extra - 1)) ? ", " : " and ");
     }
-    for (k = 0; k < countof(parts); k++)
-        if (parts[k].flags == flags)
-            built = parts[k].name;
     return tcc_error_noabort("%s%s%s%s%s needs %s, which -m%s does not have; "
                              "rebuild it for -m%s or link for a bigger part",
                              member ? "archive member " : "this object",
                              member ? member : "",
-                             built ? " (compiled for " : "",
+                             built ? " (compiled for -m" : "",
                              built ? built : "", built ? ")" : "",
                              needs, tp_target_name(s1), tp_target_name(s1));
 }
 
 /*
- * Transputer post-compilation optimizers.
- * These run on individual .text sections after compilation but before
- * final section address assignment and relocation patching.
+ * Hooks from tcc_load_object_file (struct tp_objload in tcc.h).
+ *
+ * Tracing, each switched on by an environment variable:
+ *   T4_RELOC_LOG            RELOC_LOAD: every relocation as it is loaded;
+ *     T4_RELOC_SYM=<text>     only for symbols containing <text>
+ *     T4_RELOC_TYPE=<n>       only of type <n>
+ *     T4_RELOC_LOAD_DUMP      plus the bytes at an IPREL32 and what they decode to
+ *   T4_RELOC_SUMMARY        RELOC_SUMMARY: IPREL32 counts per symbol per object
+ *   T4_RELOC_SYMINFO[=<text>]  RELOC_SYMINFO: the symbol behind each relocation
+ *   T4_RELOC_LDC_MISMATCH   an IPREL32 that sits on an ldc
+ *   T4_SYMMERGE_DEBUG=<text>  SYMMERGE / SYMMERGE_RELOC: how symbols containing
+ *                           <text> are renumbered
  */
+static struct {
+    int init;
+    int log;
+    const char *sym_filter;
+    int type_filter;
+    int load_dump;
+    int summary;
+    int syminfo;
+    const char *syminfo_filter;
+    int ldc_mismatch;
+    const char *symmerge;
+} tp_lt;
 
-/*
- * Peephole: in-place replacements by pfix 0 (a no-op at an instruction
- * boundary), so no address moves.
- *   j 0                      -> pfix 0   (j can deschedule; pfix 0 cannot)
- *   ldc 0; sum|diff|shl|shr|or|xor -> no-ops
- *   ldc 1; prod              -> no-ops
- *   adc 0, ldnlp 0           -> no-op
- * It runs over one function at a time, from its symbol, so decoding starts
- * on an instruction boundary and never strays into data between functions.
- * An instruction holding a relocation is a placeholder that the relocation
- * pass re-encodes later (`ldc sym` is pfix 0 x 8; ldc 0 until then), and a
- * pair whose second instruction is a branch target is reached without its
- * first; both are left alone.
- */
-
-/* Decode the instruction at data[pos]: returns its length including
- * prefixes (0 if truncated), the function code and the operand. */
-static int tp_decode_instr_at(const uint8_t *data, size_t len, size_t pos,
-                               int *opcode_out, int *operand_out)
+static void tp_load_trace_init(void)
 {
-    size_t start = pos;
-    uint32_t oreg = 0;
-    while (pos < len) {
-        int byte = data[pos];
-        int nibble = byte & 0x0F;
-        int op = (byte >> 4) & 0x0F;
-        pos++;
-        if (op == TP_OP_PFIX) {
-            oreg = (oreg | nibble) << 4;
-        } else if (op == TP_OP_NFIX) {
-            oreg = (~(oreg | nibble)) << 4;
-        } else {
-            *opcode_out = op;
-            *operand_out = (int)(oreg | nibble);
-            return (int)(pos - start);
+    const char *env;
+
+    if (tp_lt.init)
+        return;
+    tp_lt.init = 1;
+    env = tp_knob(TPK_T4_RELOC_LOG);
+    tp_lt.log = env && *env;
+    tp_lt.sym_filter = tp_knob(TPK_T4_RELOC_SYM);
+    tp_lt.type_filter = -1;
+    env = tp_knob(TPK_T4_RELOC_TYPE);
+    if (env && *env)
+        tp_lt.type_filter = (int)strtol(env, NULL, 0);
+    env = tp_knob(TPK_T4_RELOC_LOAD_DUMP);
+    tp_lt.load_dump = env && *env;
+    env = tp_knob(TPK_T4_RELOC_SUMMARY);
+    tp_lt.summary = env && *env;
+    env = tp_knob(TPK_T4_RELOC_SYMINFO);
+    tp_lt.syminfo = env && *env;
+    tp_lt.syminfo_filter = env && strcmp(env, "1") ? env : NULL;
+    env = tp_knob(TPK_T4_RELOC_LDC_MISMATCH);
+    tp_lt.ldc_mismatch = env && *env;
+    tp_lt.symmerge = tp_knob(TPK_T4_SYMMERGE_DEBUG);
+}
+
+static const char *tp_objload_file(struct tp_objload *o)
+{
+    return o->s1->current_filename ? o->s1->current_filename : "<unknown>";
+}
+
+ST_FUNC void tp_objload_sym(struct tp_objload *o, int i, int new_index)
+{
+    ElfW(Sym) *sym = &o->symtab[i];
+    const char *name = o->strtab + sym->st_name;
+
+    tp_load_trace_init();
+    if (tp_lt.symmerge && name && strstr(name, tp_lt.symmerge)) {
+        fprintf(stderr, "SYMMERGE: file=%s sym='%s' old_idx=%d new_idx=%d "
+                "bind=%d type=%d shndx=%d value=0x%lx\n",
+                tp_objload_file(o), name, i, new_index,
+                ELFW(ST_BIND)(sym->st_info), ELFW(ST_TYPE)(sym->st_info),
+                sym->st_shndx, (unsigned long)sym->st_value);
+    }
+}
+
+/* Count an IPREL32 against its symbol for RELOC_SUMMARY. */
+static void tp_objload_count_iprel(struct tp_objload *o, unsigned sym_index)
+{
+    const char *sum_name = "<unknown>";
+    int si;
+
+    if (o->strtab && o->symtab[sym_index].st_name)
+        sum_name = o->strtab + o->symtab[sym_index].st_name;
+    for (si = 0; si < o->iprel_count; si++) {
+        if (o->iprel_syms[si] == sum_name ||
+            (o->iprel_syms[si] && sum_name &&
+             0 == strcmp(o->iprel_syms[si], sum_name))) {
+            o->iprel_counts[si]++;
+            return;
+        }
+    }
+    if (o->iprel_count == o->iprel_cap) {
+        o->iprel_cap = o->iprel_cap ? o->iprel_cap * 2 : 16;
+        o->iprel_syms = tcc_realloc(o->iprel_syms,
+                                    o->iprel_cap * sizeof(*o->iprel_syms));
+        o->iprel_counts = tcc_realloc(o->iprel_counts,
+                                      o->iprel_cap * sizeof(*o->iprel_counts));
+    }
+    o->iprel_syms[o->iprel_count] = sum_name;
+    o->iprel_counts[o->iprel_count] = 1;
+    o->iprel_count++;
+}
+
+/* The first byte at or after `off` in `ts` that is not a pfix/nfix: the
+ * instruction a relocation sits on.  Returns its top nibble in place, or
+ * -1, and how many prefix bytes came before it. */
+static int tp_objload_opcode_at(Section *ts, unsigned long off, int *pscan)
+{
+    unsigned char *data = (unsigned char *)ts->data;
+    int opcode = -1;
+    int scan = 0;
+
+    for (; off + scan < ts->data_offset && scan < 16; scan++) {
+        unsigned char hi = data[off + scan] & 0xF0;
+        if (hi != 0x20 && hi != 0x60) {
+            opcode = hi;
+            break;
+        }
+    }
+    *pscan = scan;
+    return opcode;
+}
+
+ST_FUNC int tp_objload_reloc(struct tp_objload *o, ElfW(Shdr) *sh,
+                             ElfW_Rel *rel, Section *ts,
+                             unsigned long offseti)
+{
+    TCCState *s1 = o->s1;       /* for tcc_error_noabort */
+    int type = ELFW(R_TYPE)(rel->r_info);
+    unsigned sym_index = ELFW(R_SYM)(rel->r_info);
+    ElfW(Shdr) *target = &o->shdr[sh->sh_info];
+    const char *sym_name = "<unknown>";
+    const char *sec_name = "<unknown>";
+
+    tp_load_trace_init();
+    /* Check the original input extent before merging sections:
+     * the next object's data must never complete this field. */
+    if (target->sh_flags & SHF_ALLOC) {
+        int width = tp_reloc_width(type, target->sh_flags & SHF_EXECINSTR);
+        if (width > 0 && (rel->r_offset > target->sh_size
+            || target->sh_size - rel->r_offset < (unsigned)width)) {
+            tcc_error_noabort("relocation %d outside %s at offset 0x%lx",
+                              type, o->strsec + target->sh_name,
+                              (unsigned long)rel->r_offset);
+            return -1;
+        }
+    }
+    if (sym_index >= (unsigned)o->nb_syms)
+        return 0;       /* the caller reports it */
+
+    if (tp_lt.summary && type == R_TRANSPUTER_IPREL32)
+        tp_objload_count_iprel(o, sym_index);
+
+    if (tp_lt.log || tp_lt.syminfo) {
+        if (o->strtab && o->symtab[sym_index].st_name)
+            sym_name = o->strtab + o->symtab[sym_index].st_name;
+        if (sh->sh_info < (unsigned)o->shnum)
+            sec_name = o->strsec + target->sh_name;
+        if ((!tp_lt.sym_filter || strstr(sym_name, tp_lt.sym_filter)) &&
+            (tp_lt.type_filter < 0 || tp_lt.type_filter == type)) {
+            fprintf(stderr,
+                    "RELOC_LOAD: file=%s member=%s section=%s r_offset=0x%lx type=%d sym=%s\n",
+                    tp_objload_file(o), o->member ? o->member : "<none>",
+                    sec_name, (unsigned long)rel->r_offset, type, sym_name);
+            if (tp_lt.load_dump && type == R_TRANSPUTER_IPREL32) {
+                unsigned long off = rel->r_offset + offseti;
+                if (ts && ts->data && off < ts->data_offset) {
+                    unsigned long start = off >= 8 ? off - 8 : 0;
+                    unsigned long end = off + 8;
+                    unsigned char *data = (unsigned char *)ts->data;
+                    unsigned long di;
+                    int opcode, scan;
+                    const char *kind = "unknown";
+                    if (end >= ts->data_offset)
+                        end = ts->data_offset - 1;
+                    fprintf(stderr, "RELOC_LOAD_BYTES:");
+                    for (di = start; di <= end; di++)
+                        fprintf(stderr, " %02x", data[di]);
+                    fprintf(stderr, "\n");
+                    opcode = tp_objload_opcode_at(ts, off, &scan);
+                    if (opcode >= 0)
+                        opcode >>= 4;
+                    if (opcode == 0x9)
+                        kind = "call";
+                    else if (opcode == 0x0)
+                        kind = "j";
+                    else if (opcode == 0xA)
+                        kind = "cj";
+                    else if (opcode == 0x4)
+                        kind = "ldc";
+                    fprintf(stderr,
+                            "RELOC_LOAD_DECODE: start=0x%lx opcode=0x%x kind=%s scan=%d\n",
+                            off, opcode, kind, scan);
+                }
+            }
+        }
+        if (tp_lt.ldc_mismatch && type == R_TRANSPUTER_IPREL32) {
+            unsigned long off = rel->r_offset + offseti;
+            int scan;
+            if (ts && ts->data && off < ts->data_offset
+                && tp_objload_opcode_at(ts, off, &scan) == 0x40) {
+                fprintf(stderr,
+                        "RELOC_LDC_MISMATCH: file=%s member=%s section=%s r_offset=0x%lx sym=%s scan=%d\n",
+                        tp_objload_file(o), o->member ? o->member : "<none>",
+                        sec_name, (unsigned long)rel->r_offset, sym_name, scan);
+            }
+        }
+        if (tp_lt.syminfo && (!tp_lt.syminfo_filter ||
+            strstr(sym_name, tp_lt.syminfo_filter))) {
+            unsigned char st_info = o->symtab[sym_index].st_info;
+            fprintf(stderr,
+                    "RELOC_SYMINFO: sym=%s st_info=0x%x bind=%u type=%u shndx=%u st_value=0x%lx\n",
+                    sym_name, st_info, ELFW(ST_BIND)(st_info),
+                    ELFW(ST_TYPE)(st_info),
+                    (unsigned) o->symtab[sym_index].st_shndx,
+                    (unsigned long) o->symtab[sym_index].st_value);
+        }
+    }
+
+    if (tp_lt.symmerge && o->strtab && o->symtab[sym_index].st_name) {
+        const char *merge_name = o->strtab + o->symtab[sym_index].st_name;
+        if (strstr(merge_name, tp_lt.symmerge)) {
+            fprintf(stderr,
+                    "SYMMERGE_RELOC: file=%s sym='%s' old_sym=%u "
+                    "new_sym=%u type=%d offset=0x%lx\n",
+                    tp_objload_file(o), merge_name, sym_index,
+                    (unsigned)o->old_to_new_syms[sym_index],
+                    type, (unsigned long)rel->r_offset);
         }
     }
     return 0;
 }
 
-static int tp_peep_has_reloc(const uint8_t *reloc, size_t pos, int n)
+ST_FUNC void tp_objload_end(struct tp_objload *o)
 {
-    while (n-- > 0)
-        if (reloc[pos++])
-            return 1;
-    return 0;
-}
-
-static void tp_peep_nop(uint8_t *data, size_t pos, int n)
-{
-    while (n-- > 0)
-        data[pos++] = (TP_OP_PFIX << 4) | 0;
-}
-
-/* data[0..len) is one function; reloc[k] is set where a relocation
- * starts. */
-static void tp_peephole_function(uint8_t *data, size_t len,
-                                 const uint8_t *reloc)
-{
-    uint8_t *target = tcc_mallocz(len + 1);
-    size_t i;
-    int op1, opd1, n1, op2, opd2, n2;
-
-    for (i = 0; i < len; i += n1) {
-        n1 = tp_decode_instr_at(data, len, i, &op1, &opd1);
-        if (n1 == 0)
-            break;
-        if (op1 == TP_OP_J || op1 == TP_OP_CJ) {
-            long t = (long)(i + n1) + opd1;
-            if (t >= 0 && t <= (long)len)
-                target[t] = 1;
+    if (tp_lt.summary && o->iprel_count) {
+        int si;
+        fprintf(stderr, "RELOC_SUMMARY: file=%s member=%s iprel32=%d\n",
+                tp_objload_file(o), o->member ? o->member : "<none>",
+                o->iprel_count);
+        for (si = 0; si < o->iprel_count; si++) {
+            fprintf(stderr, "RELOC_SUMMARY_ITEM: sym=%s count=%d\n",
+                    o->iprel_syms[si] ? o->iprel_syms[si] : "<unknown>",
+                    o->iprel_counts[si]);
         }
     }
-
-    for (i = 0; i < len; i += n1) {
-        n1 = tp_decode_instr_at(data, len, i, &op1, &opd1);
-        if (n1 == 0)
-            break;
-        if (tp_peep_has_reloc(reloc, i, n1))
-            continue;
-        if ((n1 == 1 && op1 == TP_OP_J && opd1 == 0)
-            || (op1 == TP_OP_ADC && opd1 == 0)
-            || (op1 == TP_OP_LDNLP && opd1 == 0)) {
-            tp_peep_nop(data, i, n1);
-            continue;
-        }
-        if (op1 != TP_OP_LDC || (opd1 != 0 && opd1 != 1) || i + n1 >= len)
-            continue;
-        n2 = tp_decode_instr_at(data, len, i + n1, &op2, &opd2);
-        if (n2 == 0 || op2 != TP_OP_OPR || target[i + n1]
-            || tp_peep_has_reloc(reloc, i + n1, n2))
-            continue;
-        if (opd1 == 0 ? (opd2 == TP_OPR_SUM || opd2 == TP_OPR_DIFF
-                         || opd2 == TP_OPR_SHL || opd2 == TP_OPR_SHR
-                         || opd2 == TP_OPR_OR || opd2 == TP_OPR_XOR)
-                      : opd2 == TP_OPR_PROD) {
-            tp_peep_nop(data, i, n1 + n2);
-            n1 += n2;
-        }
-    }
-    tcc_free(target);
-}
-
-static void transputer_peephole_optimize(TCCState *s1, Section *sec)
-{
-    uint8_t *reloc = tcc_mallocz(sec->data_offset + 1);
-    ElfW(Sym) *sym;
-
-    if (sec->reloc) {
-        ElfW_Rel *rel;
-        for_each_elem(sec->reloc, 0, rel, ElfW_Rel)
-            if (rel->r_offset < sec->data_offset)
-                reloc[rel->r_offset] = 1;
-    }
-    for_each_elem(symtab_section, 1, sym, ElfW(Sym)) {
-        if (ELFW(ST_TYPE)(sym->st_info) == STT_FUNC
-            && sym->st_shndx == sec->sh_num && sym->st_size
-            && sym->st_value + sym->st_size <= sec->data_offset)
-            tp_peephole_function(sec->data + sym->st_value, sym->st_size,
-                                 reloc + sym->st_value);
-    }
-    tcc_free(reloc);
-}
-
-/* transputer_optimize_jumps removed — was opt-in (T4_OPTIMIZE_JUMPS env),
- * not needed until binary size optimization becomes a priority. */
-
-/* Debug knobs from the environment, each read once: several are asked
- * per relocation.  Keyed by the name's address - they are all literals,
- * and a literal spelled twice just takes a second slot. */
-static const char *tp_env(const char *name)
-{
-    static struct { const char *name, *value; } cache[48];
-    static int n;
-    int i;
-
-    for (i = 0; i < n; i++)
-        if (cache[i].name == name)
-            return cache[i].value;
-    if (n == (int)(sizeof cache / sizeof cache[0]))
-        return getenv(name);
-    cache[n].name = name;
-    cache[n].value = getenv(name);
-    return cache[n++].value;
-}
-
-static int tp_env_enabled(const char *name)
-{
-    const char *env = tp_env(name);
-    return env && *env;
+    tcc_free(o->iprel_syms);
+    tcc_free(o->iprel_counts);
+    o->iprel_syms = NULL;
+    o->iprel_counts = NULL;
 }
 
 static ElfW(Sym) *find_sym_by_name(Section *symtab, const char *name)
@@ -440,79 +540,6 @@ static int tp_patch_u32_checked(uint8_t *image, uint32_t base_addr,
     return 0;
 }
 
-/*
- * Patch an 8-byte LDC sequence to load a 32-bit absolute address.
- * Used by the new Minix-style head.S bootstrap (2026-01-15).
- *
- * The 8-byte sequence encodes a 32-bit value as:
- *   PFIX nibble7, PFIX nibble6, ..., PFIX nibble1, LDC nibble0
- * For address 0xABCDEFGH:
- *   0x2A 0x2B 0x2C 0x2D 0x2E 0x2F 0x2G 0x4H
- */
-static int patch_ldc_absolute(uint8_t *image, uint32_t base_addr, TCCState *s1,
-                              Section *symtab, const char *load_point_name,
-                              const char *target_name)
-{
-    ElfW(Sym) *load_point_sym;
-    ElfW(Sym) *target_sym;
-    Section *load_point_sec;
-    Section *target_sec;
-    uint32_t load_point_addr;
-    uint32_t target_addr;
-    uint32_t patch_addr;
-    uint8_t nibble0;
-    int i;
-
-    load_point_sym = find_sym_by_name(symtab, load_point_name);
-    target_sym = find_sym_by_name(symtab, target_name);
-
-    if (!load_point_sym || !target_sym) {
-        fprintf(stderr,
-                "LDC patch: missing symbol(s) load_point=%s%s target=%s%s\n",
-                load_point_name, load_point_sym ? "" : " (not found)",
-                target_name, target_sym ? "" : " (not found)");
-        return -1;
-    }
-
-    if (load_point_sym->st_shndx <= 0 || load_point_sym->st_shndx >= s1->nb_sections) {
-        fprintf(stderr, "LDC patch: bad load_point shndx %d for %s\n",
-                load_point_sym->st_shndx, load_point_name);
-        return -1;
-    }
-
-    if (target_sym->st_shndx <= 0 || target_sym->st_shndx >= s1->nb_sections) {
-        fprintf(stderr, "LDC patch: bad target shndx %d for %s\n",
-                target_sym->st_shndx, target_name);
-        return -1;
-    }
-
-    load_point_sec = s1->sections[load_point_sym->st_shndx];
-    target_sec = s1->sections[target_sym->st_shndx];
-    load_point_addr = load_point_sec->sh_addr + load_point_sym->st_value;
-    target_addr = target_sec->sh_addr + target_sym->st_value;
-
-    /* Calculate patch address in image */
-    patch_addr = load_point_addr - base_addr;
-
-    /* Encode 32-bit address as 7 PFIX + 1 LDC (8 bytes total) */
-    /* Address nibbles from high to low: 7 6 5 4 3 2 1 0 */
-    /* Emit 7 PFIX instructions for nibbles 7-1 */
-    for (i = 7; i >= 1; i--) {
-        uint8_t nibble = (target_addr >> (i * 4)) & 0x0F;
-        image[patch_addr++] = 0x20 | nibble;  /* PFIX nibble */
-    }
-
-    /* Final LDC with nibble 0 */
-    nibble0 = target_addr & 0x0F;
-    image[patch_addr] = 0x40 | nibble0;  /* LDC nibble0 */
-
-    if (tp_env_enabled("T4_LINK_DEBUG")) {
-        fprintf(stderr, "LDC patched %s -> %s: target=0x%08X\n",
-                load_point_name, target_name, target_addr);
-    }
-    return 0;
-}
-
 static int tp_find_symbol_addr(TCCState *s1, Section *symtab,
                                const char *name, uint32_t *out_addr)
 {
@@ -548,7 +575,7 @@ static int tp_decode_abs_ldc32(const uint8_t *image, size_t total_size,
     if (load_addr < base_addr)
         return -1;
     off = (size_t)(load_addr - base_addr);
-    if (off + 8 > total_size)
+    if (off > total_size || total_size - off < 8)
         return -1;
 
     for (i = 0; i < 7; i++) {
@@ -611,36 +638,6 @@ static int tp_verify_abs_ldc_value(uint8_t *image, size_t total_size,
     return 1;
 }
 
-static int tp_verify_abs_ldc_target(uint8_t *image, size_t total_size,
-                                    uint32_t base_addr, TCCState *s1,
-                                    Section *symtab, const char *load_point_name,
-                                    const char *target_name)
-{
-    uint32_t target_addr;
-    int have_target;
-    int verify_rc;
-
-    have_target = tp_find_symbol_addr(s1, symtab, target_name, &target_addr);
-    if (have_target <= 0) {
-        if (have_target == 0) {
-            fprintf(stderr, "ERROR: required symbol %s missing for %s\n",
-                    target_name, load_point_name);
-        }
-        return -1;
-    }
-
-    verify_rc = tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab,
-                                        load_point_name, target_addr, target_name);
-    if (verify_rc != 1) {
-        if (verify_rc == 0) {
-            fprintf(stderr, "ERROR: required load point %s missing\n",
-                    load_point_name);
-        }
-        return -1;
-    }
-    return 0;
-}
-
 static void tp_dump_abs_ldc_bytes(uint8_t *image, size_t total_size,
                                   uint32_t base_addr, TCCState *s1,
                                   Section *symtab, const char *load_point_name,
@@ -666,7 +663,7 @@ static void tp_dump_abs_ldc_bytes(uint8_t *image, size_t total_size,
     }
 
     off = (size_t)(load_addr - base_addr);
-    if (off + 8 > total_size) {
+    if (off > total_size || total_size - off < 8) {
         fprintf(stderr, "BOOT_LDC_DUMP: %s out of range addr=0x%08x (%s)\n",
                 load_point_name, load_addr, label);
         return;
@@ -705,17 +702,15 @@ static int tp_patch_abs_ldc_value(uint8_t *image, size_t total_size,
                                   uint32_t value, const char *what)
 {
     size_t patch_off;
+    uint32_t old_value;
     int i;
 
-    if (load_addr < base_addr)
-        return -1;
-    patch_off = (size_t)(load_addr - base_addr);
-    if (patch_off + 8 > total_size) {
-        fprintf(stderr, "ERROR: LDC patch target %s at 0x%08x is outside image\n",
+    if (tp_decode_abs_ldc32(image, total_size, base_addr, load_addr, &old_value) < 0) {
+        fprintf(stderr, "error: %s at 0x%08x is not an eight-byte LDC in the image\n",
                 what, load_addr);
         return -1;
     }
-
+    patch_off = (size_t)(load_addr - base_addr);
     for (i = 7; i >= 1; i--) {
         uint8_t nibble = (value >> (i * 4)) & 0x0F;
         image[patch_off++] = 0x20 | nibble;
@@ -763,291 +758,18 @@ static int tp_patch_verified_symbol_target(uint8_t *image, size_t total_size,
                 load_point_name, target_name);
         return -1;
     }
-    if (patch_ldc_absolute(image, base_addr, s1, symtab, load_point_name, target_name) < 0)
+    if (tp_patch_abs_ldc_value(image, total_size, base_addr, load_addr,
+                               target_addr, load_point_name) < 0)
         return -1;
-    if (tp_verify_abs_ldc_target(image, total_size, base_addr, s1, symtab,
-                                 load_point_name, target_name) < 0)
+    if (tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab,
+                                load_point_name, target_addr, target_name) != 1)
         return -1;
     tp_dump_abs_ldc_bytes(image, total_size, base_addr, s1, symtab,
                           load_point_name, target_name, link_debug);
     return 1;
 }
 
-static int tp_patch_boot_bss_load_points(uint8_t *image, size_t total_size,
-                                         uint32_t base_addr, TCCState *s1,
-                                         Section *symtab_sec,
-                                         int strict_boot_asserts,
-                                         int link_debug,
-                                         uint32_t *out_bss_start,
-                                         uint32_t *out_bss_stop,
-                                         int *out_bss_valid)
-{
-    ElfW(Sym) *bss_start_load;
-    ElfW(Sym) *bss_stop_load;
-    Section *bss_sec = NULL;
-    uint32_t bss_runtime_start = 0;
-    int si;
-
-    *out_bss_valid = 0;
-    bss_start_load = find_sym_by_name(symtab_sec, "__bss_start_load_point");
-    bss_stop_load = find_sym_by_name(symtab_sec, "__bss_stop_load_point");
-
-    for (si = 1; si < s1->nb_sections; si++) {
-        Section *s = s1->sections[si];
-        if ((s->sh_flags & SHF_ALLOC) && s->sh_type != SHT_NOBITS) {
-            uint32_t sec_size = s->data_offset ? s->data_offset : s->sh_size;
-            uint32_t sec_end = s->sh_addr + sec_size;
-            if (sec_end > bss_runtime_start)
-                bss_runtime_start = sec_end;
-        }
-        if (strcmp(s->name, ".bss") == 0 && (s->sh_flags & SHF_ALLOC))
-            bss_sec = s;
-    }
-
-    if (bss_sec && bss_start_load && bss_stop_load &&
-        bss_start_load->st_shndx > 0 && bss_start_load->st_shndx < s1->nb_sections &&
-        bss_stop_load->st_shndx > 0 && bss_stop_load->st_shndx < s1->nb_sections) {
-        uint32_t bss_start_addr = bss_runtime_start;
-        uint32_t bss_size = bss_sec->sh_type == SHT_NOBITS ? bss_sec->data_offset : bss_sec->sh_size;
-        uint32_t bss_stop_addr = bss_start_addr + bss_size;
-        Section *load_sec = s1->sections[bss_start_load->st_shndx];
-        uint32_t bss_start_load_addr = load_sec->sh_addr + bss_start_load->st_value;
-        uint32_t bss_stop_load_addr = load_sec->sh_addr + bss_stop_load->st_value;
-
-        if (tp_patch_abs_ldc_value(image, total_size, base_addr, bss_start_load_addr,
-                                   bss_start_addr, "__bss_start_load_point") < 0 ||
-            tp_patch_abs_ldc_value(image, total_size, base_addr, bss_stop_load_addr,
-                                   bss_stop_addr, "__bss_stop_load_point") < 0) {
-            return -1;
-        }
-
-        if (link_debug) {
-            fprintf(stderr, "LDC patched __bss_start_load_point: bss_start=0x%08X\n",
-                    bss_start_addr);
-            fprintf(stderr, "LDC patched __bss_stop_load_point: bss_stop=0x%08X (size=%u bytes)\n",
-                    bss_stop_addr, bss_size);
-        }
-        *out_bss_start = bss_start_addr;
-        *out_bss_stop = bss_stop_addr;
-        *out_bss_valid = 1;
-        return 1;
-    }
-
-    if (strict_boot_asserts) {
-        fprintf(stderr, "ERROR: Could not patch BSS load points (.bss section or symbols not found)\n");
-        return -1;
-    }
-    fprintf(stderr, "Warning: Could not patch BSS load points (.bss section or symbols not found)\n");
-    return 0;
-}
-
-static int tp_patch_boot_init_stack(uint8_t *image, size_t total_size,
-                                    uint32_t base_addr, TCCState *s1,
-                                    Section *symtab_sec, int link_debug)
-{
-    uint32_t load_point_addr = 0;
-    uint32_t init_stack_addr = 0;
-    uint32_t workspace_addr = 0;
-    int have_load_point;
-    int have_init_stack;
-
-    have_load_point = tp_find_defined_symbol_addr(s1, symtab_sec,
-                                                  "__init_stack_load_point",
-                                                  &load_point_addr);
-    have_init_stack = tp_find_defined_symbol_addr(s1, symtab_sec,
-                                                  "init_stack",
-                                                  &init_stack_addr);
-    if (have_load_point == 0 || have_init_stack == 0) {
-        if (link_debug)
-            fprintf(stderr, "Warning: Could not find __init_stack_load_point or init_stack symbols\n");
-        return 0;
-    }
-    if (have_load_point < 0 || have_init_stack < 0) {
-        if (link_debug)
-            fprintf(stderr, "Warning: Invalid section index for init_stack symbols\n");
-        return 0;
-    }
-
-    workspace_addr = init_stack_addr + 0x2000 - 64;
-    if (tp_patch_abs_ldc_value(image, total_size, base_addr, load_point_addr,
-                               workspace_addr, "__init_stack_load_point") < 0)
-        return -1;
-    if (tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab_sec,
-                                "__init_stack_load_point", workspace_addr,
-                                "init_stack workspace") < 0)
-        return -1;
-    tp_dump_abs_ldc_bytes(image, total_size, base_addr, s1, symtab_sec,
-                          "__init_stack_load_point", "init_stack workspace",
-                          link_debug);
-
-    if (link_debug) {
-        fprintf(stderr, "LDC patched __init_stack_load_point: init_stack=0x%08X workspace=0x%08X\n",
-                init_stack_addr, workspace_addr);
-    }
-    return 1;
-}
-
-/*
- * Populate the __initcall_start[] table with sorted initcall function pointers.
- *
- * TCC creates __initcall_FOOlevel symbols (one per initcall) scattered in .data.
- * This function collects them, sorts by level ordinal, and writes the function
- * pointers into the __initcall_start[] array defined in initcall_table.c, whose
- * capacity is taken from the array's symbol size.  It then patches
- * __early_initcall_end and __initcall_end surrogates to point at the correct
- * offsets within the array.
- */
-static int tp_initcall_level_ordinal(const char *suffix)
-{
-    /* Order must match vmlinux.lds.h INIT_CALLS definition */
-    static const struct { const char *s; int ord; } levels[] = {
-        { "rootfs", 12 }, { "early", 0 },
-        { "7s", 16 }, { "6s", 14 }, { "5s", 11 }, { "4s", 9 },
-        { "3s", 7 },  { "2s", 5 },  { "1s", 3 },
-        { "7", 15 },  { "6", 13 },  { "5", 10 },  { "4", 8 },
-        { "3", 6 },   { "2", 4 },   { "1", 2 },   { "0", 1 },
-    };
-    int i;
-    for (i = 0; i < (int)(sizeof(levels) / sizeof(levels[0])); i++) {
-        size_t slen = strlen(levels[i].s);
-        size_t nlen = strlen(suffix);
-        if (nlen >= slen && strcmp(suffix + nlen - slen, levels[i].s) == 0)
-            return levels[i].ord;
-    }
-    return -1;
-}
-
-typedef struct {
-    uint32_t fn_addr;
-    int ordinal;
-    uint32_t link_order;
-} InitcallEntry;
-
-typedef struct {
-    uint32_t table_addr;
-    uint32_t level_addr[8];
-    uint32_t early_end_addr;
-    uint32_t end_addr;
-    int entry_count;
-    int capacity;       /* slots in __initcall_start[] */
-} InitcallLayout;
-
-static int initcall_entry_cmp(const void *a, const void *b)
-{
-    const InitcallEntry *ea = (const InitcallEntry *)a;
-    const InitcallEntry *eb = (const InitcallEntry *)b;
-    if (ea->ordinal != eb->ordinal)
-        return ea->ordinal - eb->ordinal;
-    if (ea->link_order < eb->link_order)
-        return -1;
-    if (ea->link_order > eb->link_order)
-        return 1;
-    return 0;
-}
-
-static int tp_populate_initcall_table(uint8_t *image, size_t total_size,
-                                       uint32_t base_addr, TCCState *s1,
-                                       Section *symtab_sec,
-                                       const InitcallLayout *layout,
-                                       int link_debug)
-{
-    InitcallEntry *entries;
-    int entry_count = 0;
-    int i, nsyms;
-    ElfW(Sym) *sym;
-    const char *strtab;
-
-    entries = tcc_malloc(layout->capacity * sizeof(*entries));
-
-    /* Scan all symbols for __initcall_* entries */
-    nsyms = symtab_sec->data_offset / sizeof(ElfW(Sym));
-    strtab = (const char *)symtab_sec->link->data;
-
-    for (i = 0; i < nsyms && entry_count < layout->capacity; i++) {
-        const char *name;
-        const char *suffix;
-        int ordinal;
-        uint32_t sym_addr, fn_ptr;
-        size_t off;
-
-        sym = &((ElfW(Sym) *)symtab_sec->data)[i];
-        name = strtab + sym->st_name;
-
-        if (strncmp(name, "__initcall_", 11) != 0)
-            continue;
-
-        /* Skip boundary/table symbols */
-        if (strcmp(name, "__initcall_start") == 0 ||
-            strcmp(name, "__initcall_end") == 0 ||
-            strcmp(name, "__early_initcall_end") == 0)
-            continue;
-
-        /* The suffix after __initcall_ is "fnname" + "level" concatenated.
-         * Parse level from the known suffixes at the end. */
-        suffix = name + 11;  /* skip "__initcall_" */
-        ordinal = tp_initcall_level_ordinal(suffix);
-        if (ordinal < 0) {
-            if (link_debug)
-                fprintf(stderr, "[INITCALL] skipping %s (unknown level)\n", name);
-            continue;
-        }
-
-        /* Read the function pointer value from the image at the symbol address */
-        if (sym->st_shndx <= 0 || sym->st_shndx >= s1->nb_sections)
-            continue;
-        sym_addr = s1->sections[sym->st_shndx]->sh_addr + sym->st_value;
-        off = sym_addr - base_addr;
-        if (off + 4 > total_size)
-            continue;
-
-        fn_ptr = image[off] | (image[off+1] << 8) |
-                 (image[off+2] << 16) | (image[off+3] << 24);
-
-        if (fn_ptr == 0) {
-            fprintf(stderr, "ERROR: initcall %s resolved to a NULL function\n", name);
-            tcc_free(entries);
-            return -1;
-        }
-
-        entries[entry_count].fn_addr = fn_ptr;
-        entries[entry_count].ordinal = ordinal;
-        entries[entry_count].link_order = sym_addr;
-        entry_count++;
-
-        if (link_debug >= 2)
-            fprintf(stderr, "[INITCALL]   %s → fn=0x%08x ord=%d\n",
-                    name, fn_ptr, ordinal);
-    }
-
-    if (entry_count != layout->entry_count) {
-        fprintf(stderr,
-                "ERROR: initcall count changed across relocation (%d before, %d after)\n",
-                layout->entry_count, entry_count);
-        tcc_free(entries);
-        return -1;
-    }
-
-    /* Sort by level, preserving original link order within each level. */
-    qsort(entries, entry_count, sizeof(entries[0]), initcall_entry_cmp);
-
-    /* Write sorted function pointers into __initcall_start[] */
-    for (i = 0; i < entry_count; i++) {
-        uint32_t slot_addr = layout->table_addr + i * 4;
-        if (tp_patch_u32_checked(image, base_addr, total_size, slot_addr,
-                                  entries[i].fn_addr, "__initcall_start[]") < 0) {
-            tcc_free(entries);
-            return -1;
-        }
-    }
-    tcc_free(entries);
-
-    fprintf(stderr, "[INITCALL] Populated %d entries\n", entry_count);
-    fprintf(stderr, "[INITCALL] __initcall_start=0x%08x __early_initcall_end=0x%08x "
-            "__initcall_end=0x%08x\n", layout->table_addr,
-            layout->early_end_addr, layout->end_addr);
-
-    return 0;
-}
+#include "transputer-linux.h"
 
 /*
  * Resolve the ELF init/fini array bounds, which this target never defines.
@@ -1089,130 +811,6 @@ static addr_t tp_resolve_array_bound_symbol(Section *symtab_sec, ElfW(Sym) *sym,
         }
     }
     return val;
-}
-
-static int tp_patch_linker_surrogates(uint8_t *image, size_t total_size,
-                                      uint32_t base_addr, TCCState *s1,
-                                      Section *symtab_sec, int link_debug)
-{
-    uint32_t stext_addr = 0xFFFFFFFF;
-    uint32_t etext_addr = 0;
-    uint32_t edata_addr = 0;
-    uint32_t end_addr = 0;
-    uint32_t fp_init_bootmem_node_addr = 0;
-    uint32_t fp_free_bootmem_node_addr = 0;
-    uint32_t fp_tp_vfs_caches_init_addr = 0;
-    uint32_t fp_reserve_bootmem_node_addr = 0;
-    uint32_t fp_alloc_bootmem_node_nopanic_addr = 0;
-    int si;
-    int ls;
-    struct {
-        const char *sym_name;
-        uint32_t value;
-    } patches[] = {
-        { "__linker_stext", 0 },
-        { "__linker_etext", 0 },
-        { "__linker_edata", 0 },
-        { "__linker_end",   0 },
-        { "__fp_init_bootmem_node", 0 },
-        { "__fp_free_bootmem_node", 0 },
-        { "__fp_reserve_bootmem_node", 0 },
-        { "__fp_alloc_bootmem_node_nopanic", 0 },
-        { "__fp_tp_vfs_caches_init", 0 },
-    };
-
-    for (si = 1; si < s1->nb_sections; si++) {
-        Section *ss = s1->sections[si];
-        uint32_t sec_size;
-        uint32_t sec_end;
-
-        if (!(ss->sh_flags & SHF_ALLOC))
-            continue;
-
-        sec_size = (ss->sh_type == SHT_NOBITS) ? ss->data_offset : ss->sh_size;
-        sec_end = ss->sh_addr + sec_size;
-        if (sec_end > end_addr)
-            end_addr = sec_end;
-        if (ss->sh_flags & SHF_EXECINSTR) {
-            if (ss->sh_addr < stext_addr)
-                stext_addr = ss->sh_addr;
-            if (sec_end > etext_addr)
-                etext_addr = sec_end;
-        }
-        /*
-         * edata must cover ALL non-BSS allocated sections — not just
-         * writable ones.  .rodata (read-only string literals, const data)
-         * is SHF_ALLOC but NOT SHF_WRITE.  If we only tracked SHF_WRITE
-         * sections, the BSS zeroing in head.S would start too early and
-         * wipe .rodata data including "proc", "sysfs", etc.
-         */
-        if (ss->sh_type != SHT_NOBITS) {
-            if (sec_end > edata_addr)
-                edata_addr = sec_end;
-        }
-    }
-
-    tp_find_symbol_addr(s1, symtab_sec, "init_bootmem_node", &fp_init_bootmem_node_addr);
-    tp_find_symbol_addr(s1, symtab_sec, "free_bootmem_node", &fp_free_bootmem_node_addr);
-    tp_find_symbol_addr(s1, symtab_sec, "reserve_bootmem_node", &fp_reserve_bootmem_node_addr);
-    tp_find_symbol_addr(s1, symtab_sec, "__alloc_bootmem_node_nopanic", &fp_alloc_bootmem_node_nopanic_addr);
-    tp_find_symbol_addr(s1, symtab_sec, "tp_vfs_caches_init_wrapper", &fp_tp_vfs_caches_init_addr);
-
-    patches[0].value = stext_addr;
-    patches[1].value = etext_addr;
-    patches[2].value = edata_addr;
-    patches[3].value = end_addr;
-    patches[4].value = fp_init_bootmem_node_addr;
-    patches[5].value = fp_free_bootmem_node_addr;
-    patches[6].value = fp_reserve_bootmem_node_addr;
-    patches[7].value = fp_alloc_bootmem_node_nopanic_addr;
-    patches[8].value = fp_tp_vfs_caches_init_addr;
-
-    for (ls = 0; ls < (int)(sizeof(patches) / sizeof(patches[0])); ls++) {
-        ElfW(Sym) *data_sym = find_sym_by_name(symtab_sec, patches[ls].sym_name);
-        Section *data_sec;
-        uint32_t data_addr;
-        uint32_t val = patches[ls].value;
-
-        if (!data_sym || data_sym->st_shndx <= 0 || data_sym->st_shndx >= s1->nb_sections)
-            continue;
-
-        data_sec = s1->sections[data_sym->st_shndx];
-        data_addr = data_sec->sh_addr + data_sym->st_value;
-
-        if (val == 0 && strncmp(patches[ls].sym_name, "__fp_", 5) == 0) {
-            fprintf(stderr, "WARNING: surrogate %s resolved to 0x00000000\n",
-                    patches[ls].sym_name);
-        }
-        if (tp_patch_u32_checked(image, base_addr, total_size, data_addr,
-                                 val, patches[ls].sym_name) < 0) {
-            return -1;
-        }
-        if (link_debug)
-            fprintf(stderr, "Data patched %s = 0x%08X\n", patches[ls].sym_name, val);
-    }
-
-    return 0;
-}
-
-static void tp_patch_optional_symbol_target(uint8_t *image, size_t total_size,
-                                            uint32_t base_addr, TCCState *s1,
-                                            Section *symtab_sec,
-                                            const char *load_point_name,
-                                            const char *target_name,
-                                            int link_debug)
-{
-    ElfW(Sym) *load_sym;
-    ElfW(Sym) *target_sym;
-
-    load_sym = find_sym_by_name(symtab_sec, load_point_name);
-    target_sym = find_sym_by_name(symtab_sec, target_name);
-    if (!load_sym || !target_sym)
-        return;
-
-    (void)tp_patch_verified_symbol_target(image, total_size, base_addr, s1,
-                                          symtab_sec, load_point_name,
-                                          target_name, 0, link_debug);
 }
 
 static int tp_find_boot_entry_point(TCCState *s1, Section *symtab_sec,
@@ -1435,7 +1033,7 @@ static void tp_audit_call_targets(TCCState *s1, Section *symtab_sec,
             size_t off;
             size_t pos;
 
-            if (rtype != R_TRANSPUTER_IPREL32)
+            if (rtype != R_TRANSPUTER_IPREL32 && rtype != R_TRANSPUTER_INSN)
                 continue;
 
             rsym = ELFW(R_SYM)(rel->r_info);
@@ -1443,6 +1041,14 @@ static void tp_audit_call_targets(TCCState *s1, Section *symtab_sec,
             expected_val = rsym_p->st_value;
             if (rsym_p->st_shndx > 0 && rsym_p->st_shndx < s1->nb_sections)
                 expected_val += s1->sections[rsym_p->st_shndx]->sh_addr;
+            if (rtype == R_TRANSPUTER_INSN) {
+                int op, addend;
+                if (tp_decode_instr_at(s->data, s->data_offset, rel->r_offset,
+                                       &op, &addend) != TP_ASM_SLOT
+                    || (op != TP_ENC_J && op != TP_ENC_CJ && op != TP_ENC_CALL))
+                    continue;
+                expected_val = (uint32_t)expected_val + (uint32_t)addend;
+            }
 
             call_addr = s->sh_addr + rel->r_offset;
             off = (size_t)(call_addr - base_addr);
@@ -1495,7 +1101,7 @@ static void tp_audit_call_targets(TCCState *s1, Section *symtab_sec,
 
 static int tp_reloc_symbol_repair_enabled(int type)
 {
-    const char *strict_env = tp_env("T4_STRICT_RELOCS");
+    const char *strict_env = tp_knob(TPK_T4_STRICT_RELOCS);
 
     if (strict_env && *strict_env)
         return 0;
@@ -1511,17 +1117,57 @@ static int tp_reloc_symbol_repair_enabled(int type)
 
 static int tp_ldc_abs_fallback_enabled(void)
 {
-    const char *strict_env = tp_env("T4_STRICT_LDC_ABS");
+    const char *strict_env = tp_knob(TPK_T4_STRICT_LDC_ABS);
     return !(strict_env && *strict_env);
 }
 
 static int tp_iprel_fallback_enabled(void)
 {
-    const char *strict_env = tp_env("T4_STRICT_IPREL");
+    const char *strict_env = tp_knob(TPK_T4_STRICT_IPREL);
     return !(strict_env && *strict_env);
 }
 
+struct tp_reloc_index {
+    int *heads;
+    int *next;
+    unsigned *bucket;
+    unsigned mask;
+};
+
+static unsigned tp_reloc_name_hash(const unsigned char *name)
+{
+    unsigned hash = 0;
+    while (*name)
+        hash = hash * 33 + *name++;
+    return hash;
+}
+
+/* Preserve symbol-table order within each hash bucket, including duplicate
+ * local names. The repair policy depends on both order and match count. */
+static void tp_reloc_index_init(struct tp_reloc_index *index, Section *symtab)
+{
+    ElfW(Sym) *syms = (ElfW(Sym) *)symtab->data;
+    int count = symtab->data_offset / sizeof(*syms);
+    unsigned buckets = 1;
+    int i;
+
+    while (buckets < (unsigned)count && buckets < (1u << 30))
+        buckets <<= 1;
+    index->mask = buckets - 1;
+    index->heads = tcc_mallocz(buckets * sizeof(*index->heads));
+    index->next = tcc_mallocz((size_t)count * sizeof(*index->next));
+    index->bucket = tcc_mallocz((size_t)count * sizeof(*index->bucket));
+    for (i = count - 1; i > 0; i--) {
+        const unsigned char *name = symtab->link->data + syms[i].st_name;
+        unsigned bucket = tp_reloc_name_hash(name) & index->mask;
+        index->bucket[i] = bucket;
+        index->next[i] = index->heads[bucket];
+        index->heads[bucket] = i;
+    }
+}
+
 static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
+                                    const struct tp_reloc_index *index,
                                     int type, ElfW(Sym) **sym_io,
                                     int *sym_index_io, addr_t *val_io,
                                     addr_t addr, int reloc_fix_debug)
@@ -1531,6 +1177,14 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
     if (!tp_reloc_symbol_repair_enabled(type))
         return;
 
+    /* If this is the bucket's only symbol, repair cannot choose a different
+     * definition. Keep the diagnostic path intact, including ambiguous or
+     * undefined local-symbol messages. */
+    if (!reloc_fix_debug &&
+        index->heads[index->bucket[*sym_index_io]] == *sym_index_io &&
+        !index->next[*sym_index_io])
+        return;
+
     if (sym->st_name) {
         const char *rel_name = (const char *)symtab_sec->link->data + sym->st_name;
         int sym_binding = ELFW(ST_BIND)(sym->st_info);
@@ -1538,7 +1192,6 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
         if (rel_name && rel_name[0] &&
             !(rel_name[0] == 'L' && rel_name[1] == '.') &&
             !(rel_name[0] == '.' && rel_name[1] == 'L')) {
-            int nb_syms_total = symtab_sec->data_offset / sizeof(ElfW(Sym));
             int best_idx = -1;
             addr_t best_val = 0;
             int best_type_match = 0;
@@ -1546,7 +1199,8 @@ static void tp_resolve_reloc_symbol(TCCState *s1, Section *symtab_sec,
             int want_type = (type == R_TRANSPUTER_IPREL32) ? STT_FUNC : STT_OBJECT;
             int j;
 
-            for (j = 1; j < nb_syms_total; j++) {
+            for (j = index->heads[index->bucket[*sym_index_io]];
+                 j; j = index->next[j]) {
                 ElfW(Sym) *cs = &((ElfW(Sym) *)symtab_sec->data)[j];
                 const char *cs_name;
                 addr_t cs_val;
@@ -1637,8 +1291,8 @@ static void tp_trace_reloc_window(Section *symtab_sec, ElfW(Sym) *sym,
     *reloc_dump_end_io = 0;
 
     if (!reloc_range_init) {
-        const char *start_env = link_trace ? getenv("T4_RELOC_RANGE_START") : NULL;
-        const char *end_env = link_trace ? getenv("T4_RELOC_RANGE_END") : NULL;
+        const char *start_env = link_trace ? tp_knob(TPK_T4_RELOC_RANGE_START) : NULL;
+        const char *end_env = link_trace ? tp_knob(TPK_T4_RELOC_RANGE_END) : NULL;
         reloc_range_init = 1;
         if (start_env && *start_env) {
             reloc_range_start = (uint32_t)strtoul(start_env, NULL, 0);
@@ -1673,22 +1327,6 @@ static void tp_trace_reloc_window(Section *symtab_sec, ElfW(Sym) *sym,
     }
 }
 
-static void tp_debug_reloc_near_start_kernel(Section *symtab_sec, ElfW(Sym) *sym,
-                                             uint32_t start_kernel_addr, addr_t addr,
-                                             int type, addr_t val, uint8_t *ptr,
-                                             int link_debug)
-{
-    if (start_kernel_addr > 0 && addr >= start_kernel_addr && addr < start_kernel_addr + 64) {
-        if (link_debug) {
-            fprintf(stderr, " !!! Relocation at 0x%08x affects start_kernel (offset +%d)\n",
-                    (unsigned int)addr, (int)(addr - start_kernel_addr));
-            fprintf(stderr, " Type: %d, Sym: %s, Value: 0x%08x, Before: %08x",
-                    type, tp_reloc_symbol_name(symtab_sec, sym),
-                    (unsigned int)val, read32le(ptr));
-        }
-    }
-}
-
 static const char *tp_reloc_symbol_name(Section *symtab_sec, ElfW(Sym) *sym)
 {
     Section *strsec;
@@ -1702,19 +1340,74 @@ static const char *tp_reloc_symbol_name(Section *symtab_sec, ElfW(Sym) *sym)
     return (const char *)strsec->data + sym->st_name;
 }
 
-/* Returns -1 for a branch whose target is out of its slot's reach. */
-static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
-                                      ElfW(Sym) *sym, uint8_t *image,
-                                      size_t total_size, uint32_t base_addr,
-                                      addr_t addr, addr_t val, int type,
-                                      int iprel_patch_trace, int iprel_patch_debug,
-                                      uint8_t *ptr)
+/* Required bytes at the relocation site. Old instruction slots are
+ * variable-width and their decoders must also check the end of the section. */
+ST_FUNC int tp_reloc_width(int type, int executable)
 {
     switch (type) {
-    case R_TRANSPUTER_32: {
+    case R_TRANSPUTER_NONE: return 0;
+    case R_TRANSPUTER_8: case R_TRANSPUTER_IPREL8: return 1;
+    case R_TRANSPUTER_16: case R_TRANSPUTER_IPREL16: return 2;
+    case R_TRANSPUTER_32: case R_TRANSPUTER_PC_RELATIVE: return 4;
+    case R_TRANSPUTER_IPREL32: case R_TRANSPUTER_LDC_ABS:
+        return executable ? 1 : 4;
+    case R_TRANSPUTER_INSN: return TP_ASM_SLOT;
+    default: return -1;
+    }
+}
+
+ST_FUNC int tp_data_layout_reloc(int type)
+{
+    return type == R_TRANSPUTER_8 || type == R_TRANSPUTER_16
+        || type == R_TRANSPUTER_IPREL8 || type == R_TRANSPUTER_IPREL16
+        || type == R_TRANSPUTER_PC_RELATIVE;
+}
+
+static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
+                                      ElfW(Sym) *sym, uint8_t *ptr,
+                                      size_t available, addr_t addr, addr_t val,
+                                      int type, int width, int iprel_patch_trace,
+                                      int iprel_patch_debug)
+{
+    TCCState *s1 = s->s1;
+    unsigned long pos = addr - s->sh_addr;
+    int patched;
+
+    switch (type) {
+    case R_TRANSPUTER_INSN: {
+        int op, addend;
+        uint32_t operand;
+
+        if (tp_decode_instr_at(ptr, TP_ASM_SLOT, 0, &op, &addend) != TP_ASM_SLOT
+            || op == TP_ENC_OPR)
+            return tcc_error_noabort("invalid instruction relocation at %s+0x%lx", s->name, pos);
+        operand = (uint32_t)val + (uint32_t)addend;
+        if (op == TP_ENC_J || op == TP_ENC_CALL || op == TP_ENC_CJ)
+            operand -= (uint32_t)addr + TP_ASM_SLOT;
+        tp_encode_asm_slot(ptr, op, (int32_t)operand);
+        break;
+    }
+    case R_TRANSPUTER_8: case R_TRANSPUTER_16:
+    case R_TRANSPUTER_IPREL8: case R_TRANSPUTER_IPREL16: {
+        int relative = type == R_TRANSPUTER_IPREL8 || type == R_TRANSPUTER_IPREL16;
+        int addend = width == 1 ? (int8_t)*ptr : (int16_t)read16le(ptr);
+        int32_t value = (uint32_t)val + (uint32_t)addend - (relative ? (uint32_t)addr : 0);
+        int high = 1 << (width * 8 - 1);
+
+        if (value < -high || value >= (relative ? high : 2 * high))
+            return tcc_error_noabort("%d-bit relocation overflow for '%s' at %s+0x%lx",
+                                     width * 8, tp_reloc_symbol_name(symtab_sec, sym),
+                                     s->name, pos);
+        if (width == 1)
+            *ptr = (uint8_t)value;
+        else
+            write16le(ptr, (uint16_t)value);
+        break;
+    }
+    case R_TRANSPUTER_32: case R_TRANSPUTER_PC_RELATIVE: {
         uint32_t old_val = read32le(ptr);
-        uint32_t new_val = old_val + val;
-        if (!(s->sh_flags & SHF_EXECINSTR) && tp_env_enabled("T4_DATA_RELOC_DEBUG")) {
+        uint32_t new_val = old_val + val - (type == R_TRANSPUTER_PC_RELATIVE ? addr : 0);
+        if (!(s->sh_flags & SHF_EXECINSTR) && tp_knob_on(TPK_T4_DATA_RELOC_DEBUG)) {
             fprintf(stderr, "R32_DATA: addr=0x%08x sym=%s old=0x%08x val=0x%08x new=0x%08x section=%s"
                     " shndx=%d st_value=0x%lx bind=%d type=%d\n",
                     (unsigned int)addr, tp_reloc_symbol_name(symtab_sec, sym),
@@ -1727,214 +1420,75 @@ static int tp_apply_single_relocation(Section *s, Section *symtab_sec,
     }
 
     case R_TRANSPUTER_IPREL32:
-        if (iprel_patch_trace) {
-            fprintf(stderr, "IPREL32_RELOC: addr=0x%lx val=0x%lx sh_flags=0x%x\n",
-                    (unsigned long)addr, (unsigned long)val, s->sh_flags);
-        }
-        if (iprel_patch_trace &&
-            addr >= base_addr + 0x1dc1d0 && addr <= base_addr + 0x1dc2c0) {
-            size_t off = (size_t)(addr - base_addr);
-            fprintf(stderr, "IPREL_RANGE: addr=0x%08x sym=%s val=0x%08x\n",
-                    (unsigned int)addr, tp_reloc_symbol_name(symtab_sec, sym),
-                    (unsigned int)val);
-            if (addr >= base_addr + 4 && off + 4 < total_size) {
-                fprintf(stderr,
-                        "IPREL_RANGE_BYTES: %02x %02x %02x %02x | %02x %02x %02x %02x\n",
-                        image[off - 4], image[off - 3], image[off - 2], image[off - 1],
-                        image[off], image[off + 1], image[off + 2], image[off + 3]);
-            }
-        }
-        if (s->sh_flags & SHF_EXECINSTR) {
-            int patched = tp_patch_iprel(image, total_size, base_addr, addr, val);
-            if (iprel_patch_debug) {
-                fprintf(stderr, "IPREL_PATCH_RESULT: addr=0x%lx patched=%d\n",
-                        (unsigned long)addr, patched);
-            }
-            if (patched < 0) {
-                fprintf(stderr, "error: '%s' (0x%08x) is out of reach of the "
-                        "branch at 0x%08x\n", tp_reloc_symbol_name(symtab_sec, sym),
-                        (unsigned int)val, (unsigned int)addr);
-                return -1;
-            }
-            if (!patched) {
-                static int fail_warned = 0;
-                static int fail_limit = -1;
-
-                if (fail_limit < 0) {
-                    const char *env = getenv("T4_IPREL_FAIL_LIMIT");
-                    fail_limit = env && *env ? atoi(env) : 16;
-                }
-                if (fail_warned < fail_limit) {
-                    fprintf(stderr,
-                            "IPREL_RELOC_FAIL: addr=0x%08x sym=%s val=0x%08x op=0x%02x section=%s\n",
-                            (unsigned int)addr, tp_reloc_symbol_name(symtab_sec, sym),
-                            (unsigned int)val,
-                            image[addr - base_addr], s->name);
-                    if (tp_env("T4_IPREL_FAIL_DUMP")) {
-                        size_t dump_off = (addr - base_addr);
-                        size_t dump_start = dump_off >= 8 ? dump_off - 8 : 0;
-                        size_t dump_end = dump_off + 8;
-                        if (dump_end >= total_size)
-                            dump_end = total_size - 1;
-                        fprintf(stderr, "IPREL_RELOC_BYTES:");
-                        for (size_t di = dump_start; di <= dump_end; di++)
-                            fprintf(stderr, " %02x", image[di]);
-                        fprintf(stderr, "\n");
-                    }
-                    fail_warned++;
-                }
-                if (tp_iprel_fallback_enabled())
-                    write32le(ptr, read32le(ptr) + (val - addr));
-            }
-        } else if (tp_iprel_fallback_enabled()) {
-            write32le(ptr, read32le(ptr) + (val - addr));
-        }
-        break;
-
     case R_TRANSPUTER_LDC_ABS:
         if (s->sh_flags & SHF_EXECINSTR) {
-            int patched = tp_patch_ldc_abs(image, total_size, base_addr, addr, val);
-            if (!patched && tp_ldc_abs_fallback_enabled())
-                write32le(ptr, read32le(ptr) + val);
-        } else if (tp_ldc_abs_fallback_enabled()) {
+            int op, placeholder;
+            int len = tp_decode_instr_at(ptr, available < 16 ? available : 16,
+                                         0, &op, &placeholder);
+            if (!len)
+                patched = 0;
+            else if (type == R_TRANSPUTER_IPREL32 && op != TP_ENC_LDC)
+                patched = tp_patch_iprel(ptr, len, op, addr, val);
+            else
+                patched = tp_patch_ldc_abs(ptr, len, op, addr, val);
+            if (type == R_TRANSPUTER_IPREL32 && (iprel_patch_trace || iprel_patch_debug))
+                fprintf(stderr, "IPREL_PATCH_RESULT: addr=0x%08x target=0x%08x width=%d patched=%d\n",
+                        (unsigned)addr, (unsigned)val, len, patched);
+            if (patched < 0)
+                return tcc_error_noabort("relocation overflow for '%s' in %d-byte slot at %s+0x%lx",
+                                         tp_reloc_symbol_name(symtab_sec, sym), len, s->name, pos);
+            if (!patched)
+                return tcc_error_noabort("cannot encode relocation %d for '%s' at %s+0x%lx",
+                                         type, tp_reloc_symbol_name(symtab_sec, sym), s->name, pos);
+        } else {
+            if (type == R_TRANSPUTER_IPREL32) {
+                if (!tp_iprel_fallback_enabled())
+                    return tcc_error_noabort("IP-relative data relocation at %s+0x%lx in strict mode",
+                                             s->name, pos);
+                val -= addr;
+            } else if (!tp_ldc_abs_fallback_enabled()) {
+                return tcc_error_noabort("LDC data relocation at %s+0x%lx in strict mode",
+                                         s->name, pos);
+            }
             write32le(ptr, read32le(ptr) + val);
         }
         break;
-
     default:
-        break;
+        return tcc_error_noabort("unsupported Transputer relocation %d at %s+0x%lx", type,
+                                 s->name, pos);
     }
     return 0;
 }
 
-static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_addr,
-                            uint32_t addr, uint32_t val);
-
-static int tp_patch_iprel(uint8_t *image, size_t total_size, uint32_t base_addr,
-                          uint32_t addr, uint32_t val)
+static int tp_patch_iprel(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val)
 {
-    static int warned = 0;
-    static int warn_limit = -1;
-    size_t off = (size_t)(addr - base_addr);
-    size_t op_off;
-    size_t start;
-    int nibbles;
-    int32_t imm;
-    int32_t base_pc;
-    uint8_t opcode;
-    const char *debug = tp_env("T4_IPREL_PATCH_DEBUG");
-    uint8_t new_insn[16];
-    int new_len;
+    uint8_t insn[16];
+    int len;
 
-    if (off >= total_size)
+    if (op != TP_ENC_J && op != TP_ENC_CALL && op != TP_ENC_CJ)
         return 0;
-
-    if (warn_limit < 0) {
-        const char *env = getenv("T4_IPREL_WARN_LIMIT");
-        warn_limit = env && *env ? atoi(env) : 32;
-    }
-
-    /* Scan forward past prefixes to find opcode byte */
-    op_off = off;
-    while (op_off < total_size && tp_is_prefix_byte(image[op_off]))
-        op_off++;
-    if (op_off >= total_size)
-        return 0;
-
-    opcode = image[op_off];
-    start = off;
-    nibbles = (int)(op_off - start) + 1;
-    if (nibbles <= 0 || nibbles > 16)
-        return 0;
-
-    /* LDC opcode: fall through to absolute patching */
-    if ((opcode & 0xF0) == 0x40) {
-        if (debug && *debug)
-            fprintf(stderr, "IPREL_LDC_ABS_FALLBACK: addr=0x%08x val=0x%08x\n", addr, val);
-        return tp_patch_ldc_abs(image, total_size, base_addr, addr, val);
-    }
-
-    /* Compute IP-relative offset */
-    base_pc = (int32_t)(base_addr + op_off);
-    switch (opcode & 0xF0) {
-    case 0x00: /* J */
-    case 0x90: /* CALL */
-    case 0xA0: /* CJ */
-        imm = (int32_t)val - (base_pc + 1);
-        break;
-    default:
-        imm = (int32_t)val - base_pc;
-        break;
-    }
-
-    if (debug && *debug)
-        fprintf(stderr, "IPREL_PATCH: addr=0x%08x val=0x%08x base_pc=0x%08x imm=%d nibbles=%d\n",
-                addr, val, base_pc, imm, nibbles);
-
-    /* Use unified encoder */
-    new_len = tp_encode_instr(new_insn, (opcode >> 4) & 0xF, imm);
-
-    if (new_len <= nibbles) {
-        /* Pad unused prefix slots with PFIX 0 (safe NOP, no timeslice) */
-        if (new_len < nibbles)
-            memset(&image[start], 0x20, nibbles - new_len);
-        /* Copy encoded instruction after padding */
-        memcpy(&image[start + nibbles - new_len], new_insn, new_len);
-    } else if ((opcode & 0xF0) == 0x90 && val == 0 && nibbles >= 2) {
-        /* A call to an unresolved symbol, which the kernel link tolerates
-         * (tp_apply_relocations).  Address 0 is out of reach of a 6-byte
-         * call slot, so go there with `ldc 0; gcall` instead: control lands
-         * at 0 just as the call would have sent it. */
-        memset(&image[start], 0x20, nibbles - 2);
-        image[start + nibbles - 2] = 0x40;          /* ldc 0 */
-        image[start + nibbles - 1] = 0xF6;          /* gcall */
+    len = tp_encode_instr(insn, op, (int32_t)(val - (addr + width)));
+    if (len <= width) {
+        memset(slot, 0x20, width - len);
+        memcpy(slot + width - len, insn, len);
+    } else if (op == TP_ENC_CALL && val == 0 && width >= 2) {
+        /* The default kernel link tolerates unresolved calls. Address zero
+         * is beyond the short slot's branch range but reachable by gcall. */
+        memset(slot, 0x20, width - 2);
+        slot[width - 2] = 0x40;
+        slot[width - 1] = 0xF6;
     } else {
-        if (warned < warn_limit) {
-            fprintf(stderr,
-                    "IPREL_PATCH_FAIL: addr=0x%08x val=0x%08x nibbles=%d needed=%d imm=0x%08x\n",
-                    addr, val, nibbles, new_len, (unsigned int)imm);
-            warned++;
-        }
-        /* Out of reach: an unpatched branch goes somewhere else at run time,
-         * so this must fail the link rather than fall back. */
         return -1;
-    }
-
-    if (debug && *debug) {
-        int j;
-        fprintf(stderr, "IPREL_PATCH_AFTER:");
-        for (j = 0; j < nibbles; j++)
-            fprintf(stderr, " %02x", image[start + j]);
-        fprintf(stderr, "\n");
     }
     return 1;
 }
 
-static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_addr,
-                            uint32_t addr, uint32_t val)
+static int tp_patch_ldc_abs(uint8_t *slot, int width, int op, uint32_t addr, uint32_t val)
 {
-    size_t off = (size_t)(addr - base_addr);
-    size_t op_off;
-    size_t start;
-    int nibbles;
-    uint8_t opcode;
     uint8_t new_insn[16];
     int new_len;
 
-    if (off >= total_size)
-        return 0;
-
-    /* Scan forward past prefixes to find opcode byte */
-    op_off = off;
-    while (op_off < total_size && tp_is_prefix_byte(image[op_off]))
-        op_off++;
-    if (op_off >= total_size)
-        return 0;
-
-    opcode = image[op_off];
-    start = off;
-    nibbles = (int)(op_off - start) + 1;
-    if (nibbles <= 0 || nibbles > 16)
+    if (op == TP_ENC_OPR || op == TP_ENC_J || op == TP_ENC_CALL || op == TP_ENC_CJ)
         return 0;
 
     /* LDPI optimization: replace LDC(absolute) with LDC(relative); LDPI
@@ -1943,10 +1497,10 @@ static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_add
      * Only for LDC opcodes, and only when savings are guaranteed.
      * Restricted to small relative offsets (±32KB) to avoid edge cases
      * with kernel high addresses (0x80000000+). */
-    if ((opcode & 0xF0) == 0x40) {
-        uint32_t pc_after_ldpi = base_addr + (uint32_t)start + (uint32_t)nibbles;
+    if (op == TP_ENC_LDC) {
+        uint32_t pc_after_ldpi = addr + width;
         int32_t rel_offset = (int32_t)(val - pc_after_ldpi);
-        int ldc_space = nibbles - 2;  /* bytes available for LDC (2 reserved for LDPI) */
+        int ldc_space = width - 2;  /* bytes available for LDC (2 reserved for LDPI) */
 
         /* Only attempt for small relative offsets (±32KB) */
         if (ldc_space >= 1 && rel_offset > -32768 && rel_offset < 32768) {
@@ -1955,37 +1509,24 @@ static int tp_patch_ldc_abs(uint8_t *image, size_t total_size, uint32_t base_add
             int ldpi_total = ldc_len + 2;  /* LDC bytes + 2 for LDPI */
 
             /* Only use LDPI if it's strictly shorter than absolute encoding */
-            int abs_len = tp_encode_instr(new_insn, (opcode >> 4) & 0xF, (int32_t)val);
-            if (ldpi_total < abs_len && ldpi_total <= nibbles) {
-                memset(&image[start], 0x20, nibbles);
-                memcpy(&image[start + ldc_space - ldc_len], ldpi_insn, ldc_len);
-                image[start + nibbles - 2] = 0x21;  /* PFIX 1 */
-                image[start + nibbles - 1] = 0xFB;  /* OPR B (LDPI) */
+            int abs_len = tp_encode_instr(new_insn, op, (int32_t)val);
+            if (ldpi_total < abs_len && ldpi_total <= width) {
+                memset(slot, 0x20, width);
+                memcpy(slot + ldc_space - ldc_len, ldpi_insn, ldc_len);
+                slot[width - 2] = 0x21;  /* PFIX 1 */
+                slot[width - 1] = 0xFB;  /* OPR B (LDPI) */
                 return 1;
             }
         }
     }
 
     /* Fallback: absolute LDC encoding */
-    new_len = tp_encode_instr(new_insn, (opcode >> 4) & 0xF, (int32_t)val);
+    new_len = tp_encode_instr(new_insn, op, (int32_t)val);
 
-    if (new_len <= nibbles) {
-        if (new_len < nibbles)
-            memset(&image[start], 0x20, nibbles - new_len);
-        memcpy(&image[start + nibbles - new_len], new_insn, new_len);
-    } else {
-        /* Placeholder too small for the patched value: leaving it unpatched
-         * silently corrupts the loaded address (a layout-sensitive
-         * miscompilation, since `val` shifts between builds). Make it LOUD. */
-        static int warned_ldc = 0;
-        if (warned_ldc < 32) {
-            fprintf(stderr,
-                    "LDC_ABS_PATCH_FAIL: addr=0x%08x val=0x%08x nibbles=%d needed=%d\n",
-                    addr, val, nibbles, new_len);
-            warned_ldc++;
-        }
-        return 0;
-    }
+    if (new_len > width)
+        return -1;
+    memset(slot, 0x20, width - new_len);
+    memcpy(slot + width - new_len, new_insn, new_len);
     return 1;
 }
 /* Returns 1 for a code relocation, 0 for a data relocation. For unknown
@@ -1996,7 +1537,9 @@ int code_reloc (int reloc_type)
          case R_TRANSPUTER_IPREL32:
          case R_TRANSPUTER_IPREL16:
          case R_TRANSPUTER_IPREL8:
+         case R_TRANSPUTER_INSN:
          case R_TRANSPUTER_LDC_ABS:
+         case R_TRANSPUTER_8:
          case R_TRANSPUTER_16:
          case R_TRANSPUTER_32:
          case R_TRANSPUTER_GOTPC32:
@@ -2030,6 +1573,7 @@ int gotplt_entry_type (int reloc_type)
         case R_TRANSPUTER_IPREL32:
         case R_TRANSPUTER_IPREL16:
         case R_TRANSPUTER_IPREL8:
+        case R_TRANSPUTER_INSN:
         case R_TRANSPUTER_LDC_ABS:
             return NO_GOTPLT_ENTRY;
 /* Bare-metal target: Simple address relocations are solved directly
@@ -2121,1097 +1665,7 @@ ST_FUNC void relocate_plt(TCCState *s1)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Identical code folding (ICF)                                        */
-/*                                                                     */
-/* TCC never inlines, so every translation unit that includes a        */
-/* `static inline` helper emits its own out-of-line copy.  Measured on */
-/* the 7.35 MB of STB_LOCAL function bodies in vmlinux.a that is 966   */
-/* copies of const_folio_flags, 1167 of __this_cpu_preempt_check and   */
-/* so on.  This pass runs after all input sections have been merged,   */
-/* finds byte-and-relocation-identical local functions inside a single */
-/* output section, keeps one copy and redirects the rest.              */
-/*                                                                     */
-/* Safety rules, in order of importance:                               */
-/*  - only STB_LOCAL STT_FUNC symbols fold.  A global symbol has an    */
-/*    address other objects may compare, and we cannot see them all.   */
-/*  - a function referenced by anything other than an IP-relative      */
-/*    relocation has had its address taken (R_TRANSPUTER_32 into a     */
-/*    dispatch table, R_TRANSPUTER_LDC_ABS into a register).  Two such */
-/*    functions must keep distinct addresses, so they never fold.      */
-/*  - two functions fold only when their relocations agree at the same */
-/*    relative offsets AND name the same post-merge symbol index.      */
-/*    Because tcc_load_object_file() unifies global symbols into one   */
-/*    index, an equal index means literally the same target; a local   */
-/*    target from another TU has a different index and simply blocks   */
-/*    the fold.  No name comparison is needed.                         */
-/*  - the walkback used by R_TRANSPUTER_LDC_ABS and the IPREL forms    */
-/*    scans forward from r_offset over prefix bytes of the very same   */
-/*    instruction, so it is unaffected by moving whole functions.  Call */
-/*    slots are 6 bytes (+/-16 MB, any target in an image) unless the  */
-/*    compiler narrowed one for a callee close behind it; such a       */
-/*    callee is kept like an address-taken one (tp_icf_fold), so no    */
-/*    redirected call can overflow its slot.                           */
-/* ------------------------------------------------------------------ */
-
-struct tp_icf_fn {
-    uint32_t start;
-    uint32_t size;
-    uint32_t hash;
-    int rel_first;      /* first entry in the section's sorted reloc index */
-    int rel_count;
-    int rep;            /* representative function, -1 when it is its own */
-    int ok;             /* still a fold candidate */
-};
-
-struct tp_icf_rem {
-    uint32_t start;     /* removed range, old offsets */
-    uint32_t size;
-    uint32_t rep_start; /* old offset of the surviving copy */
-    uint32_t before;    /* bytes removed by earlier ranges */
-};
-
-static ElfW_Rel *tp_icf_sort_rel;
-
-static int tp_icf_relidx_cmp(const void *a, const void *b)
-{
-    int ia = *(const int *)a, ib = *(const int *)b;
-    addr_t oa = tp_icf_sort_rel[ia].r_offset, ob = tp_icf_sort_rel[ib].r_offset;
-
-    if (oa < ob) return -1;
-    if (oa > ob) return 1;
-    return ia - ib;
-}
-
-static int tp_icf_start_cmp(const void *a, const void *b)
-{
-    const struct tp_icf_fn *fa = a, *fb = b;
-
-    if (fa->start < fb->start) return -1;
-    if (fa->start > fb->start) return 1;
-    if (fa->size < fb->size) return -1;
-    if (fa->size > fb->size) return 1;
-    return 0;
-}
-
-static struct tp_icf_fn *tp_icf_sort_fn;
-
-static int tp_icf_hash_cmp(const void *a, const void *b)
-{
-    const struct tp_icf_fn *fa = &tp_icf_sort_fn[*(const int *)a];
-    const struct tp_icf_fn *fb = &tp_icf_sort_fn[*(const int *)b];
-
-    if (fa->hash < fb->hash) return -1;
-    if (fa->hash > fb->hash) return 1;
-    if (fa->size < fb->size) return -1;
-    if (fa->size > fb->size) return 1;
-    if (fa->start < fb->start) return -1;
-    if (fa->start > fb->start) return 1;
-    return 0;
-}
-
-static int tp_icf_enabled(void)
-{
-    const char *e = getenv("T4_ICF");
-
-    if (e && *e)
-        return !(e[0] == '0' && e[1] == '\0');
-    return 1;
-}
-
-/* Index of the last function with start <= off, or -1. */
-static int tp_icf_find_fn(struct tp_icf_fn *fns, int n, uint32_t off)
-{
-    int lo = 0, hi = n - 1, res = -1;
-
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (fns[mid].start <= off) { res = mid; lo = mid + 1; }
-        else hi = mid - 1;
-    }
-    return res;
-}
-
-/* Bytes removed strictly before a kept offset. */
-static uint32_t tp_icf_removed_before(struct tp_icf_rem *rem, int n, uint32_t off)
-{
-    int lo = 0, hi = n - 1, res = -1;
-
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (rem[mid].start < off) { res = mid; lo = mid + 1; }
-        else hi = mid - 1;
-    }
-    if (res < 0)
-        return 0;
-    return rem[res].before + rem[res].size;
-}
-
-/* Index of the removed range containing off, or -1. */
-static int tp_icf_find_rem(struct tp_icf_rem *rem, int n, uint32_t off)
-{
-    int lo = 0, hi = n - 1, res = -1;
-
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (rem[mid].start <= off) { res = mid; lo = mid + 1; }
-        else hi = mid - 1;
-    }
-    if (res >= 0 && off < rem[res].start + rem[res].size)
-        return res;
-    return -1;
-}
-
-static uint32_t tp_icf_map(struct tp_icf_rem *rem, int nrem, uint32_t off)
-{
-    int k = tp_icf_find_rem(rem, nrem, off);
-
-    if (k >= 0)
-        off = rem[k].rep_start + (off - rem[k].start);
-    return off - tp_icf_removed_before(rem, nrem, off);
-}
-
-static uint32_t tp_icf_hash_fn(const uint8_t *body, uint32_t size,
-                               ElfW_Rel *rel, const int *relidx,
-                               int first, int count, uint32_t start)
-{
-    uint32_t h = 2166136261u;
-    uint32_t i;
-    int j;
-
-    h = (h ^ size) * 16777619u;
-    for (i = 0; i < size; i++)
-        h = (h ^ body[i]) * 16777619u;
-    for (j = 0; j < count; j++) {
-        ElfW_Rel *r = &rel[relidx[first + j]];
-        uint32_t v = (uint32_t)(r->r_offset - start);
-        uint32_t w = (uint32_t)r->r_info;
-        int b;
-        for (b = 0; b < 4; b++) h = (h ^ ((v >> (b * 8)) & 0xff)) * 16777619u;
-        for (b = 0; b < 4; b++) h = (h ^ ((w >> (b * 8)) & 0xff)) * 16777619u;
-    }
-    return h;
-}
-
-static int tp_icf_same(struct tp_icf_fn *a, struct tp_icf_fn *b,
-                       const uint8_t *data, ElfW_Rel *rel, const int *relidx)
-{
-    int j;
-
-    if (a->size != b->size || a->rel_count != b->rel_count)
-        return 0;
-    if (memcmp(data + a->start, data + b->start, a->size) != 0)
-        return 0;
-    for (j = 0; j < a->rel_count; j++) {
-        ElfW_Rel *ra = &rel[relidx[a->rel_first + j]];
-        ElfW_Rel *rb = &rel[relidx[b->rel_first + j]];
-        if (ra->r_offset - a->start != rb->r_offset - b->start)
-            return 0;
-        if (ra->r_info != rb->r_info)
-            return 0;
-    }
-    return 1;
-}
-
-static int tp_icf_addr_taken_type(int type)
-{
-    /* IP-relative forms are branches and calls; everything else that can
-     * reference a function materialises its address. */
-    switch (type) {
-    case R_TRANSPUTER_IPREL32:
-    case R_TRANSPUTER_IPREL16:
-    case R_TRANSPUTER_IPREL8:
-        return 0;
-    default:
-        return 1;
-    }
-}
-
-/* Fold one output section.  Returns the number of bytes removed. */
-static uint32_t tp_icf_fold_section(TCCState *s1, int seci,
-                                    const uint8_t *addr_taken,
-                                    int link_debug, int *out_folded)
-{
-    Section *s = s1->sections[seci];
-    Section *sr = s->reloc;
-    ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
-    int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
-    ElfW_Rel *rel = sr ? (ElfW_Rel *)sr->data : NULL;
-    int nrel = sr ? (int)(sr->data_offset / sizeof(ElfW_Rel)) : 0;
-    struct tp_icf_fn *fns = NULL;
-    struct tp_icf_rem *rem = NULL;
-    int *relidx = NULL, *order = NULL;
-    int nfn = 0, nrem = 0, i, k;
-    uint32_t removed = 0, size = (uint32_t)s->data_offset;
-    uint8_t *ndata = NULL;
-
-    if (size == 0 || s->data == NULL)
-        return 0;
-
-    /* 1. Candidate functions: local STT_FUNC, non-empty, in range. */
-    fns = tcc_malloc(sizeof(*fns) * (size_t)(nsym + 1));
-    for (i = 1; i < nsym; i++) {
-        ElfW(Sym) *sym = &syms[i];
-        if (sym->st_shndx != seci)
-            continue;
-        if (ELFW(ST_TYPE)(sym->st_info) != STT_FUNC)
-            continue;
-        if (ELFW(ST_BIND)(sym->st_info) != STB_LOCAL)
-            continue;
-        if (sym->st_size == 0 || sym->st_value + sym->st_size > size)
-            continue;
-        if (addr_taken[i])
-            continue;
-        fns[nfn].start = (uint32_t)sym->st_value;
-        fns[nfn].size = (uint32_t)sym->st_size;
-        fns[nfn].rep = -1;
-        fns[nfn].ok = 1;
-        fns[nfn].hash = 0;
-        fns[nfn].rel_first = 0;
-        fns[nfn].rel_count = 0;
-        nfn++;
-    }
-    if (nfn < 2)
-        goto done;
-    qsort(fns, (size_t)nfn, sizeof(*fns), tp_icf_start_cmp);
-
-    /* Collapse aliases (several local names on one body) and reject any
-     * pair that overlaps or disagrees about the body length. */
-    k = 0;
-    for (i = 1; i < nfn; i++) {
-        if (fns[i].start == fns[k].start) {
-            if (fns[i].size != fns[k].size)
-                fns[k].ok = 0;
-            continue;
-        }
-        if (fns[i].start < fns[k].start + fns[k].size) {
-            fns[k].ok = 0;   /* overlapping bodies: leave both alone */
-            fns[i].ok = 0;
-        }
-        fns[++k] = fns[i];
-    }
-    nfn = k + 1;
-
-    /* 2. Any other symbol landing on or inside a body disqualifies it: a
-     * global alias must keep its address, and an interior label means the
-     * body is entered from somewhere we cannot see. */
-    for (i = 1; i < nsym; i++) {
-        ElfW(Sym) *sym = &syms[i];
-        int f;
-        if (sym->st_shndx != seci)
-            continue;
-        f = tp_icf_find_fn(fns, nfn, (uint32_t)sym->st_value);
-        if (f < 0 || sym->st_value >= fns[f].start + fns[f].size)
-            continue;
-        if (sym->st_value != fns[f].start) {
-            fns[f].ok = 0;
-            continue;
-        }
-        if (ELFW(ST_TYPE)(sym->st_info) != STT_FUNC ||
-            ELFW(ST_BIND)(sym->st_info) != STB_LOCAL ||
-            sym->st_size != fns[f].size || addr_taken[i])
-            fns[f].ok = 0;
-    }
-
-    /* 3. Attach relocations. */
-    if (nrel > 0) {
-        relidx = tcc_malloc(sizeof(int) * (size_t)nrel);
-        for (i = 0; i < nrel; i++)
-            relidx[i] = i;
-        tp_icf_sort_rel = rel;
-        qsort(relidx, (size_t)nrel, sizeof(int), tp_icf_relidx_cmp);
-        k = 0;
-        for (i = 0; i < nfn; i++) {
-            int c = 0;
-            while (k < nrel && rel[relidx[k]].r_offset < fns[i].start)
-                k++;
-            fns[i].rel_first = k;
-            while (k + c < nrel &&
-                   rel[relidx[k + c]].r_offset < fns[i].start + fns[i].size)
-                c++;
-            fns[i].rel_count = c;
-        }
-    }
-
-    /* 4. Hash and group. */
-    for (i = 0; i < nfn; i++) {
-        if (!fns[i].ok)
-            continue;
-        fns[i].hash = tp_icf_hash_fn(s->data + fns[i].start, fns[i].size,
-                                     rel, relidx, fns[i].rel_first,
-                                     fns[i].rel_count, fns[i].start);
-    }
-    order = tcc_malloc(sizeof(int) * (size_t)nfn);
-    for (i = 0; i < nfn; i++)
-        order[i] = i;
-    tp_icf_sort_fn = fns;
-    qsort(order, (size_t)nfn, sizeof(int), tp_icf_hash_cmp);
-    for (i = 0; i < nfn; ) {
-        int j = i;
-        while (j < nfn && fns[order[j]].hash == fns[order[i]].hash &&
-               fns[order[j]].size == fns[order[i]].size)
-            j++;
-        /* Equal hash and length: confirm byte-for-byte before folding. */
-        for (k = i; k < j; k++) {
-            int a = order[k], m;
-            if (!fns[a].ok || fns[a].rep >= 0)
-                continue;
-            for (m = k + 1; m < j; m++) {
-                int b = order[m];
-                if (!fns[b].ok || fns[b].rep >= 0)
-                    continue;
-                if (tp_icf_same(&fns[a], &fns[b], s->data, rel, relidx))
-                    fns[b].rep = a;
-            }
-        }
-        i = j;
-    }
-
-    /* 5. Removal plan, in address order. */
-    rem = tcc_malloc(sizeof(*rem) * (size_t)nfn);
-    for (i = 0; i < nfn; i++) {
-        if (fns[i].rep < 0)
-            continue;
-        rem[nrem].start = fns[i].start;
-        rem[nrem].size = fns[i].size;
-        rem[nrem].rep_start = fns[fns[i].rep].start;
-        rem[nrem].before = removed;
-        removed += fns[i].size;
-        nrem++;
-    }
-    if (nrem == 0) {
-        removed = 0;
-        goto done;
-    }
-
-    /* 6. Rewrite the section, then every symbol value and relocation
-     * offset that referred to it. */
-    ndata = tcc_malloc(size - removed ? size - removed : 1);
-    {
-        uint32_t src = 0, dst = 0;
-        for (i = 0; i < nrem; i++) {
-            uint32_t n = rem[i].start - src;
-            memcpy(ndata + dst, s->data + src, n);
-            dst += n;
-            src = rem[i].start + rem[i].size;
-        }
-        memcpy(ndata + dst, s->data + src, size - src);
-    }
-    for (i = 1; i < nsym; i++) {
-        if (syms[i].st_shndx != seci)
-            continue;
-        syms[i].st_value = tp_icf_map(rem, nrem, (uint32_t)syms[i].st_value);
-    }
-    if (nrel > 0) {
-        int w = 0;
-        for (i = 0; i < nrel; i++) {
-            uint32_t off = (uint32_t)rel[i].r_offset;
-            if (tp_icf_find_rem(rem, nrem, off) >= 0)
-                continue;   /* the bytes it patched are gone */
-            rel[w] = rel[i];
-            rel[w].r_offset = off - tp_icf_removed_before(rem, nrem, off);
-            w++;
-        }
-        sr->data_offset = (unsigned long)w * sizeof(ElfW_Rel);
-        sr->sh_size = sr->data_offset;
-    }
-    memcpy(s->data, ndata, size - removed);
-    s->data_offset = size - removed;
-    s->sh_size = s->data_offset;
-    *out_folded += nrem;
-    if (link_debug || tp_env_enabled("T4_ICF_STATS"))
-        fprintf(stderr, "  ICF %-16s %u -> %u bytes (%d bodies folded)\n",
-                s->name, size, size - removed, nrem);
-
-done:
-    tcc_free(ndata);
-    tcc_free(rem);
-    tcc_free(order);
-    tcc_free(relidx);
-    tcc_free(fns);
-    return removed;
-}
-
-static void tp_icf_fold(TCCState *s1, int link_debug)
-{
-    ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
-    int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
-    uint8_t *addr_taken;
-    uint8_t *sec_blocked;
-    uint32_t total = 0;
-    int folded = 0, i;
-
-    if (!tp_icf_enabled())
-        return;
-    addr_taken = tcc_mallocz((size_t)nsym + 1);
-    sec_blocked = tcc_mallocz((size_t)s1->nb_sections + 1);
-
-    /* One pass over every relocation in the image: note which symbols have
-     * their address materialised, and refuse to touch a section that is
-     * referenced through its section symbol (the addend then lives in the
-     * patched bytes, where we cannot rewrite it).
-     *
-     * A call slot narrower than the usual 6 bytes was sized by the compiler
-     * for a callee close behind it in the same section (tp_call_slot_width).
-     * Folding that callee away would send the call to the surviving copy,
-     * possibly in another object and out of the slot's reach, so treat it
-     * like an address-taken function: it keeps its body. */
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *ts = s1->sections[i];
-        Section *sr = ts->reloc;
-        ElfW_Rel *rel, *rel_end;
-        if (!sr || !sr->data || !strcmp(ts->name, ".note.tprelax"))
-            continue;           /* the list for tp_link_relax, not a use */
-        rel = (ElfW_Rel *)sr->data;
-        rel_end = (ElfW_Rel *)(sr->data + sr->data_offset);
-        for (; rel < rel_end; rel++) {
-            int type = ELFW(R_TYPE)(rel->r_info);
-            int si = (int)ELFW(R_SYM)(rel->r_info);
-            if (si <= 0 || si >= nsym)
-                continue;
-            if (ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION &&
-                syms[si].st_shndx > 0 && syms[si].st_shndx < s1->nb_sections)
-                sec_blocked[syms[si].st_shndx] = 1;
-            if (tp_icf_addr_taken_type(type))
-                addr_taken[si] = 1;
-            else if (type == R_TRANSPUTER_IPREL32 && ts->data) {
-                unsigned long w = rel->r_offset;
-                while (w < ts->data_offset && tp_is_prefix_byte(ts->data[w]))
-                    w++;
-                if (w + 1 - rel->r_offset < 6)
-                    addr_taken[si] = 1;
-            }
-        }
-    }
-
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *s = s1->sections[i];
-        if ((s->sh_flags & (SHF_ALLOC | SHF_EXECINSTR)) !=
-            (SHF_ALLOC | SHF_EXECINSTR))
-            continue;
-        if (s->sh_type == SHT_NOBITS || s->data_offset == 0 || !s->data)
-            continue;
-        if (sec_blocked[i]) {
-            if (link_debug)
-                fprintf(stderr, "  ICF %-16s skipped (section-symbol relocs)\n",
-                        s->name);
-            continue;
-        }
-        if (strcmp(s->name, ".text.start") == 0)
-            continue;   /* boot trampoline: layout is contractual */
-        total += tp_icf_fold_section(s1, i, addr_taken, link_debug, &folded);
-    }
-    if (total && (link_debug || tp_env_enabled("T4_ICF_STATS")))
-        fprintf(stderr, "transputer_simple_link: ICF folded %d duplicate "
-                "function bodies, %u bytes\n", folded, total);
-    tcc_free(sec_blocked);
-    tcc_free(addr_taken);
-}
-
-/* ------------------------------------------------------------------ */
-/* Call relaxation after ICF                                          */
-/*                                                                    */
-/* A call to another function, or forward in the same object, keeps   */
-/* its 6-byte slot through compilation: only at the link, once ICF    */
-/* has picked the copy a call reaches, is its distance known.  Within */
-/* one output section the distances are final before layout, so each  */
-/* call slot whose target is in the same section shrinks to the width */
-/* its displacement needs, and the section closes up.                 */
-/*                                                                    */
-/* Only code known to survive being taken apart may change: functions */
-/* the compiler listed in .note.tprelax (no inline asm, no switch     */
-/* jump table, no debug info) that pass the checks in tp_lr_function. */
-/* In those, j/cj are re-encoded too, and pfix 0 no-ops between       */
-/* instructions go.  Everything else in the section - assembler code, */
-/* the other compiled functions - is a block that moves as a whole    */
-/* and keeps its offset modulo the section alignment, so its internal */
-/* IP-relative references and its .align padding stay valid.          */
-/* ------------------------------------------------------------------ */
-
-enum { TP_LR_FIXED, TP_LR_NOP, TP_LR_BRANCH, TP_LR_BLOCK };
-
-struct tp_lr_item {
-    uint32_t old_off, old_len;
-    uint32_t new_off, new_len;      /* new_off: past any block padding */
-    uint32_t target;                /* TP_LR_BRANCH: old offset */
-    uint8_t kind, opcode;
-};
-
-struct tp_lr {
-    struct tp_lr_item *it;
-    int n, cap;
-    const uint8_t *data;
-    uint32_t size;
-    const int *rel_at;          /* index of the relocation at an offset */
-    const int32_t *call_to;     /* per relocation: same-section target */
-    const uint8_t *sym_at;      /* a symbol is defined at this offset */
-    const uint8_t *ref_in;      /* data refers to sym+addend here */
-};
-
-static struct tp_lr_item *tp_lr_add(struct tp_lr *lr, int kind,
-                                    uint32_t off, uint32_t len)
-{
-    struct tp_lr_item *it;
-
-    if (lr->n == lr->cap) {
-        lr->cap = lr->cap ? lr->cap * 2 : 1024;
-        lr->it = tcc_realloc(lr->it, sizeof(*lr->it) * (size_t)lr->cap);
-    }
-    it = &lr->it[lr->n++];
-    memset(it, 0, sizeof(*it));
-    it->kind = (uint8_t)kind;
-    it->old_off = off;
-    it->old_len = it->new_len = len;
-    return it;
-}
-
-/* Index of the item starting at old offset `off` among it[lo..hi), or -1. */
-static int tp_lr_find(const struct tp_lr_item *it, int lo, int hi, uint32_t off)
-{
-    int end = hi;
-
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (it[mid].old_off < off)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo < end && it[lo].old_off == off ? lo : -1;
-}
-
-/* Decode the function at [start, end) into items.  Returns 0, leaving no
- * items behind, when it cannot be taken apart safely. */
-static int tp_lr_function(struct tp_lr *lr, uint32_t start, uint32_t end)
-{
-    const uint8_t *data = lr->data;
-    int first = lr->n, i;
-    uint32_t p = start, k;
-    int prev_ldc = -1;          /* operand of an immediately preceding ldc */
-    struct { uint32_t from, to; } *spans = NULL;
-    int nspans = 0;
-
-    while (p < end) {
-        int r = lr->rel_at[p], op, opd, len;
-        struct tp_lr_item *it;
-
-        if (r != -1) {
-            /* A relocated placeholder: its prefixes and opcode, rewritten
-             * as a whole by tp_apply_relocations. */
-            uint32_t q = p;
-            while (q < end && tp_is_prefix_byte(data[q]))
-                q++;
-            if (q >= end)
-                goto bad;
-            for (k = p + 1; k <= q; k++)
-                if (lr->rel_at[k] != -1)
-                    goto bad;
-            it = tp_lr_add(lr, TP_LR_FIXED, p, q + 1 - p);
-            if (r >= 0 && lr->call_to[r] >= 0
-                && (data[q] >> 4) == TP_OP_CALL) {
-                it->kind = TP_LR_BRANCH;
-                it->opcode = TP_OP_CALL;
-                it->target = (uint32_t)lr->call_to[r];
-            }
-            prev_ldc = -1;
-            p = q + 1;
-            continue;
-        }
-        if (data[p] == ((TP_OP_PFIX << 4) | 0)) {
-            /* At an instruction boundary Oreg is 0: a no-op */
-            tp_lr_add(lr, TP_LR_NOP, p, 1);
-            p++;
-            continue;
-        }
-        len = tp_decode_instr_at(data, end, p, &op, &opd);
-        if (len == 0)
-            goto bad;
-        for (k = p + 1; k < p + (uint32_t)len; k++)
-            if (lr->rel_at[k] != -1)
-                goto bad;
-        it = tp_lr_add(lr, TP_LR_FIXED, p, (uint32_t)len);
-        if (op == TP_OP_J || op == TP_OP_CJ) {
-            int64_t t = (int64_t)p + len + opd;
-            if (t < start || t > end)
-                goto bad;
-            it->kind = TP_LR_BRANCH;
-            it->opcode = (uint8_t)op;
-            it->target = (uint32_t)t;
-        } else if (op == TP_OP_OPR && opd == TP_OPR_LDPI) {
-            /* `ldc d; ldpi` (an indirect call's return address): the d
-             * bytes after it must keep their length. */
-            if (prev_ldc < 0 || p + len + (uint32_t)prev_ldc > end)
-                goto bad;
-            spans = tcc_realloc(spans, sizeof(*spans) * (size_t)(nspans + 1));
-            spans[nspans].from = p + len;
-            spans[nspans].to = p + len + (uint32_t)prev_ldc;
-            nspans++;
-        } else if (op == TP_OP_OPR
-                   && (opd == TP_OPR_LEND || opd == TP_OPR_STARTP)) {
-            goto bad;           /* also IP-relative, with unknown reach */
-        }
-        prev_ldc = op == TP_OP_LDC ? opd : -1;
-        p += (uint32_t)len;
-    }
-
-    /* Branch targets, ldpi spans and symbols must sit on item starts;
-     * nothing may refer into the body with an addend. */
-    for (i = first; i < lr->n; i++) {
-        struct tp_lr_item *it = &lr->it[i];
-        if (it->kind == TP_LR_BRANCH && it->opcode != TP_OP_CALL
-            && it->target != end
-            && tp_lr_find(lr->it, first, lr->n, it->target) < 0)
-            goto bad;
-    }
-    for (k = start + 1; k < end; k++) {
-        if (lr->ref_in[k])
-            goto bad;
-        if (lr->sym_at[k] && tp_lr_find(lr->it, first, lr->n, k) < 0)
-            goto bad;
-    }
-    for (i = 0; i < nspans; i++) {
-        int a = tp_lr_find(lr->it, first, lr->n, spans[i].from);
-        int b = spans[i].to == end ? lr->n
-                : tp_lr_find(lr->it, first, lr->n, spans[i].to);
-        if (a < 0 || b < 0)
-            goto bad;
-        for (; a < b; a++) {
-            if (lr->it[a].kind == TP_LR_BRANCH)
-                goto bad;
-            lr->it[a].kind = TP_LR_FIXED;   /* keep the bytes as they are */
-        }
-    }
-    tcc_free(spans);
-    return 1;
-
-bad:
-    tcc_free(spans);
-    lr->n = first;
-    return 0;
-}
-
-/* Bytes between functions: padding between objects (0 or pfix 0, with
- * nothing defined or relocated in it) goes; anything else is a block. */
-static void tp_lr_gap(struct tp_lr *lr, uint32_t a, uint32_t b)
-{
-    uint32_t k;
-
-    for (k = a; k < b; k++)
-        if ((lr->data[k] != 0 && lr->data[k] != ((TP_OP_PFIX << 4) | 0))
-            || lr->rel_at[k] != -1 || lr->sym_at[k] || lr->ref_in[k])
-            break;
-    if (k < b) {
-        tp_lr_add(lr, TP_LR_BLOCK, a, b - a);
-        return;
-    }
-    for (k = a; k < b; k++)
-        tp_lr_add(lr, TP_LR_NOP, k, 1);
-}
-
-/* Place the items at their current lengths; a block keeps its offset
- * modulo `align`.  Returns the new size of the section. */
-static uint32_t tp_lr_layout(struct tp_lr *lr, uint32_t align)
-{
-    uint32_t off = 0;
-    int i;
-
-    for (i = 0; i < lr->n; i++) {
-        struct tp_lr_item *it = &lr->it[i];
-        if (it->kind == TP_LR_BLOCK)
-            off += (it->old_off - off) & (align - 1);
-        it->new_off = off;
-        off += it->new_len;
-    }
-    return off;
-}
-
-/* The new offset of old offset t under the current layout, or -1. */
-static int64_t tp_lr_newpos(const struct tp_lr *lr, uint32_t t, uint32_t total)
-{
-    const struct tp_lr_item *it = lr->it;
-    int lo = 0, hi = lr->n - 1, res = -1;
-
-    if (t == lr->size)
-        return total;
-    while (lo <= hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (it[mid].old_off <= t) {
-            res = mid;
-            lo = mid + 1;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    if (res < 0)
-        return -1;
-    if (t == it[res].old_off)
-        return it[res].new_off;
-    if ((it[res].kind == TP_LR_FIXED || it[res].kind == TP_LR_BLOCK)
-        && t < it[res].old_off + it[res].old_len)
-        return it[res].new_off + (t - it[res].old_off);
-    return -1;
-}
-
-/* Displacement of branch item i to its target, from the end of the item. */
-static int64_t tp_lr_disp(const struct tp_lr *lr, int i, uint32_t total)
-{
-    const struct tp_lr_item *it = &lr->it[i];
-
-    return tp_lr_newpos(lr, it->target, total)
-           - ((int64_t)it->new_off + it->new_len);
-}
-
-static int tp_lr_range_cmp(const void *a, const void *b)
-{
-    const uint32_t *ra = a, *rb = b;
-
-    if (ra[0] != rb[0])
-        return ra[0] < rb[0] ? -1 : 1;
-    if (ra[1] != rb[1])
-        return ra[1] < rb[1] ? -1 : 1;
-    return 0;
-}
-
-/* Relax one executable section.  Returns the bytes saved. */
-static uint32_t tp_lr_section(TCCState *s1, int seci, const uint8_t *marked,
-                              int *out_fns, int *out_kept)
-{
-    Section *s = s1->sections[seci];
-    Section *sr = s->reloc;
-    ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
-    int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
-    ElfW_Rel *rel = sr ? (ElfW_Rel *)sr->data : NULL;
-    int nrel = sr ? (int)(sr->data_offset / sizeof(ElfW_Rel)) : 0;
-    uint32_t size = (uint32_t)s->data_offset, align, total = 0, k;
-    struct tp_lr lr;
-    uint32_t (*fns)[2];
-    int nfn = 0, i, j, pass, ok = 0;
-    int *rel_at;
-    int32_t *call_to, *map = NULL;
-    uint8_t *sym_at, *ref_in, *out = NULL;
-
-    memset(&lr, 0, sizeof(lr));
-    align = s->sh_addralign > 1 ? (uint32_t)s->sh_addralign : 1;
-    rel_at = tcc_malloc(sizeof(int) * (size_t)(size + 1));
-    call_to = tcc_malloc(sizeof(int32_t) * (size_t)(nrel + 1));
-    sym_at = tcc_mallocz((size_t)size + 1);
-    ref_in = tcc_mallocz((size_t)size + 1);
-    for (k = 0; k <= size; k++)
-        rel_at[k] = -1;
-
-    /* Relocations here.  A call to a function defined in this section is a
-     * branch to it: tp_apply_relocations repairs a reference by name, but
-     * only ever away from an undefined or duplicated symbol. */
-    for (i = 0; i < nrel; i++) {
-        uint32_t o = (uint32_t)rel[i].r_offset;
-        int si = (int)ELFW(R_SYM)(rel[i].r_info);
-        call_to[i] = -1;
-        if (o >= size)
-            continue;
-        rel_at[o] = rel_at[o] == -1 ? i : -2;
-        if (ELFW(R_TYPE)(rel[i].r_info) == R_TRANSPUTER_IPREL32
-            && si > 0 && si < nsym && syms[si].st_shndx == seci
-            && syms[si].st_value < size)
-            call_to[i] = (int32_t)syms[si].st_value;
-    }
-
-    /* Symbols here, and data words pointing at sym+addend in here */
-    for (i = 1; i < nsym; i++)
-        if (syms[i].st_shndx == seci && syms[i].st_value <= size)
-            sym_at[syms[i].st_value] = 1;
-    for (j = 1; j < s1->nb_sections; j++) {
-        Section *ts = s1->sections[j];
-        ElfW_Rel *r, *r_end;
-        if (!ts->reloc || !ts->data || !(ts->sh_flags & SHF_ALLOC))
-            continue;
-        r_end = (ElfW_Rel *)(ts->reloc->data + ts->reloc->data_offset);
-        for (r = (ElfW_Rel *)ts->reloc->data; r < r_end; r++) {
-            int si = (int)ELFW(R_SYM)(r->r_info);
-            uint32_t a;
-            if (ELFW(R_TYPE)(r->r_info) != R_TRANSPUTER_32 || si <= 0
-                || si >= nsym || syms[si].st_shndx != seci
-                || r->r_offset + 4 > ts->data_offset)
-                continue;
-            a = read32le(ts->data + r->r_offset);
-            if (a && syms[si].st_value + a < size)
-                ref_in[syms[si].st_value + a] = 1;
-        }
-    }
-
-    /* The functions that may be taken apart, in address order */
-    fns = tcc_malloc(sizeof(*fns) * (size_t)(nsym + 1));
-    for (i = 1; i < nsym; i++) {
-        ElfW(Sym) *sym = &syms[i];
-        if (marked[i] && sym->st_shndx == seci
-            && ELFW(ST_TYPE)(sym->st_info) == STT_FUNC && sym->st_size
-            && sym->st_value + sym->st_size <= size) {
-            fns[nfn][0] = (uint32_t)sym->st_value;
-            fns[nfn][1] = (uint32_t)(sym->st_value + sym->st_size);
-            nfn++;
-        }
-    }
-    qsort(fns, (size_t)nfn, sizeof(*fns), tp_lr_range_cmp);
-    for (i = 0, j = 0; i < nfn; i++) {
-        if (j && fns[i][0] == fns[j - 1][0] && fns[i][1] == fns[j - 1][1])
-            continue;                       /* an alias */
-        if (j && fns[i][0] < fns[j - 1][1]) {
-            fns[j - 1][1] = fns[j - 1][0];  /* overlap: neither */
-            continue;
-        }
-        fns[j][0] = fns[i][0];
-        fns[j][1] = fns[i][1];
-        j++;
-    }
-    nfn = j;
-
-    /* Items, in address order */
-    lr.data = s->data;
-    lr.size = size;
-    lr.rel_at = rel_at;
-    lr.call_to = call_to;
-    lr.sym_at = sym_at;
-    lr.ref_in = ref_in;
-    k = 0;
-    for (i = 0; i < nfn; i++) {
-        if (fns[i][1] == fns[i][0])
-            continue;
-        if (fns[i][0] > k)
-            tp_lr_gap(&lr, k, fns[i][0]);
-        if (tp_lr_function(&lr, fns[i][0], fns[i][1])) {
-            (*out_fns)++;
-        } else {
-            tp_lr_add(&lr, TP_LR_BLOCK, fns[i][0], fns[i][1] - fns[i][0]);
-            (*out_kept)++;
-        }
-        k = fns[i][1];
-    }
-    if (k < size)
-        tp_lr_gap(&lr, k, size);
-
-    /* A call whose target is inside a re-encoded instruction stays put */
-    total = tp_lr_layout(&lr, align);
-    for (i = 0; i < lr.n; i++)
-        if (lr.it[i].kind == TP_LR_BRANCH
-            && tp_lr_newpos(&lr, lr.it[i].target, total) < 0)
-            lr.it[i].kind = TP_LR_FIXED;
-
-    /* Shrink while anything does.  Then, since the padding in front of a
-     * block can grow as the code before it shrinks, widen whatever no
-     * longer fits until nothing needs to. */
-    for (pass = 0; pass < 32; pass++) {
-        int changed = 0;
-        total = tp_lr_layout(&lr, align);
-        for (i = 0; i < lr.n; i++) {
-            struct tp_lr_item *it = &lr.it[i];
-            uint32_t want = it->new_len;
-            if (it->kind == TP_LR_NOP) {
-                want = 0;
-            } else if (it->kind == TP_LR_BRANCH) {
-                int64_t t = tp_lr_newpos(&lr, it->target, total);
-                while (want > 1
-                       && tp_encode_len(it->opcode,
-                              (int)(t - ((int64_t)it->new_off + want - 1)))
-                          <= (int)want - 1)
-                    want--;
-            }
-            if (want < it->new_len) {
-                it->new_len = want;
-                changed = 1;
-            }
-        }
-        if (!changed)
-            break;
-    }
-    for (pass = 0; pass < 64; pass++) {
-        int changed = 0;
-        total = tp_lr_layout(&lr, align);
-        for (i = 0; i < lr.n; i++) {
-            struct tp_lr_item *it = &lr.it[i];
-            int need;
-            if (it->kind != TP_LR_BRANCH)
-                continue;
-            need = tp_encode_len(it->opcode, (int)tp_lr_disp(&lr, i, total));
-            if (need > (int)it->new_len) {
-                it->new_len = (uint32_t)need;
-                changed = 1;
-            }
-        }
-        if (!changed)
-            break;
-    }
-    if (pass == 64 || total >= size)
-        goto done;
-
-    /* Emit, and map every old offset something can refer to */
-    out = tcc_malloc(total);
-    memset(out, (TP_OP_PFIX << 4) | 0, total);
-    map = tcc_malloc(sizeof(int32_t) * (size_t)(size + 1));
-    for (k = 0; k <= size; k++)
-        map[k] = -1;
-    for (i = 0; i < lr.n; i++) {
-        struct tp_lr_item *it = &lr.it[i];
-        map[it->old_off] = (int32_t)it->new_off;
-        if (it->kind == TP_LR_BRANCH) {
-            uint8_t buf[16];
-            int len = tp_encode_instr(buf, it->opcode,
-                                      (int)tp_lr_disp(&lr, i, total));
-            if (len > (int)it->new_len)
-                goto done;
-            memcpy(out + it->new_off + it->new_len - len, buf, len);
-        } else if (it->kind != TP_LR_NOP) {
-            memcpy(out + it->new_off, s->data + it->old_off, it->old_len);
-            for (k = 1; k < it->old_len; k++)
-                map[it->old_off + k] = (int32_t)(it->new_off + k);
-        }
-    }
-    map[size] = (int32_t)total;
-    for (i = 0; i < nrel; i++)
-        if (rel[i].r_offset < size && map[rel[i].r_offset] < 0)
-            goto done;
-    for (i = 1; i < nsym; i++)
-        if (syms[i].st_shndx == seci
-            && (syms[i].st_value > size || map[syms[i].st_value] < 0))
-            goto done;
-
-    /* Commit */
-    for (i = 0; i < nrel; i++)
-        if (rel[i].r_offset < size)
-            rel[i].r_offset = (uint32_t)map[rel[i].r_offset];
-    for (i = 1; i < nsym; i++) {
-        ElfW(Sym) *sym = &syms[i];
-        uint32_t v, e;
-        if (sym->st_shndx != seci)
-            continue;
-        v = (uint32_t)sym->st_value;
-        e = v + (uint32_t)sym->st_size;
-        if (sym->st_size && e <= size && map[e] >= 0)
-            sym->st_size = (uint32_t)(map[e] - map[v]);
-        sym->st_value = (uint32_t)map[v];
-    }
-    memcpy(s->data, out, total);
-    s->data_offset = total;
-    s->sh_size = total;
-    ok = 1;
-
-done:
-    tcc_free(out);
-    tcc_free(map);
-    tcc_free(lr.it);
-    tcc_free(fns);
-    tcc_free(ref_in);
-    tcc_free(sym_at);
-    tcc_free(call_to);
-    tcc_free(rel_at);
-    return ok ? size - total : 0;
-}
-
-static void tp_link_relax(TCCState *s1, int link_debug)
-{
-    ElfW(Sym) *syms = (ElfW(Sym) *)symtab_section->data;
-    int nsym = (int)(symtab_section->data_offset / sizeof(ElfW(Sym)));
-    const char *e = tp_env("T4_LINK_RELAX");
-    uint8_t *marked, *sec_blocked;
-    Section *list = NULL;
-    uint32_t saved = 0;
-    int i, fns = 0, kept = 0;
-
-    if (e && e[0] == '0' && e[1] == '\0')
-        return;
-    for (i = 1; i < s1->nb_sections; i++)
-        if (!strcmp(s1->sections[i]->name, ".note.tprelax"))
-            list = s1->sections[i];
-    if (!list || !list->reloc)
-        return;
-
-    marked = tcc_mallocz((size_t)nsym + 1);
-    sec_blocked = tcc_mallocz((size_t)s1->nb_sections + 1);
-    for (i = 0; i < (int)(list->reloc->data_offset / sizeof(ElfW_Rel)); i++) {
-        int si = (int)ELFW(R_SYM)(((ElfW_Rel *)list->reloc->data)[i].r_info);
-        if (si > 0 && si < nsym)
-            marked[si] = 1;
-    }
-    /* As for ICF: a section referenced through its section symbol keeps
-     * its offsets, since the addend lives in the referring bytes. */
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *sr = s1->sections[i]->reloc;
-        ElfW_Rel *r, *r_end;
-        if (!sr || !sr->data)
-            continue;
-        r_end = (ElfW_Rel *)(sr->data + sr->data_offset);
-        for (r = (ElfW_Rel *)sr->data; r < r_end; r++) {
-            int si = (int)ELFW(R_SYM)(r->r_info);
-            if (si > 0 && si < nsym
-                && ELFW(ST_TYPE)(syms[si].st_info) == STT_SECTION
-                && syms[si].st_shndx > 0
-                && syms[si].st_shndx < s1->nb_sections)
-                sec_blocked[syms[si].st_shndx] = 1;
-        }
-    }
-
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *s = s1->sections[i];
-        uint32_t before = (uint32_t)s->data_offset, n;
-        if ((s->sh_flags & (SHF_ALLOC | SHF_EXECINSTR))
-            != (SHF_ALLOC | SHF_EXECINSTR)
-            || s->sh_type == SHT_NOBITS || !s->data || !before
-            || sec_blocked[i] || !strcmp(s->name, ".text.start"))
-            continue;
-        n = tp_lr_section(s1, i, marked, &fns, &kept);
-        saved += n;
-        if (n && (link_debug || tp_env_enabled("T4_RELAX_STATS")))
-            fprintf(stderr, "  relax %-16s %u -> %u bytes\n", s->name,
-                    before, before - n);
-    }
-    if (link_debug || tp_env_enabled("T4_RELAX_STATS"))
-        fprintf(stderr, "transputer_simple_link: relaxed %d functions "
-                "(%d kept whole), %u bytes\n", fns, kept, saved);
-    tcc_free(sec_blocked);
-    tcc_free(marked);
-}
-
-static void tp_optimize_code_sections(TCCState *s1, int link_debug)
-{
-    int i;
-
-    if (link_debug)
-        fprintf(stderr, "transputer_simple_link: Optimizing code sections...\n");
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *s = s1->sections[i];
-        if ((s->sh_flags & (SHF_ALLOC | SHF_EXECINSTR)) == (SHF_ALLOC | SHF_EXECINSTR) &&
-            s->data_offset > 0 && s->data != NULL) {
-            if (link_debug) {
-                fprintf(stderr, " Optimizing section: %s (size=%lu bytes)\n",
-                        s->name, (unsigned long)s->data_offset);
-            }
-            transputer_peephole_optimize(s1, s);
-        }
-    }
-    if (link_debug)
-        fprintf(stderr, "transputer_simple_link: Optimization complete\n");
-}
-
-/* Linux compares scheduler-class pointers directly, so these input sections
- * must be contiguous and in strict priority order.  A normal GNU ld script
- * provides SCHED_DATA for this; the Transputer simple linker performs its own
- * layout and therefore has to preserve the same contract explicitly. */
-static int tp_sched_class_rank(const char *name)
-{
-    static const char *const ordered[] = {
-        "__stop_sched_class",
-        "__dl_sched_class",
-        "__rt_sched_class",
-        "__fair_sched_class",
-        "__ext_sched_class",
-        "__idle_sched_class",
-    };
-    int i;
-
-    for (i = 0; i < (int)(sizeof(ordered) / sizeof(ordered[0])); i++) {
-        if (strcmp(name, ordered[i]) == 0)
-            return i;
-    }
-    return -1;
-}
+#include "transputer-linkopt.h"
 
 static void tp_layout_alloc_section(Section *s, uint32_t *current_addr,
                                     uint32_t base_addr, uint32_t *total_size,
@@ -3231,11 +1685,24 @@ static void tp_layout_alloc_section(Section *s, uint32_t *current_addr,
     }
 }
 
+static int tp_is_linux_init_section(const Section *s)
+{
+    return !strncmp(s->name, ".init.", 6) ||
+           !strncmp(s->name, ".initcall", 9) ||
+           !strcmp(s->name, ".con_initcall.init");
+}
+
+static int tp_is_percpu_section(const Section *s)
+{
+    return !strcmp(s->name, ".data..percpu") ||
+           !strncmp(s->name, ".data..percpu.", 14);
+}
+
 static int tp_layout_sections(TCCState *s1, uint32_t base_addr,
                               uint32_t *out_total_size,
                               uint32_t *out_total_memsz,
                               uint32_t *out_end_addr,
-                              int xip_mode,
+                              int xip_mode, int linux_layout,
                               uint32_t *out_text_end,
                               uint32_t *out_data_start,
                               int link_debug)
@@ -3276,7 +1743,8 @@ static int tp_layout_sections(TCCState *s1, uint32_t base_addr,
 
         if (strcmp(s->name, ".text.start") == 0 || s->sh_type == SHT_NOBITS ||
             tp_sched_class_rank(s->name) >= 0 ||
-            strcmp(s->name, ".init.setup") == 0)
+            strcmp(s->name, ".init.setup") == 0 ||
+            (linux_layout && (tp_is_linux_init_section(s) || tp_is_percpu_section(s))))
             continue;
 		if (xip_mode && !(s->sh_flags & SHF_EXECINSTR))
 			continue;
@@ -3320,10 +1788,34 @@ static int tp_layout_sections(TCCState *s1, uint32_t base_addr,
 		*out_data_start = 0;
 	}
 
+    /* Linux copies this template into each CPU's unit. Preserve section
+     * alignment, keep subsections together, and page-align the first byte. */
+    if (linux_layout) {
+        int first = 1;
+        for (i = 1; i < s1->nb_sections; i++) {
+            Section *s = s1->sections[i];
+            if (!(s->sh_flags & SHF_ALLOC) || !tp_is_percpu_section(s))
+                continue;
+            /* The boot BSS range must not encompass this template. Give
+             * zero-fill inputs real image bytes just like initialized ones. */
+            if (s->sh_type == SHT_NOBITS) {
+                section_realloc(s, s->data_offset);
+                memset(s->data, 0, s->data_offset);
+                s->sh_type = SHT_PROGBITS;
+            }
+            if (first) {
+                current_addr = (current_addr + 4095u) & ~4095u;
+                first = 0;
+            }
+            tp_layout_alloc_section(s, &current_addr, base_addr, &total_size,
+                                    link_debug);
+        }
+    }
+
     /* Keep every .init.setup input contiguous so __setup_start..__setup_end
      * can walk obs_kernel_param records (TCC does not honour vmlinux.lds
      * INIT_SETUP). Same contract as SCHED_DATA below. */
-    for (i = 1; i < s1->nb_sections; i++) {
+    for (i = 1; !linux_layout && i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
 
         if (strcmp(s->name, ".init.setup") != 0 ||
@@ -3351,12 +1843,25 @@ static int tp_layout_sections(TCCState *s1, uint32_t base_addr,
         }
     }
 
+    if (linux_layout) {
+        /* Linux's init bounds must not include unrelated live data. */
+        for (i = 1; i < s1->nb_sections; i++) {
+            Section *s = s1->sections[i];
+
+            if ((s->sh_flags & SHF_ALLOC) && s->sh_type != SHT_NOBITS &&
+                tp_is_linux_init_section(s))
+                tp_layout_alloc_section(s, &current_addr, base_addr,
+                                        &total_size, link_debug);
+        }
+    }
+
     total_memsz = total_size;
     for (i = 1; i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
         uint32_t section_size;
 
-        if (s->sh_type != SHT_NOBITS || !(s->sh_flags & SHF_ALLOC))
+        if (s->sh_type != SHT_NOBITS || !(s->sh_flags & SHF_ALLOC) ||
+            (linux_layout && tp_is_percpu_section(s)))
             continue;
 
         section_size = s->data_offset;
@@ -3390,6 +1895,26 @@ static void tp_define_abs_symbol(Section *symtab_sec, const char *name,
         return;
     sym->st_shndx = SHN_ABS;
     sym->st_value = value;
+}
+
+static void tp_define_percpu_bounds(TCCState *s1, Section *symtab_sec)
+{
+    uint32_t start = 0, end = 0;
+    int i;
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *s = s1->sections[i];
+        uint32_t limit;
+        if (!(s->sh_flags & SHF_ALLOC) || !tp_is_percpu_section(s))
+            continue;
+        if (!start || s->sh_addr < start) start = s->sh_addr;
+        limit = s->sh_addr + s->data_offset;
+        if (limit > end) end = limit;
+    }
+    if (start) {
+        tp_define_abs_symbol(symtab_sec, "__per_cpu_start", start);
+        tp_define_abs_symbol(symtab_sec, "__per_cpu_end", end);
+        tp_define_abs_symbol(symtab_sec, "__per_cpu_load", start);
+    }
 }
 
 /* Define the bounds normally assigned by an ELF linker script around a
@@ -3434,146 +1959,62 @@ static int tp_define_section_bounds(TCCState *s1, Section *symtab_sec,
     return 0;
 }
 
-/*
- * Define Linux initcall boundaries before applying relocations.  The
- * Transputer linker uses a real, contiguous __initcall_start[] table, but the
- * input linker script cannot assign symbols to offsets within it.  Turning
- * the boundary symbols into SHN_ABS symbols here lets the ordinary relocation
- * pass resolve every pointer and LDC reference in one place.
- */
-static int tp_define_initcall_boundaries(TCCState *s1, Section *symtab_sec,
-                                         InitcallLayout *layout,
-                                         int link_debug)
+static int tp_define_linux_bounds(TCCState *s1, Section *symtab_sec,
+                                  uint32_t image_end, int link_debug)
 {
-    static const char *const level_names[8] = {
-        "__initcall0_start", "__initcall1_start",
-        "__initcall2_start", "__initcall3_start",
-        "__initcall4_start", "__initcall5_start",
-        "__initcall6_start", "__initcall7_start",
+    static const char *const bounds[][3] = {
+        { ".data", "_sdata", "_edata" },
+        { ".data.ro", "__start_rodata", "__end_rodata" },
+        { ".bss", "__bss_start", "__bss_stop" },
+        { ".init.text", "_sinittext", "_einittext" },
+        { ".sched.text", "__sched_text_start", "__sched_text_end" },
+        { ".data..once", "__start_once", "__end_once" },
+        { "__param", "__start___param", "__stop___param" },
+        { "__modver", "__start___modver", "__stop___modver" },
+        { ".note.Linux", "__start_notes", "__stop_notes" },
     };
-    /* First ordinal belonging to each Linux initcall level.  The sync
-     * variants share their base level; rootfs is between fs and device. */
-    static const int level_ordinals[8] = { 1, 2, 4, 6, 8, 10, 13, 15 };
-    int counts[17] = { 0 };
-    ElfW(Sym) *table_sym;
-    ElfW(Sym) *sym;
-    const char *strtab;
-    int i, nsyms;
-    int total = 0;
-
-    memset(layout, 0, sizeof(*layout));
-    table_sym = find_sym_by_name(symtab_sec, "__initcall_start");
-    if (!table_sym)
-        return 0;
-    if (table_sym->st_shndx <= 0 || table_sym->st_shndx >= s1->nb_sections) {
-        fprintf(stderr, "ERROR: __initcall_start has invalid section %d\n",
-                table_sym->st_shndx);
-        return -1;
-    }
-    layout->table_addr = (uint32_t)s1->sections[table_sym->st_shndx]->sh_addr +
-                         (uint32_t)table_sym->st_value;
-    /* The kernel sizes the table; an object without a symbol size predates
-     * that and had the original fixed 128 slots. */
-    layout->capacity = table_sym->st_size ? (int)(table_sym->st_size / 4) : 128;
-
-    nsyms = symtab_sec->data_offset / sizeof(ElfW(Sym));
-    strtab = (const char *)symtab_sec->link->data;
-    for (i = 0; i < nsyms; i++) {
-        const char *name;
-        int ordinal;
-
-        sym = &((ElfW(Sym) *)symtab_sec->data)[i];
-        name = strtab + sym->st_name;
-        if (strncmp(name, "__initcall_", 11) != 0 ||
-            strcmp(name, "__initcall_start") == 0 ||
-            strcmp(name, "__initcall_end") == 0 ||
-            strcmp(name, "__early_initcall_end") == 0)
-            continue;
-        ordinal = tp_initcall_level_ordinal(name + 11);
-        if (ordinal < 0)
-            continue;
-        if (sym->st_shndx <= 0 || sym->st_shndx >= s1->nb_sections) {
-            fprintf(stderr, "ERROR: initcall entry %s has invalid section %d\n",
-                    name, sym->st_shndx);
-            return -1;
-        }
-        if (++total > layout->capacity) {
-            fprintf(stderr, "ERROR: initcall table overflow (%d entries, capacity %d)\n",
-                    total, layout->capacity);
-            return -1;
-        }
-        counts[ordinal]++;
-    }
-
-    layout->entry_count = total;
-    layout->early_end_addr = layout->table_addr + counts[0] * 4;
-    layout->end_addr = layout->table_addr + total * 4;
-    for (i = 0; i < 8; i++) {
-        int ord;
-        int before = 0;
-        for (ord = 0; ord < level_ordinals[i]; ord++)
-            before += counts[ord];
-        layout->level_addr[i] = layout->table_addr + before * 4;
-    }
-
-    tp_define_abs_symbol(symtab_sec, "__early_initcall_end",
-                         layout->early_end_addr);
-    for (i = 0; i < 8; i++)
-        tp_define_abs_symbol(symtab_sec, level_names[i], layout->level_addr[i]);
-    tp_define_abs_symbol(symtab_sec, "__initcall_end", layout->end_addr);
-
-    if (link_debug) {
-        fprintf(stderr,
-                "[INITCALL] pre-reloc table=0x%08x entries=%d early_end=0x%08x end=0x%08x\n",
-                layout->table_addr, total, layout->early_end_addr,
-                layout->end_addr);
-        for (i = 0; i < 8; i++)
-            fprintf(stderr, "[INITCALL]   %s=0x%08x\n",
-                    level_names[i], layout->level_addr[i]);
-    }
-    return 0;
-}
-
-static int tp_define_sched_class_boundaries(TCCState *s1,
-                                            Section *symtab_sec,
-                                            int link_debug)
-{
-    uint32_t highest = 0;
-    uint32_t lowest = 0;
-    int rank;
+    uint32_t text_start = image_end, text_end = 0;
+    uint32_t init_start = image_end, init_end = 0;
     int i;
 
-    for (rank = 0; rank < 6; rank++) {
-        for (i = 1; i < s1->nb_sections; i++) {
-            Section *s = s1->sections[i];
-            uint32_t end;
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *s = s1->sections[i];
+        uint32_t start = s->sh_addr;
+        uint32_t end = start + s->data_offset;
 
-            if (tp_sched_class_rank(s->name) != rank ||
-                !(s->sh_flags & SHF_ALLOC))
-                continue;
-            if (!highest)
-                highest = (uint32_t)s->sh_addr;
-            end = (uint32_t)s->sh_addr + (uint32_t)s->data_offset;
-            if (lowest && (uint32_t)s->sh_addr != lowest) {
-                fprintf(stderr, "ERROR: scheduler class sections are not contiguous\n");
-                return -1;
-            }
-            lowest = end;
+        if (!(s->sh_flags & SHF_ALLOC) || !s->data_offset)
+            continue;
+        if (tp_is_linux_init_section(s)) {
+            if (start < init_start)
+                init_start = start;
+            if (end > init_end)
+                init_end = end;
+        } else if (s->sh_flags & SHF_EXECINSTR) {
+            if (start < text_start)
+                text_start = start;
+            if (end > text_end)
+                text_end = end;
         }
     }
-
-    if (!highest)
-        return 0;
-    tp_define_abs_symbol(symtab_sec, "__sched_class_highest", highest);
-    tp_define_abs_symbol(symtab_sec, "__sched_class_lowest", lowest);
-    if (link_debug) {
-        fprintf(stderr, " Scheduler classes: highest=0x%08x lowest=0x%08x\n",
-                highest, lowest);
+    tp_define_abs_symbol(symtab_sec, "_stext", text_start);
+    tp_define_abs_symbol(symtab_sec, "_etext", text_end);
+    tp_define_abs_symbol(symtab_sec, "_end", image_end);
+    tp_define_abs_symbol(symtab_sec, "__init_begin", init_start);
+    tp_define_abs_symbol(symtab_sec, "__init_end", init_end ? init_end : init_start);
+    for (i = 0; i < countof(bounds); i++) {
+        /* Optional tables use an empty range when the input section is
+           absent. A real section replaces both defaults below. */
+        tp_define_abs_symbol(symtab_sec, bounds[i][1], image_end);
+        tp_define_abs_symbol(symtab_sec, bounds[i][2], image_end);
+        if (tp_define_section_bounds(s1, symtab_sec, bounds[i][0],
+                                     bounds[i][1], bounds[i][2], link_debug) < 0)
+            return -1;
     }
     return 0;
 }
 
 static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
+                                const struct tp_reloc_index *index,
                                 uint8_t *image, size_t total_size,
                                 uint32_t base_addr, uint32_t start_kernel_addr,
                                 int link_debug, int link_trace,
@@ -3585,7 +2026,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
     ElfW_Rel *rel, *rel_end;
     int i, sym_index, reloc_count, type;
     int unresolved_calls = 0;
-    int unreachable = 0;
+    int failed = 0;
     addr_t val, addr;
     uint8_t *ptr;
 
@@ -3605,15 +2046,35 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                 int reloc_in_range = 0;
                 size_t reloc_dump_start = 0;
                 size_t reloc_dump_end = 0;
+                size_t off, available;
+                int width;
 
                 type = ELFW(R_TYPE)(rel->r_info);
+                width = tp_reloc_width(type, s->sh_flags & SHF_EXECINSTR);
+                if (width < 0)
+                    return tcc_error_noabort("unsupported Transputer relocation %d at %s+0x%lx",
+                                             type, s->name, (unsigned long)rel->r_offset);
+                if (!width)
+                    continue;
                 sym_index = ELFW(R_SYM)(rel->r_info);
+                if ((unsigned)sym_index >= symtab_sec->data_offset / sizeof(*sym))
+                    return tcc_error_noabort("invalid symbol index %d at %s+0x%lx",
+                                             sym_index, s->name, (unsigned long)rel->r_offset);
+                addr = s->sh_addr + rel->r_offset;
+                off = (uint32_t)(addr - base_addr);
+                if (s->sh_type == SHT_NOBITS || rel->r_offset > s->data_offset
+                    || s->data_offset - rel->r_offset < (size_t)width
+                    || off > total_size || total_size - off < (size_t)width)
+                    return tcc_error_noabort("relocation %d outside %s at offset 0x%lx",
+                                             type, s->name, (unsigned long)rel->r_offset);
+                available = s->data_offset - rel->r_offset;
+                if (available > total_size - off)
+                    available = total_size - off;
                 sym = &((ElfW(Sym) *)symtab_sec->data)[sym_index];
                 val = sym->st_value;
                 if (sym->st_shndx > 0 && sym->st_shndx < s1->nb_sections)
                     val += s1->sections[sym->st_shndx]->sh_addr;
-                addr = s->sh_addr + rel->r_offset;
-                tp_resolve_reloc_symbol(s1, symtab_sec, type, &sym, &sym_index,
+                tp_resolve_reloc_symbol(s1, symtab_sec, index, type, &sym, &sym_index,
                                         &val, addr, reloc_fix_debug);
                 if (sym->st_shndx == SHN_UNDEF)
                     val = tp_resolve_array_bound_symbol(symtab_sec, sym, val,
@@ -3637,27 +2098,24 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                  * references; T4_STRICT_UNRESOLVED_CALLS still makes it
                  * fatal.  Weak symbols are silent, as they must be. */
                 if (sym->st_shndx == SHN_UNDEF &&
-                    ELFW(ST_BIND)(sym->st_info) != STB_WEAK &&
-                    (type == R_TRANSPUTER_IPREL32 ||
-                     type == R_TRANSPUTER_LDC_ABS ||
-                     type == R_TRANSPUTER_32)) {
+                    ELFW(ST_BIND)(sym->st_info) != STB_WEAK) {
                     const char *un = tp_reloc_symbol_name(symtab_sec, sym);
                     if (tp_report_undefined_symbol(un)) {
                         fprintf(stderr,
                                 "%s: undefined symbol '%s' referenced at "
                                 "0x%08x (reloc type %d)\n",
-                                tp_env_enabled("T4_STRICT_UNRESOLVED_CALLS")
+                                tp_knob_on(TPK_T4_STRICT_UNRESOLVED_CALLS)
                                     ? "error" : "warning",
                                 un ? un : "<unnamed>", (unsigned int)addr,
                                 type);
                     }
-                    if (tp_env_enabled("T4_STRICT_UNRESOLVED_CALLS")) {
+                    if (tp_knob_on(TPK_T4_STRICT_UNRESOLVED_CALLS)) {
                         unresolved_calls++;
                         continue;
                     }
                 }
                 /* Debug: log IPREL32 relocations that resolve to address 0 */
-                if (type == R_TRANSPUTER_IPREL32 && val == 0 && tp_env_enabled("T4_ZERO_RELOC_DEBUG")) {
+                if (type == R_TRANSPUTER_IPREL32 && val == 0 && tp_knob_on(TPK_T4_ZERO_RELOC_DEBUG)) {
                     const char *sn = tp_reloc_symbol_name(symtab_sec, sym);
                     fprintf(stderr, "ZERO_RELOC: IPREL32 addr=0x%08x sym='%s' sym_index=%d "
                             "st_value=0x%lx st_shndx=%d bind=%d type=%d\n",
@@ -3665,25 +2123,25 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                             (unsigned long)sym->st_value, sym->st_shndx,
                             ELFW(ST_BIND)(sym->st_info), ELFW(ST_TYPE)(sym->st_info));
                 }
-                ptr = image + (addr - base_addr);
+                ptr = image + off;
                 tp_trace_reloc_window(symtab_sec, sym, image, total_size,
                                       base_addr, addr, type, val, s->name,
                                       link_trace, &reloc_in_range,
                                       &reloc_dump_start, &reloc_dump_end);
-                tp_debug_reloc_near_start_kernel(symtab_sec, sym, start_kernel_addr,
-                                                 addr, type, val, ptr, link_debug);
-                if (tp_apply_single_relocation(s, symtab_sec, sym, image, total_size,
-                                               base_addr, addr, val, type,
-                                               iprel_patch_trace, iprel_patch_debug,
-                                               ptr) < 0)
-                    unreachable++;
+                if (available >= 4)
+                    tp_debug_reloc_near_start_kernel(symtab_sec, sym, start_kernel_addr,
+                                                    addr, type, val, ptr, link_debug);
+                if (tp_apply_single_relocation(s, symtab_sec, sym, ptr, available,
+                                               addr, val, type, width, iprel_patch_trace,
+                                               iprel_patch_debug) < 0)
+                    failed++;
                 if (reloc_in_range && link_trace) {
                     fprintf(stderr, "RELOC_RANGE_AFTER:");
                     for (size_t di = reloc_dump_start; di <= reloc_dump_end; di++)
                         fprintf(stderr, " %02x", image[di]);
                     fprintf(stderr, "\n");
                 }
-                if (start_kernel_addr > 0 &&
+                if (available >= 4 && start_kernel_addr > 0 &&
                     addr >= start_kernel_addr && addr < start_kernel_addr + 64) {
                     if (link_debug)
                         fprintf(stderr, ", After: %08x\n", read32le(ptr));
@@ -3698,7 +2156,7 @@ static int tp_apply_relocations(TCCState *s1, Section *symtab_sec,
                 unresolved_calls);
         return -1;
     }
-    if (unreachable)
+    if (failed)
         return -1;
     return 0;
 }
@@ -3722,44 +2180,55 @@ static void tp_alloc_common_syms(TCCState *s1)
     }
 }
 
-ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
-{
-    /* This implements basic ELF linking for Transputer targets */
-    /* Similar to simple-transputer-linker but integrated into TCC */
-    int xip_mode = tp_env_enabled("T4_XIP_LINK");
-    /* MemStart: #80000070 on the T800/T805/T425/T9000, #80000048 on the
-       T414 (-mt414 on the link command), which has less on-chip RAM. */
-    uint32_t base_addr = xip_mode ? 0x7F001000u
-                         : s1->tp_t414 ? 0x80000048u : 0x80000070u;
-    uint32_t total_size = 0;
-    uint32_t total_memsz = 0;  /* includes BSS (p_memsz) */
-    uint32_t current_addr = base_addr;
-	uint32_t xip_text_end = 0;
-	uint32_t xip_data_start = 0;
-    uint32_t entry_point;
+/* What the phases of a link share. */
+struct tp_link {
+    TCCState *s1;
+    const char *output_filename;
+    int xip_mode;
+    uint32_t base_addr;
+    uint32_t total_size;
+    uint32_t total_memsz;       /* includes BSS (p_memsz) */
+    uint32_t current_addr;
+    uint32_t xip_text_end;
+    uint32_t xip_data_start;
     uint8_t *image;
     uint32_t start_kernel_addr;
     const char *start_kernel_name;
     int strict_boot_asserts;
     int has_start_kernel_load_point;
     int has_return_label_load_point;
-    uint32_t bss_expected_start;
-    uint32_t bss_expected_stop;
-    int bss_expected_valid;
-    int link_debug = tp_env_enabled("T4_LINK_DEBUG");
-    int link_trace = tp_env_enabled("T4_LINK_TRACE");
-    int reloc_fix_debug = tp_env_enabled("T4_RELOC_FIX_DEBUG");
-    int iprel_patch_trace = tp_env_enabled("T4_IPREL_PATCH_TRACE");
-    int iprel_patch_debug = tp_env_enabled("T4_IPREL_PATCH_DEBUG");
+    int link_debug;
     InitcallLayout initcall_layout;
+};
+
+/* Shrink the code, give every section its address and define the
+ * symbols that depend on the layout. */
+static int tp_link_layout(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const int xip_mode = l->xip_mode;
+    const uint32_t base_addr = l->base_addr;
+    const int link_debug = l->link_debug;
+    const int linux_layout = !xip_mode &&
+        find_sym_by_name(symtab_section, "__start_kernel_load_point") &&
+        find_sym_by_name(symtab_section, "__init_begin");
+    uint8_t *fixed;
+
     tp_alloc_common_syms(s1);
-    tp_optimize_code_sections(s1, link_debug);
-    tp_icf_fold(s1, link_debug);
-    tp_link_relax(s1, link_debug);
-    if (tp_layout_sections(s1, base_addr, &total_size, &total_memsz,
-			   &current_addr, xip_mode, &xip_text_end,
-			   &xip_data_start, link_debug) < 0)
+    fixed = tp_fixed_layout_sections(s1);
+    tp_optimize_code_sections(s1, fixed, link_debug);
+    tp_icf_fold(s1, fixed, link_debug);
+    tp_link_relax(s1, fixed, link_debug);
+    tcc_free(fixed);
+    if (tp_layout_sections(s1, base_addr, &l->total_size, &l->total_memsz,
+			   &l->current_addr, xip_mode, linux_layout, &l->xip_text_end,
+			   &l->xip_data_start, link_debug) < 0)
 		return -1;
+    if (linux_layout)
+        tp_define_percpu_bounds(s1, symtab_section);
+    if (linux_layout &&
+        tp_define_linux_bounds(s1, symtab_section, l->current_addr, link_debug) < 0)
+        return -1;
     if (tp_define_section_bounds(s1, symtab_section, ".init.ramfs",
                                  "__initramfs_start", "__initramfs_end",
                                  link_debug) < 0)
@@ -3771,11 +2240,35 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                                  "__setup_start", "__setup_end",
                                  link_debug) < 0)
         return -1;
+    if (linux_layout) {
+        tp_define_abs_symbol(symtab_section, "__lock_text_start", l->current_addr);
+        tp_define_abs_symbol(symtab_section, "__lock_text_end", l->current_addr);
+        if (tp_define_section_bounds(s1, symtab_section, ".spinlock.text",
+                                     "__lock_text_start", "__lock_text_end",
+                                     link_debug) < 0)
+            return -1;
+    }
     if (tp_define_sched_class_boundaries(s1, symtab_section, link_debug) < 0)
         return -1;
-    if (tp_define_initcall_boundaries(s1, symtab_section, &initcall_layout,
+    if (tp_define_initcall_boundaries(s1, symtab_section, &l->initcall_layout,
                                       link_debug) < 0)
         return -1;
+    return 0;
+}
+
+/* Report the image size where asked or large, and refuse an impossible
+ * one. */
+static int tp_link_check_size(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const char *output_filename = l->output_filename;
+    const int xip_mode = l->xip_mode;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    const uint32_t current_addr = l->current_addr;
+    const uint32_t xip_text_end = l->xip_text_end;
+    const uint32_t xip_data_start = l->xip_data_start;
+
     /* Report total image size */
     if (s1->verbose || total_size > 8 * 1024 * 1024) {
         fprintf(stderr, "transputer_simple_link: Linking %s\n", output_filename);
@@ -3795,25 +2288,21 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                 total_size, total_size / (1024.0 * 1024.0));
         return -1;
     }
-    /* Create output image */
-    if (link_debug)
-        fprintf(stderr, " Allocating %u bytes for output image...\n", total_size);
-    image = tcc_mallocz(total_size);
-    if (!image) {
-        fprintf(stderr, "ERROR: Failed to allocate %u bytes for output image\n", total_size);
-        return -1;
-    }
-    if (link_debug)
-        fprintf(stderr, " Memory allocated successfully\n");
-    has_start_kernel_load_point = find_sym_by_name(symtab_section, "__start_kernel_load_point") != NULL;
-    has_return_label_load_point = find_sym_by_name(symtab_section, "__return_label_addr") != NULL;
-    strict_boot_asserts = has_start_kernel_load_point;
-    bss_expected_start = 0;
-    bss_expected_stop = 0;
-    bss_expected_valid = 0;
+    return 0;
+}
+
+/* The kernel entry head.S jumps to, if this is a kernel. */
+static int tp_link_find_start_kernel(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const int link_debug = l->link_debug;
+
+    l->has_start_kernel_load_point = find_sym_by_name(symtab_section, "__start_kernel_load_point") != NULL;
+    l->has_return_label_load_point = find_sym_by_name(symtab_section, "__return_label_addr") != NULL;
+    l->strict_boot_asserts = l->has_start_kernel_load_point;
     /* Find start_kernel address — try wrapper first, then C entry point */
-    start_kernel_addr = 0;
-    start_kernel_name = NULL;
+    l->start_kernel_addr = 0;
+    l->start_kernel_name = NULL;
     {
         static const char *sk_names[] = {
             "start_kernel_wrapper", "_start_kernel_wrapper",
@@ -3821,35 +2310,67 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         };
         int ni;
         for (ni = 0; sk_names[ni]; ni++) {
-            if (tp_find_symbol_addr(s1, symtab_section, sk_names[ni], &start_kernel_addr) > 0) {
-                start_kernel_name = sk_names[ni];
+            if (tp_find_symbol_addr(s1, symtab_section, sk_names[ni], &l->start_kernel_addr) > 0) {
+                l->start_kernel_name = sk_names[ni];
                 if (link_debug)
-                    fprintf(stderr, "Found %s at 0x%08x\n", sk_names[ni], start_kernel_addr);
+                    fprintf(stderr, "Found %s at 0x%08x\n", sk_names[ni], l->start_kernel_addr);
                 break;
             }
         }
-        if (!start_kernel_addr)
-            fprintf(stderr, "WARNING: start_kernel symbol not found in linker symtab\n");
     }
-    if (has_start_kernel_load_point && start_kernel_addr == 0) {
+    if (l->has_start_kernel_load_point && l->start_kernel_addr == 0) {
         fprintf(stderr, "ERROR: __start_kernel_load_point present but start_kernel symbol was not resolved\n");
-        tcc_free(image);
         return -1;
     }
+    return 0;
+}
+
+/* Copy the sections into the image and apply every relocation. */
+static int tp_link_relocate(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    uint8_t *image = l->image;
+    const uint32_t start_kernel_addr = l->start_kernel_addr;
+    const int link_debug = l->link_debug;
+    int link_trace = tp_knob_on(TPK_T4_LINK_TRACE);
+    int reloc_fix_debug = tp_knob_on(TPK_T4_RELOC_FIX_DEBUG);
+    int iprel_patch_trace = tp_knob_on(TPK_T4_IPREL_PATCH_TRACE);
+    int iprel_patch_debug = tp_knob_on(TPK_T4_IPREL_PATCH_DEBUG);
+
     tp_copy_alloc_sections(s1, image, base_addr);
 
-    if (tp_apply_relocations(s1, symtab_section, image, total_size, base_addr,
-                             start_kernel_addr, link_debug, link_trace,
-                             reloc_fix_debug, iprel_patch_trace,
-                             iprel_patch_debug) < 0) {
-        tcc_free(image);
-        return -1;
+    {
+        struct tp_reloc_index index;
+        int result;
+        tp_reloc_index_init(&index, symtab_section);
+        result = tp_apply_relocations(s1, symtab_section, &index, image,
+                                      total_size, base_addr, start_kernel_addr,
+                                      link_debug, link_trace, reloc_fix_debug,
+                                      iprel_patch_trace, iprel_patch_debug);
+        tcc_free(index.heads);
+        tcc_free(index.next);
+        tcc_free(index.bucket);
+        if (result < 0) {
+            return -1;
+        }
     }
+    return 0;
+}
+
+/* What the environment asks to see of the relocated image. */
+static void tp_link_debug_dumps(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    uint8_t *image = l->image;
 
     /* Post-link CALL target audit: verify all IPREL32 relocations encoded correctly.
      * Decodes each patched CALL/J/CJ instruction and checks the target matches
      * the intended symbol address. Enabled by T4_CALL_AUDIT=1. */
-    if (tp_env_enabled("T4_CALL_AUDIT"))
+    if (tp_knob_on(TPK_T4_CALL_AUDIT))
         tp_audit_call_targets(s1, symtab_section, image, base_addr, total_size);
 
     /* NFIX→OPR scan REMOVED.
@@ -3870,8 +2391,8 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
      * 18 false-positive matches in .data (all corruptions).
      */
     {
-        const char *dump_addr_env = getenv("T4_POST_RELOC_DUMP_ADDR");
-        const char *dump_len_env = getenv("T4_POST_RELOC_DUMP_LEN");
+        const char *dump_addr_env = tp_knob(TPK_T4_POST_RELOC_DUMP_ADDR);
+        const char *dump_len_env = tp_knob(TPK_T4_POST_RELOC_DUMP_LEN);
         if (dump_addr_env && *dump_addr_env) {
             uint32_t dump_addr = (uint32_t)strtoul(dump_addr_env, NULL, 0);
             size_t dump_len = dump_len_env && *dump_len_env ? (size_t)strtoul(dump_len_env, NULL, 0) : 64;
@@ -3896,7 +2417,7 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         }
     }
     {
-        const char *dump_sym_env = getenv("T4_DUMP_SYM");
+        const char *dump_sym_env = tp_knob(TPK_T4_DUMP_SYM);
         if (dump_sym_env && *dump_sym_env && symtab_section) {
             ElfW(Sym) *dump_sym = find_sym_by_name(symtab_section, dump_sym_env);
             if (!dump_sym) {
@@ -3913,6 +2434,24 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
             }
         }
     }
+}
+
+/* Fill in the words a boot file loads before it can use a relocation. */
+static int tp_link_patch_boot(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    uint8_t *image = l->image;
+    const char *start_kernel_name = l->start_kernel_name;
+    const int strict_boot_asserts = l->strict_boot_asserts;
+    const int has_start_kernel_load_point = l->has_start_kernel_load_point;
+    const int has_return_label_load_point = l->has_return_label_load_point;
+    const int link_debug = l->link_debug;
+    uint32_t bss_expected_start = 0;
+    uint32_t bss_expected_stop = 0;
+    int bss_expected_valid = 0;
+
     /* =====================================================================
      * NEW MINIX-STYLE LDC PATCHING (2026-01-15)
      * =====================================================================
@@ -3938,7 +2477,6 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                                       strict_boot_asserts, link_debug,
                                       &bss_expected_start, &bss_expected_stop,
                                       &bss_expected_valid) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -3946,14 +2484,12 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     if (tp_patch_verified_symbol_target(image, total_size, base_addr, s1, symtab_section,
                                         "__start_kernel_load_point", start_kernel_name,
                                         has_start_kernel_load_point, link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
     /* Patch init_stack workspace pointer (needs calculation: init_stack + THREAD_SIZE - 64) */
     if (tp_patch_boot_init_stack(image, total_size, base_addr, s1, symtab_section,
                                  link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -3961,7 +2497,6 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
     if (tp_patch_verified_symbol_target(image, total_size, base_addr, s1, symtab_section,
                                         "__return_label_addr", "halt",
                                         has_return_label_load_point, link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -3973,12 +2508,10 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
         bss_stop_rc = tp_verify_abs_ldc_value(image, total_size, base_addr, s1, symtab_section,
                                               "__bss_stop_load_point", bss_expected_stop, ".bss stop");
         if (bss_start_rc < 0 || bss_stop_rc < 0) {
-            tcc_free(image);
             return -1;
         }
         if (strict_boot_asserts && (bss_start_rc != 1 || bss_stop_rc != 1)) {
             fprintf(stderr, "ERROR: required BSS load-point symbols are missing\n");
-            tcc_free(image);
             return -1;
         }
         tp_dump_abs_ldc_bytes(image, total_size, base_addr, s1, symtab_section,
@@ -3987,39 +2520,32 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                               "__bss_stop_load_point", ".bss stop", link_debug);
     }
 
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__test_main_load_point", "test_main",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__start_c_load_point", "_start_c",
-                                    link_debug);
-
-    /* crt1.S load points for userspace programs (uClibc-ng) */
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__main_load_point", "main",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__halt_load_point", "_halt",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__uclibc_main_load_point", "__uClibc_main",
-                                    link_debug);
-
-    /* crt0.S boot stub load points */
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__crt0_start_addr", "_start",
-                                    link_debug);
-    tp_patch_optional_symbol_target(image, total_size, base_addr, s1, symtab_section,
-                                    "__crt0_halt_addr", "_crt0_halt",
-                                    link_debug);
+    {
+        static const char *const boot_targets[][2] = {
+            { "__test_main_load_point", "test_main" },
+            { "__start_c_load_point", "_start_c" },
+            { "__main_load_point", "main" },
+            { "__halt_load_point", "_halt" },
+            { "__uclibc_main_load_point", "__uClibc_main" },
+            { "__crt0_start_addr", "_start" },
+            { "__crt0_halt_addr", "_crt0_halt" }
+        };
+        int i;
+        for (i = 0; i < countof(boot_targets); i++) {
+            if (tp_patch_verified_symbol_target(image, total_size, base_addr,
+                                                s1, symtab_section, boot_targets[i][0],
+                                                boot_targets[i][1], 0, link_debug) < 0) {
+                return -1;
+            }
+        }
+    }
 
     /* Populate the initcall table (__initcall_start[]) with sorted
      * function pointers from scattered __initcall_* symbols. */
-    if (initcall_layout.table_addr &&
+    if (l->initcall_layout.table_addr &&
         tp_populate_initcall_table(image, total_size, base_addr, s1,
-                                   symtab_section, &initcall_layout,
+                                   symtab_section, &l->initcall_layout,
                                    link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
@@ -4036,23 +2562,40 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
      */
     if (tp_patch_linker_surrogates(image, total_size, base_addr, s1, symtab_section,
                                    link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
     if (link_debug)
         fprintf(stderr, "=== LDC Sequence Patching Complete ===\n\n");
+    return 0;
+}
+
+/* Find the entry point and write the output file and its symbol map. */
+static int tp_link_write(struct tp_link *l)
+{
+    TCCState *s1 = l->s1;
+    const char *output_filename = l->output_filename;
+    const int xip_mode = l->xip_mode;
+    const uint32_t base_addr = l->base_addr;
+    const uint32_t total_size = l->total_size;
+    const uint32_t total_memsz = l->total_memsz;
+    const uint32_t xip_text_end = l->xip_text_end;
+    const uint32_t xip_data_start = l->xip_data_start;
+    uint8_t *image = l->image;
+    const uint32_t start_kernel_addr = l->start_kernel_addr;
+    const int strict_boot_asserts = l->strict_boot_asserts;
+    const int has_start_kernel_load_point = l->has_start_kernel_load_point;
+    const int link_debug = l->link_debug;
+    uint32_t entry_point;
 
     if (tp_find_boot_entry_point(s1, symtab_section, &entry_point,
                                  NULL, NULL, link_debug) < 0) {
-        tcc_free(image);
         return -1;
     }
 
     if (tp_verify_boot_entry(entry_point, base_addr, strict_boot_asserts,
                              has_start_kernel_load_point, start_kernel_addr,
                              total_size) < 0) {
-        tcc_free(image);
         return -1;
     }
     write_tccsym_map(s1, symtab_section, output_filename);
@@ -4060,11 +2603,52 @@ ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
                             total_size, total_memsz, xip_mode,
 						xip_text_end, xip_data_start, image,
                             s1->tp_isa_used) < 0) {
-        tcc_free(image);
         return -1;
     }
-    tcc_free(image);
     return 0;
+}
+ST_FUNC int transputer_simple_link(TCCState *s1, const char *output_filename)
+{
+    struct tp_link l;
+    int rc = -1;
+
+    l.s1 = s1;
+    l.output_filename = output_filename;
+    l.xip_mode = tp_knob_on(TPK_T4_XIP_LINK);
+    /* MemStart: #80000070 on the T800/T805/T425/T9000, #80000048 on the
+       T414 (-mt414 on the link command), which has less on-chip RAM. */
+    l.base_addr = l.xip_mode ? 0x7F001000u
+                  : s1->has_text_addr ? s1->text_addr
+                  : s1->tp_isa == TP_ISA_T414 ? 0x80000048u : 0x80000070u;
+    l.total_size = 0;
+    l.total_memsz = 0;
+    l.current_addr = l.base_addr;
+    l.xip_text_end = 0;
+    l.xip_data_start = 0;
+    l.image = NULL;
+    l.link_debug = tp_knob_on(TPK_T4_LINK_DEBUG);
+
+    if (tp_link_layout(&l) < 0 || tp_link_check_size(&l) < 0)
+        return -1;
+    /* Create output image */
+    if (l.link_debug)
+        fprintf(stderr, " Allocating %u bytes for output image...\n", l.total_size);
+    l.image = tcc_mallocz(l.total_size);
+    if (!l.image) {
+        fprintf(stderr, "ERROR: Failed to allocate %u bytes for output image\n", l.total_size);
+        return -1;
+    }
+    if (l.link_debug)
+        fprintf(stderr, " Memory allocated successfully\n");
+    if (tp_link_find_start_kernel(&l) < 0 || tp_link_relocate(&l) < 0)
+        goto done;
+    tp_link_debug_dumps(&l);
+    if (tp_link_patch_boot(&l) < 0 || tp_link_write(&l) < 0)
+        goto done;
+    rc = 0;
+done:
+    tcc_free(l.image);
+    return rc;
 }
 
 /* Instruction encoding now uses tp_encode_instr() from transputer-enc.h */
@@ -4079,13 +2663,8 @@ void relocate_init(Section *sr)
 }
 void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr, addr_t addr, addr_t val)
 {
-    /* This function is called by tccelf.c's standard relocation path.
-     * For transputer targets, transputer_simple_link() handles all
-     * relocations directly and this code path should never be reached.
-     * If it IS reached, emit an error so we know something is wrong. */
-    fprintf(stderr,
-            "ERROR: relocate() called for transputer target (should use transputer_simple_link)\n"
-            "  type=%d addr=0x%lx val=0x%lx\n",
-            type, (unsigned long)addr, (unsigned long)val);
+    if (type != R_TRANSPUTER_NONE)
+        tcc_error_noabort("Transputer relocation %d at 0x%lx requires the executable linker",
+                          type, (unsigned long)addr);
 }
 #endif

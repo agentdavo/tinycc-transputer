@@ -45,6 +45,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ELF2FLT_SRC="$SCRIPT_DIR/tools/transputer-elf2flt.c"
 LOGS_DIR="${LOGS_DIR:-logs}"
 KERNEL_TREE="${KERNEL_TREE:-linux-7}"
 if [ -z "${TCC_GCC_VERSION:-}" ]; then
@@ -594,9 +595,9 @@ do_initramfs() {
     mkdir -p "$INITRAMFS_DIR"
 
     # Build elf2flt if needed
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -621,6 +622,7 @@ do_initramfs() {
 
         env T4_STRICT_UNRESOLVED_CALLS=1 \
         "$ROOT_DIR/transputer-tcc" -nostdlib -nostdinc \
+            "-DTP_USE_T9K_SYSCALL=${TP_USE_T9K_SYSCALL:-0}" \
             -o "$INITRAMFS_DIR/init.elf" \
             "${init_sources[@]}" \
             "$ROOT_DIR/transputer-libtcc1.a" \
@@ -662,9 +664,9 @@ do_shprobe() {
         return 1
     fi
 
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -710,9 +712,9 @@ do_directprobe() {
     local INITRAMFS_DIR="$SCRIPT_DIR/initramfs"
     local ELF2FLT="$ROOT_DIR/transputer-elf2flt"
 
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -744,9 +746,9 @@ do_uclibcprobe() {
     local ELF2FLT="$ROOT_DIR/transputer-elf2flt"
     local UCLIBC="$SCRIPT_DIR/uClibc-ng"
 
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -833,7 +835,7 @@ do_tpsh() {
     local TCC="$ROOT_DIR/transputer-tcc"
     local ELF2FLT="$ROOT_DIR/transputer-elf2flt"
     local INITRAMFS_DIR="$SCRIPT_DIR/initramfs"
-    local UCLIBC="$SCRIPT_DIR/uClibc-ng"
+    local UCLIBC="${UCLIBC:-$SCRIPT_DIR/uClibc-ng}"
     local TPSH_SRC="$INITRAMFS_DIR/tpsh.c"
 
     if [ ! -f "$TPSH_SRC" ]; then
@@ -842,9 +844,9 @@ do_tpsh() {
     fi
 
     # Build elf2flt if needed
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -865,7 +867,8 @@ do_tpsh() {
 
     # Step 2: Compile syscall stub
     echo "Compiling syscall stub for tpsh..."
-    "$TCC" -nostdlib -nostdinc -c -o /tmp/tpsh_syscall_stub.o "$SCRIPT_DIR/tests/syscall_stub.c" \
+    "$TCC" -nostdlib -nostdinc "-DTP_USE_T9K_SYSCALL=${TP_USE_T9K_SYSCALL:-0}" \
+        -c -o /tmp/tpsh_syscall_stub.o "$SCRIPT_DIR/tests/syscall_stub.c" \
         >> "$LOGS_DIR/04d-tpsh.log" 2>&1 || {
         echo "⚠ syscall_stub.c compile failed"; return 1
     }
@@ -986,12 +989,12 @@ do_busybox() {
     local ELF2FLT="$ROOT_DIR/transputer-elf2flt"
     local INITRAMFS_DIR="$SCRIPT_DIR/initramfs"
     local BB="$SCRIPT_DIR/busybox-1.37.0"
-    local UCLIBC="$SCRIPT_DIR/uClibc-ng"
+    local UCLIBC="${UCLIBC:-$SCRIPT_DIR/uClibc-ng}"
 
     # Build elf2flt if needed
-    if [ ! -x "$ELF2FLT" ] || [ "$ROOT_DIR/transputer-elf2flt.c" -nt "$ELF2FLT" ]; then
+    if [ ! -x "$ELF2FLT" ] || [ "$ELF2FLT_SRC" -nt "$ELF2FLT" ]; then
         echo "Building transputer-elf2flt..."
-        cc -Wall -o "$ELF2FLT" "$ROOT_DIR/transputer-elf2flt.c" || {
+        cc -Wall -o "$ELF2FLT" "$ELF2FLT_SRC" || {
             echo "⚠ elf2flt build failed"; return 1
         }
     fi
@@ -1010,7 +1013,8 @@ do_busybox() {
 
     # Step 2: Compile syscall stub
     echo "Compiling syscall stub..."
-    "$TCC" -nostdlib -nostdinc -c -o /tmp/bb_syscall_stub.o "$SCRIPT_DIR/tests/syscall_stub.c" \
+    "$TCC" -nostdlib -nostdinc "-DTP_USE_T9K_SYSCALL=${TP_USE_T9K_SYSCALL:-0}" \
+        -c -o /tmp/bb_syscall_stub.o "$SCRIPT_DIR/tests/syscall_stub.c" \
         >> "$LOGS_DIR/04c-busybox.log" 2>&1 || {
         echo "⚠ syscall_stub.c compile failed"; return 1
     }

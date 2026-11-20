@@ -1586,7 +1586,9 @@ void G_DoPlayDemo (void)
 	 
     gameaction = ga_nothing; 
     demobuffer = demo_p = W_CacheLumpName (defdemoname, PU_STATIC); 
-    if ( *demo_p++ != VERSION)
+    /* 109 too: the format is the same, and Freedoom's demos carry it. */
+    i = *demo_p++;
+    if (i != VERSION && i != 109)
     {
       fprintf( stderr, "Demo is from a different game version!\n");
       gameaction = ga_nothing;

@@ -110,7 +110,7 @@ T4 emulator → vmlinux.btl → Linux kernel (transputer/linux-7 — the ONLY ke
 - **`transputer-gen.c`** — TCC transputer code generator backend
 - **`transputer/build.sh`** — Master build script
 - **`transputer/rootfs/stage.sh`** — TransputerOS rootfs builder (1.2MB, self-contained)
-- **`transputer-elf2flt.c`** — ELF to bFLT converter for NOMMU binaries
+- **`transputer/tools/transputer-elf2flt.c`** — ELF to bFLT converter for NOMMU binaries
 - **`transputer-netload`** — Creates bootable `.btl` files from ELF
 
 ### Kernel & Userspace
@@ -628,7 +628,7 @@ The transputer has a 3-deep hardware evaluation stack (AReg, BReg, CReg). TCC's 
   whose body has no `j` (`while (!flag) ;`, a summing loop) never yields to
   another low-priority process: spinning on a flag that one of them sets
   never ends.  Wait on a channel or timer instead (`include/conc.h`).
-  `lib/transputer-conc.c` *relies* on this: its process-record search must
+  `lib/transputer/transputer-conc.c` *relies* on this: its process-record search must
   contain no timeslice point (see "Variable-length arrays"), so if loop
   back-edges ever become `j`, that search needs another shape.
 
@@ -673,7 +673,14 @@ the occam compiler does, and what new codegen should be held to:
 - T800 rounding modes (`fpurp`/`fpurm`/`fpurz` through `fpentry`) govern
   the next FP instruction only - every FP instruction sets the mode back
   to nearest (TCWG: `Round_Mode' = ToNearest`).  The T9000's `fprX` are
-  sticky until `fprn`.
+  sticky until `fprn`, so every `fprX` the code generator emits is
+  followed by `fprn` once the operation that wanted it is done.  Until
+  2026-11-05 `gen_cvt_ftoi` did not, and every FP operation after an
+  `(int)`, `(unsigned)` or `(long long)` conversion rounded toward zero
+  at -mt9000.  t4 reset the mode after the next FP instruction on both
+  parts, which hid it; since t4 7e53395 it keeps a T9000 mode
+  (`RoundingSticky`), and the old code fails `test_float_int_cvt`,
+  `test_softfloat` and `test_ftoi_rounding` there.
 - Conversions go through memory by design: `fpi32tor32`/`fpi32tor64`/
   `fpb32tor64` load an integer from the address in A, `fpstnli32` stores
   one.  The workspace word an int<->float conversion uses is not waste.
@@ -755,6 +762,208 @@ the occam compiler does, and what new codegen should be held to:
   5,268,802 `fpdup`s exactly, where it had none: -12 M cycles (3,277 M ->
   3,266 M).  `TCC_TRANSPUTER_FPSTACK=0` turns it off too;
   `test_fpu_square.c`.
+- A global whose address a function loads with a weight of three (a use
+  under a backward branch weighs four; a lone use of an anonymous `L.n`,
+  usually a message string, does not count) has it loaded once after the
+  prologue into a frame word of its own, and each use is an `ldl` of that
+  word (`tp_gaddr_cache`, in the relaxation pass, up to four symbols a
+  function).  RAM starts at MinInt, so a global's address is eight
+  nibbles: `ldc` costs 8 cycles where `ldl` costs 2 or 3.  The new words
+  go on top of the frame, so only the return address and the parameters
+  move and the AJWs grow; an LDLP of the old frame top is a local array's
+  end and stays.  Putting them lower, at the reserved region's end, pushed
+  Doom's column loop's locals past slot 15 (a prefix byte on every access)
+  and cost 3% there; the slot remap leaves the new words alone for the
+  same reason.  The first use's relocation moves to the entry load and the
+  others are deleted, only once the rewrite is committed.  Functions with
+  inline assembly, GAJW, another AJW, or an access through an LDLP that
+  crosses the frame top are left alone, and so are those with `startp`,
+  `endp` or `runp`, where a process can enter the body on another
+  workspace without the prologue (`test_process_builtins` caught it).
+  A constant of six bytes or more - a float's bits, a wide mask - is kept
+  the same way, and the scheduler's S10 then loads a float from its word
+  in place: `ldl x; stl b; ldlp b; fpldnlsn` -> `ldlp x; fpldnlsn` when b
+  is dead after (`tps_dead_after` walks the flow graph for a scratch word
+  outside the liveness mask).  -59 M cycles on the ray tracer (3,143 M ->
+  3,084 M, 4.6% over occam; `sceneSect` 680 -> 625 a call, below occam's
+  707; `coneSect` 1753 -> 1721), every picture unchanged.  Doom's drawers
+  (`tests/bench/doom.sh t800`) gained 6-13% before 4198801b hoisted their
+  globals by hand; on the hoisted sources 0.1-0.5%, and the benchmark's
+  FixedMul/FixedDiv loops over global arrays 6-7%.
+  `TCC_TRANSPUTER_GADDR=0` turns it off (`TP_SCHED_MASK=0x3d7f` S10),
+  `TP_GADDR_STATS=1` lists what is kept; `test_gaddr_cache.c`.
+- The frame slot remapper pins slot 0 and the outgoing *stack argument*
+  words, which calls read implicitly. Other call-staging words are ordinary
+  explicit workspace accesses and may move with the reserved slots. Pinning
+  every slot below the highest staging word kept unused holes low in the
+  frame: `R_DrawSpan` had slots 0-13 pinned and a nine-word locals block
+  above them. Allowing those holes to move puts the block in short slots;
+  the T800 span benchmark falls from 5,049,704 to 4,416,624 estimated cycles
+  with the same hash. `test_slot_remap_call.c` exercises stacked arguments,
+  indirect calls, address-taken locals, and locals live across calls.
+- A one-word struct with word alignment (the ray tracer's `W`, a union of
+  an int and a float) is copied by `ldnl`/`stnl`, not `ldc 4; move`
+  (`gen_struct_copy`).  `VT_UNALIGNED` now also marks a member whose own
+  alignment exceeds its container's or its offset's (a `W` at offset 2 of
+  a `#pragma pack(2)` struct), so packed members keep the byte-wise move.
+  The scheduler's S11 then recomputes the destination where the store
+  needs it instead of parking it: `ldl x; [ldnlp k;] stl a; <e>; ldl a;
+  stnl m` -> `<e>; ldl x; stnl m+k` (S12 folds `ldnlp k; ldnl/stnl m`),
+  so `shadowNode[n_dx] = light[l_dx]` is `ldl 28; ldnl 3; ldl 30; stnl
+  15`.  A local x qualifies when no pointer can reach it: no LDLP hands
+  out the address of its `tp_loc_marks` block (`tps_word_escapes`).
+  -28 M cycles (3,084 M -> 3,056 M, 3.7% over occam; `shadeNode` 634 ->
+  524 a call, occam 498), pictures unchanged.  `TP_SCHED_MASK=0xf7f`
+  turns S11/S12 off; `test_sched_copy.c`.
+- A word, long long or double member of a packed or `pack(N < 4)`
+  struct, or a local at a frame offset that is not a multiple of four, is
+  read with `lb`/`shl`/`or` and written with `sb`/`shr` (little endian, a
+  64-bit value as two words); the FPU gets the bytes copied to an aligned
+  frame temporary (`tp_emit_float_addr`).  `ldnl`/`stnl`/`ldl`/`stl`
+  ignore the low address bits, so `p->k` at offset 1 used to read the
+  struct's first word.  The address waits in a fresh frame temporary
+  (`tp_park_new`), not a scratch slot, which may hold a call's staged
+  arguments.  `VT_UNALIGNED` marks these lvalues and has to survive
+  `incr_offset` and `vstore`'s VT_LLOCAL reload (at -mt425 a soft-float
+  store lost it); `test_packed_words.c`.
+- `(x >> K) & m`, where the mask keeps only bits the shift brings down
+  from x (m < 2^(32-K)), is the same after an arithmetic or a logical
+  shift, so a signed one is `ldc K; shr`, not `xdble; ldc K; lshr`
+  (`tp_shift_mask_fold`, at the `and`).  On the T800, T805, T425 and
+  T414, whose shifts cost a cycle a place, K of 8, 16 or 24 with a byte
+  mask on a word just loaded by `ldl` reads that byte instead: `ldlp x;
+  adc K/8; lb`, 7 cycles for the 21 of `ldl x; ldc 16; shr`, and the
+  `and` goes when m is 255.  The post-pass knows `ldlp s; [adc k;] lb` as
+  a read of word s (`tp_relax_byte_read`): before it did, the unknown
+  LDLP made `tp_sched_function` and `tp_slot_remap` give up on the
+  function and the code grew 17%.  Doom's texture lookups, `(frac >> 16)
+  & 127`: R_DrawColumn -27%, R_DrawSpan -26% T800 cycles.
+  `TCC_TRANSPUTER_SHIFT_MASK=0` turns it off; `test_shift_mask_fold.c`.
+- `x++`/`x--` used for its value, on a word that is neither volatile nor a
+  global, loads the saved value on its own and lets the add read x again
+  (`inc()` in tccgen.c), where gv_dup copied the loaded register through
+  a second slot: `while (n--)` is `ldl n; ldl n; adc -1; stl n; eqc 0;
+  cj`, 6 instructions where it took 10, and `*p++ = v` loses two.  Not
+  for a global: a second read is another eight-byte `ldc`, and `g++;` as
+  a statement kept the load (+0.7% Doom code until globals were left
+  out; size-neutral now).  Doom's drawers -3% to -5% T800 cycles;
+  `test_post_inc.c`.
+- Unsigned compares on the parts without `gtu`: when both operands were
+  pushed by runs the history window can replay (a load and up to two
+  `ldnl`/`ldnlp`/`adc`, `tp_hist_value_run`), `tp_emit_gtu` pushes a zero
+  under them and takes `ldiff`'s borrow: `ldc 0; X; Y; ldiff; rev` is
+  X <u Y, 5 T800 cycles beside the pushes where the two sign flips
+  (`mint; xor` each) and `gt` cost 11.  Other operands keep the flips.
+  Flipping a literal's sign at compile time instead does not pay: a small
+  K becomes an eight-byte `ldc`.  Doom's `mint` count 220 -> 73 at
+  -mt800; `TCC_TRANSPUTER_LDIFF_CMP=0` turns it off;
+  `test_unsigned_cmp_ldiff.c`.
+- Halfword loads without `ls` (T800, T805, T425, T414): a local at an
+  even frame offset is half of its workspace word, `ldl w; ldc #ffff;
+  and` or `ldl w; ldc 16; shr` (8 and 21 cycles for the 27 or more of two
+  `lb` and a shift, and no `ldlp` for the post-pass to see escape); a
+  packed odd one and one through a pointer take the high byte first, so
+  only the address is parked (9 instructions, was 11:
+  `tp_load_half_bytes`, `tp_load_local_half`).  `test_half_load.c`.
+- `*p`, p a pointer local that is not volatile, to a word or narrower
+  integer or pointer, is an lvalue through p's own word (VT_LLOCAL,
+  `indir()` in tccgen.c) instead of p loaded into a register first, and
+  `vstore` leaves such a one-word target to `store()`, which reads p
+  right before the store: `<value>; ldl p; sb` where it was `ldl p; stl
+  9; <value>; ldl 9; sb`.  Structs, floats, long long, arrays and
+  functions keep the register path.  Doom's R_DrawColumn -1.3%, ~100
+  bytes less code; `test_deref_local_ptr.c`.
+
+- CoreMark work (2026-11-20, `transputer/COREMARK-INSTR.md`: -mt9000
+  1,301,505 -> 1,027,543 instructions an iteration, -mt800 -12.4%), five
+  passes over the finished function: `char`/`short` locals nobody else
+  names kept as whole words (`tp_narrow_locals`; `ldlp s; lb` -> `ldl s`,
+  a truncation only where an interval simulation cannot prove the stored
+  value in range; `TCC_TRANSPUTER_NARROW_LOCAL=0`), with a range peephole
+  (`ldc 2^k-1; and` of a value in range, `eqc 0; eqc 0` of a 0/1 value,
+  `xdble; ldc k; lshr` of a non-negative one); `c ? 1 : 0` diamonds as
+  `eqc 0; [eqc 0;] stl t` (`tp_bool_select`, `..._BOOL_SELECT=0`);
+  block-local copy propagation in the scheduler (`tps_block_copies`,
+  `TP_SCHED_MASK` bit 14, default now 0x7f7f); loop-invariant pure
+  arithmetic hoisted into new frame words on top of the locals
+  (`tp_hoist`, after the scheduler, `TCC_TRANSPUTER_HOIST=0`; `top` for
+  the remapper is now the global cache's words plus these); and a
+  post-increment used as a statement no longer loads its saved value
+  (`tp_hist_mark_pure` in `inc()`).  Measure with
+  `coremark/transputer/cm-measure.sh` (instruction counts via
+  `T4_EST_CYCLES=2`, per-iteration mix from two `T4_OPHIST` runs).
+- CoreMark round 2 (2026-11-20, same report: -mt9000 1,027,543 ->
+  895,789), more passes in `transputer-fnopt.h`:
+  - the range rules run again after the scheduler, with slot ranges
+    from every store (`tpn_late`), and the scheduler once more after
+    them.  New rules: a switch bounds check on a state that holds only
+    case values goes; `eqc 1` of a 0/1 value goes; `lo<=x & x<=hi`
+    becomes one `gtu`; `(a&m) op (b&m)` becomes `(a op b)&m`.  Knob
+    `TCC_TRANSPUTER_RANGE_PEEP=0`.
+  - `j`/`cj` to a `j` is threaded (`_THREAD`).  A `cj` threaded this way
+    skips a timeslice point, but loops do not timeslice anyway.
+  - a flag stored as a constant just before `S; ldl v; cj` is resolved
+    on that way in (`_FLAGS`).
+  - tiny leaves (`ajw; ldl arg; pure ops; ajw; ret`) are inlined at
+    near calls, and the call's relocation is dropped (`_INLINE_LEAF`).
+  - a `j` to a block of up to 6 instructions takes a copy of the block
+    (`_TAIL_DUP`).
+  - bottom tests `n > j` are inverted, so the hoisting computes n-1 once
+    (`_LOOP_INVERT`).
+  Trap, hit twice: a jump may name the PFIX 0 padding in front of an
+  instruction, or the record itself.  Code inserted before a record runs
+  for the first and not for the second.  So an insertion that a jump to
+  the record must also run makes its first copy take over the record
+  (`tpf_add.rep`), and a fall-through-only insertion goes in front of the
+  padding.  Test: `tests/test_range_flags.c`.
+  Round 3 (-mt9000 879,969, -mt800 1,281,628):
+  - narrow locals knows T800's halfword forms: `store()`'s two-`sb`
+    store through `FRAME_SLOT_SCRATCH` (`TPN_W_SB2`) and the
+    `ldl s; ldc 65535; and` read.
+  - on T800 the range test is `ldc 0; x-lo; ldc N; ldiff; rev`.
+  - `tpn_late` only (`tpn_in_late`): `push; push; rev` is swapped, and
+    `ldc K; x; gt(u); eqc 0` becomes `x; ldc K-1; gt(u)`.  Before the
+    scheduler the second ate half of a range test.
+  - `tp_induction_mask` drops a char counter's mask where the loop's own
+    `gt` test bounds it.
+- F1 (2026-11-20, `COREMARK-INSTR.md` "F1"): three scheduler-side rules
+  for values that need not visit the workspace.  S13 `Q; stl a; U; ldl a
+  -> U; Q` (`tps_park_unary`, `TCC_TRANSPUTER_PARK_UNARY=0`), S14
+  `*d++ = <R>` without parking the old d (`tps_postinc_sink`,
+  `_POSTINC_SINK=0`), and sign extensions only a zero test or byte store
+  reads (`tpn_peephole`, `_EXT_DROP=0`).  `_DUP_STL=1` turns a live
+  `stl x; ldl x` into `dup; stl x` (same count; for RTL A/B).  CoreMark
+  -mt9000 841,525 -> 835,065, Dhrystone 2.1 1436 -> 1335 (-mt9000),
+  1751 -> 1579 (-mt805); `test_f1_park.c`.
+- Jump tables are on by default since 2026-11-10 (`-mno-jump-tables` or
+  `T4_SWITCH_JT=0` for the compare chain; linux-7 boots with 101 of them,
+  boot cycles unchanged).  A dense switch - more than six
+  selectors, at least a third of the span used - compiles to a table of jumps
+  (`gen_switch_jump_table`): `ldc 0; ldl x; ldc n; ldiff; rev; cj default`
+  (one unsigned test of x - base for both ends; `gtu` on the T9000), then
+  `ldl x; ldc 2; ldpi; wsub; gcall` and a four-byte `j` for each index, 11
+  T800 cycles to the entry.  A table that starts within 16 of zero is
+  indexed by the value itself.  `default: __builtin_unreachable();`
+  (directly under the label) drops the range test, as with gcc.
+  Until 2026-11-10 the tables were nine-byte slots behind `ldc 9; prod`
+  and a padded `ldc`, and - what cost far more - a function with one was
+  left out of the whole post-pass (relaxation, scheduler, slot remap,
+  global cache), so every local access in it kept its five-byte
+  placeholder: dEngine's shader interpreter ran 5% slower with a table
+  than with compares.  Now `tp_relax_function` knows the tables
+  (`swtab_log`, `tab` on each instruction): the entries are sized as a
+  group, never below four bytes (a function over 64 KB is not relaxed and
+  keeps five-byte entries behind `ldc 5; prod`), and in the scheduler a
+  dispatch leads into the first entry and each entry on to the next, so
+  what any case reads is live at the dispatch.  Such a function is still
+  not relaxed again at link time (`tp_mark_relaxable`): a narrowed call
+  would move the entries apart.  Measured on dEngine (one node, shadows,
+  bump and specular off, estimated T800 cycles a frame): compares
+  1,953 M, tables 1,914 M, with the interpreter's default unreachable
+  1,850 M (-5.3%), frames identical.  Default-off because the first
+  version was implicated in a kernel boot failure (maple_tree
+  wr_invalid) that nobody has retested; the kernel is the test still
+  owed before it becomes the default.  `test_switch_table.c`.
 
 **Invariants for any pass that rewrites code already emitted**
 - Never across a jump target.  `gsym_addr` (forward targets) and `gind()`
@@ -771,11 +980,34 @@ the occam compiler does, and what new codegen should be held to:
   `gen_vla_sp_save`.  Running the cleanup at every `vpop` miscompiled
   09103, 09109 and the ray tracer's start-up.
 - `ldlp x` hands out x and x+1 (a double): it reads both.
+- In the relaxation pass a branch can land on a `pfix 0` padding record,
+  or on an instruction an earlier round deleted, and `tps_next` steps over
+  both: a rule that scans forward must check for branch targets over the
+  whole span (`tps_free`), not only on the instructions it visits.  S11's
+  first cut did not, and moved a copy that findRange's `if (c > max) max =
+  c;` jumps over (the ray tracer hung; `test_sched_copy.c`).  Later S11
+  deleted an `ldl` that a `j` landed on, and S5 then carried a value
+  across that join that only the fall-through path had pushed (difftest
+  seeds 13017, 13021).
+- The scheduler computes liveness once per function.  A rule that moves a
+  read of slot x later (S10, S11) makes x live where the bitmask says it
+  is dead, and must set the bits over the span it extends: S11 did not,
+  a second S11 took x for dead and removed its store, and c-testsuite
+  00182 (`*p++ = ' '`), five local tests, difftest seeds 13001.. and the
+  kernel (a BUG in pcpu_setup_first_chunk) all failed.
+  `TP_SCHED_BISECT=lo-hi` keeps S11 to functions whose name hashes into
+  [lo, hi) of 4096, for bisecting such a miscompile over a kernel build.
 - The fused FP loads (`fpldnladdsn`/`fpldnlmulsn` and the `db` forms)
   leave FC undefined (TCWG chapter 11), so nothing may be kept in FC across
   one; pushes, pops, stores, compares and `fprev` carry FC along.  A first
   cut that kept three products on the stack for `a*b + (c*d + e*f)` lost
   the first one (`test_fpu_resident`'s `dot3` caught it).
+- A rule that treats code between two instructions as "address code" must
+  model its stack depth, not list instructions to avoid: `tp_stmt_end`'s
+  `ldlp x; fpstnlsn; ldl x; <addr>; stnl` took `gen_opf(TOK_NEG)`'s
+  `mint; xor` (which pops x) for address code, so `m[0] = -(a + b)`
+  stored a + b - dEngine's gluLookAt came out with its translation's sign
+  flipped (2026-11-09, `tp_addr_effect`, `test_fp_neg_store.c`).
 - `CValue.i` is a `uint64_t`, so `sv->c.i < 0` is never true: the
   "canonical spilled copy" branches in `load()` and `tp_emit_float_addr`
   never run, and a register lvalue is always loaded from its register.
@@ -783,21 +1015,28 @@ the occam compiler does, and what new codegen should be held to:
 **Open** (roughly in order of what each would buy on the ray tracer;
 measured in T800 cycles with every instruction counted, fusion off: occam
 2.95 G, TinyCC 3.27 G, 1.11x, where instructions are 1.21x - most of the
-extra instructions are one- and two-cycle loads and stores)
+extra instructions are one- and two-cycle loads and stores.  On
+2026-11-05 it was 3.06 G, 1.04x, instructions 1.12x)
 - Parking through workspace: `ldl`/`stl`/`ldlp` +187 M cycles of the
   318 M gap.  What is left is integer: values parked between operations
   (`ldl a; adc 1; stl 9; ldl 9`), which the FPU-stack work does not reach.
-- Global addresses: `tree`, `worldModel`, ... are 7-cycle `ldc`s, 106 M
-  cycles in 15 M loads, where occam pays 2-3 through its static link.
-  Keeping a global's address in a frame word from its second use in a
-  basic block, labels forgetting it, saved only 2.5 M (blocks seldom use
-  a global three times) and hung model 1 on one node, so it was not kept.
-  What would pay is a function-wide base: hoisting across loop
-  iterations needs dominance, or occam's static-link scheme (an ABI
-  change).
+- Global addresses: `tree`, `worldModel`, ... were 8-cycle `ldc`s, 133 M
+  cycles over occam's, which pays 2-3 through its static link.  A
+  block-local cache (from a global's second use in a basic block, labels
+  forgetting it) saved only 2.5 M and hung model 1, so it was dropped;
+  the function-wide one (`tp_gaddr_cache`, under "What TinyCC does now")
+  cut the `ldc` excess to 69 M, 45 M net of the `ldl`s that replace the
+  loads.  What is left: the entry loads themselves (8 cycles each,
+  `shadeNode` has three), globals used once, and float constants used
+  once (below).  Several statics of one section could share one entry
+  load (`ldl base; ldnlp k`), but `ldnlp` with a 0x8000-byte offset costs
+  nearly what the `ldc` does.
 - FP constants as eight-nibble `ldc` literals parked in a slot (1.0,
-  0.001, 512.0, 4.0: about 25 M cycles after `x * 2.0`): load them from a
-  constant table instead.
+  0.001, 512.0, 4.0: about 25 M cycles after `x * 2.0`).  A constant a
+  function uses repeatedly now lives in a frame word and loads in place
+  (`ldlp word; fpldnlsn`, 13 M of it, `coneSect`'s 1.0 and 0.001); one
+  used once still costs `ldc; stl; ldlp`.  A table in the code reached
+  by `ldc off; ldpi`, as occam does, would cover those.
 - `fpordered` before every T800 relation (C's NaN rule): 19 M.
 - Loop and condition code: TinyCC's `cj`, `gt`, `adc` and `eqc` cost
   +200 M against occam's `lend` (-174 M); a counted `for` could be `lend`.
@@ -816,12 +1055,12 @@ extra instructions are one- and two-cycle loads and stores)
   residency.
 - A float comes back through slot 7, an integer word, and the caller stores
   it again; occam leaves it in FA.  That one is an ABI change.
-- Byte loops (Dhrystone's `strcpy`, 25 instructions a byte): `p++` goes
-  through two slots (`ldl 13; stl 9; ldl 9; stl 10; ldl 9; adc 1; stl 13`
-  where `ldl p; dup; adc 1; stl p` would do), a loaded `char` is sign
-  extended (`ldc 128; xword`) although only `sb` uses it, and the loop test
-  extends it again (`ldc 255; and; ldc 128; xword; eqc 0`) for a zero test
-  that needs no extension at all.
+- Byte loops (Dhrystone's `strcpy`, 25 instructions a byte): `p++` went
+  through two slots (`ldl 13; stl 9; ldl 9; stl 10; ldl 9; adc 1; stl 13`;
+  `ldl 13; ldl 13; adc 1; stl 13` since `inc()` above), a loaded `char` is
+  sign extended (`ldc 128; xword`) although only `sb` uses it, and the
+  loop test extends it again (`ldc 255; and; ldc 128; xword; eqc 0`) for
+  a zero test that needs no extension at all.
 - **A miscompile, fixed 2026-11-03** (difftest seed 9010, older than this
   work): `u64 x4(void) { return (zero ? m64 : m64) + (-(u64)((u16)l0)); }`
   (all globals) returned the wrong sum.  gv() moves the `?:` result out of
@@ -841,9 +1080,15 @@ extra instructions are one- and two-cycle loads and stores)
   third slot).  Tests: `tests/test_pair_move.c`, c-testsuite `09116`.
 
 **Writing C for it** (programming, not the compiler)
-- Copy arrays and structs with `memcpy` (inlined as `move`): a word loop
-  cost the ray tracer 10.5% of its run.  Fill an array by doubling
-  `memcpy`s.
+- Copy arrays and structs with `memcpy` (inlined as `move`, about 2 T800
+  cycles a word where a word loop costs 30): a word loop cost the ray
+  tracer 10.5% of its run.  Fill an array by doubling `memcpy`s (one
+  word, then copies of 1, 2, 4 ... words; fbwm_shm.c `shm_fill`, an
+  800x600 clear 14.4 M -> 1.0 M cycles).  The arguments must be plain
+  locals or constants, or the call goes to libc.
+- A store through a `char *` may alias any global, so a loop that names a
+  global reads it again every pass.  Copy what a hot loop reads into
+  locals first (Doom's drawers, 4198801b: -15% to -24%).
 - `__fpsqrt`/`__fpabs`, not wrappers round them.
 - ALTs of two or three channels: `ChanAlt2`, `ChanAlt3`,
   `ChanAltGuarded3` (`conc.h`, straight-line, about 30 instructions)
@@ -856,7 +1101,12 @@ does not depend on the host's load; t4's clock is the host's, so times do.
 `ldlp; fpldnlsn`, ...) into one, so it understates both compilers by
 about 28%; for real instruction counts and T800 cycles use the counting
 t4 and `oph.py` in `t4/examples/transputer-raytracer/c` (`CODEGEN.md`
-there, "Every instruction, in T800 cycles").
+there, "Every instruction, in T800 cycles").  Any t4 from daa9efa has
+`T4_EST_CYCLES=1`: fusion off, and `ldtimer` returns the estimated T800
+cycles of what has run (`=2` the instruction count), so a program's own
+timer deltas are deterministic (`t4/t800_cycles.h`).
+`tests/bench/doom.sh <cpu>` uses it for Doom's drawers, FixedMul/FixedDiv
+and the present path, each with a hash of its result.
 `T4_IPTR_SAMPLE=N` samples IPtr for a profile against the `.elf.tccsym`
 map; `T4_DUMP_WORDS=addr:n,...` dumps memory (which is how the occam code
 was read).  A bit-exact reference output is the best oracle for an FP
@@ -1216,7 +1466,7 @@ evidence: **`transputer/TVX-ISA.md`**.
 - Semantic core: `transputer/t4/tvx.h` — shared by the emulator *and* by
   `tccgen.c` for `__bf16` constant folding, so the two cannot diverge.  The
   compiler carries verbatim copies of it and of `tvx_iq.h`, `tvx_vec.h`,
-  `tvx_gguf_tables.h` and `tvx_gguf_decode.h` in `lib/transputer-tvx/`, so
+  `tvx_gguf_tables.h` and `tvx_gguf_decode.h` in `lib/transputer/tvx/`, so
   it builds without transputer/; after changing one in t4 run
   `sh transputer/scripts/sync-tvx-headers.sh` (`--check` only compares).
 - Two axes: block instructions (`MXFP4DOT`/`BF16DOT`/`MXFP4GEMV`, 32 or N×32
@@ -1241,7 +1491,7 @@ evidence: **`transputer/TVX-ISA.md`**.
   `test_tvx_qwen38.c` checks QDOT on them on every part (the instruction
   at -mt9000tvx, software TVX elsewhere); `test_gguf_decode_parts.c`
   compiles the same decoders (`t4/tvx_gguf_decode.h`, against the libc-free
-  `lib/transputer-tvx/include`) for whatever part is selected and checks
+  `lib/transputer/tvx/include`) for whatever part is selected and checks
   decode and dots bit for bit, so it also covers soft-float on real data.
   Both pass on -mt9000, -mt9000tvx, -mt805, -mt800, and on -mt425/-mt414
   under t4's strict `-s425`/`-s414`.
@@ -1256,7 +1506,7 @@ Plain `-mt9000`, still the default, is the T9000 (the RTL core) without
 TVX; the T9000's VCP builtins and the T9 core's T&L temps (`__tld` ..
 `__fpoly3`) need `-mt9000` or more.  Every target without TVX converts
 `__bf16`/`__fp16`/`_Float16` and runs the four 16-bit conversion builtins
-through `lib/transputer-f16.c` (bit for bit the TVX instructions; in every
+through `lib/transputer/transputer-f16.c` (bit for bit the TVX instructions; in every
 runtime archive), so 16-bit float code compiles everywhere.  The kernel uses
 CSUM for `do_csum` only under `__TVX__`, and the TVX tests carry
 `Target: -mt9000tvx` (local) or the `tvx` tag (c-testsuite).
@@ -1270,11 +1520,11 @@ calls into the runtime - the MX/bfloat16 scalar and SIMD ones
 `__iq1mdot`, `__iq2xxsdot`, `__iq3xxsdot`, `__qsetfmt`, `__qdot`).
 `tp_soft_tvx_descs` in `transputer-gen.c` lists them, with their parameter
 types (each argument is cast, then `__tvx_<name>` is called);
-`lib/transputer-tvx.c`, `-tvx-iq.c` and `-tvx-qdot.c` implement them by
+`lib/transputer/transputer-tvx.c`, `-tvx-iq.c` and `-tvx-qdot.c` implement them by
 repeating t4's p.c code for each instruction on the vendored headers, with the
 same float operations in the same order.  They are three objects so that
 `__bf16add2` does not pull in 55 KB of GGUF codebooks; they need no libc
-(built `-nostdinc` against `lib/transputer-tvx/include`), and the i-quant
+(built `-nostdinc` against `lib/transputer/tvx/include`), and the i-quant
 and QDOT helpers put about 1.3 KB on the caller's workspace (a decoded block).
 The QSETFMT latch is one static per program.  The rest - vector kernels
 (`__vsetlen` ..), block rotation, `__qgemm`/`__vq8k`/`__vq80`/`__vsetfmt`,
@@ -1353,7 +1603,7 @@ byte-identical).
 
 - **Soft float.** Every float/double operation becomes a call to a
   libgcc-named helper (`__adddf3`, `__ltsf2`, `__floatsidf`, `__fixdfsi`,
-  `__truncdfsf2`, ...) in `lib/transputer-softfp.c`: IEEE 754
+  `__truncdfsf2`, ...) in `lib/transputer/transputer-softfp.c`: IEEE 754
   round-to-nearest-even with subnormals, signed zeros, infinities and NaNs,
   no exception flags.  Floats already live in workspace words and a double
   is passed and returned like a long long, so they are ordinary calls
@@ -1364,7 +1614,7 @@ byte-identical).
   bit as the TVX instructions.  The file is plain C, checked on the host:
   2x10^8 random and special-value checks of the arithmetic against x86-64
   SSE, square roots against libm, and the 16-bit conversions against
-  `lib/transputer-tvx/tvx.h` for all 2^32 inputs - no differences.  Most
+  `lib/transputer/tvx/tvx.h` for all 2^32 inputs - no differences.  Most
   single-length helpers and the double arithmetic run in assembly instead
   (see "The FP-support instructions" below), with this C as their slow
   path.
@@ -1435,7 +1685,7 @@ byte-identical).
 - **The FP-support instructions** (2026-11-03).  The T414 and T425 both
   have `unpacksn` (#63), `postnormsn` (#6C), `roundsn` (#6D), `ldinf`
   (#71) and `cflerr` (#73) (TCWG 7.11, D.4; t4 `-s425`/`-s414` run them),
-  and `lib/transputer-softfp-sn.S` is single precision on them the way
+  and `lib/transputer/transputer-softfp-sn.S` is single precision on them the way
   INMOS's T414 REAL32 runtime is (`t4/examples/sqrroots/sqrroots.b4h`):
   `unpacksn` gives the fraction with its leading 1 at bit 31 and the biased
   exponent, `norm; postnormsn; roundsn` packs B:A with W[0] = exponent,
@@ -1466,7 +1716,7 @@ byte-identical).
     1120 -> 207, double to float 967 -> 225, a degree-6 Horner polynomial
     x6.4, a dot product x6.9; t4 instruction counts fall by similar
     factors.  +1 KB of runtime when floats are used.
-  - **Doubles** (`lib/transputer-softfp-db.S`): `__adddf3`, `__subdf3`,
+  - **Doubles** (`lib/transputer/transputer-softfp-db.S`): `__adddf3`, `__subdf3`,
     `__muldf3` and `__divdf3` the same way on the long arithmetic, with
     the rounding (`PACK`) by hand, since `roundsn` is single-length only:
     multiply is four `lmul` into 128 bits; divide is Knuth's algorithm D
@@ -1513,7 +1763,7 @@ locals 0..N; `00207` hung.  Now **`WPtr` never moves**.
   `gen_vla_result`, as it does for Win64 (a target-list addition).  Being
   ordinary `gfunc_call`s, the restores spill whatever the vstack holds -
   the return value, a statement expression's value - first.
-- **Whose arena** (`lib/transputer-vla.c`, `lib/transputer-conc.c`):
+- **Whose arena** (`lib/transputer/transputer-vla.c`, `lib/transputer/transputer-conc.c`):
   processes share globals and no instruction names the running process,
   so the only thing a process owns is `WPtr`, inside its workspace.
   `PSetup` now starts every process in `__tp_proc_start(func, ws)`, entered
@@ -1646,9 +1896,9 @@ void __outword(const void *chan, int word);
  * __startp's `entry` is an offset relative to the NEXT IPtr, not an address,
  * and it schedules immediately - so it cannot launch a function by pointer.
  * To do that, write the entry address into the Iptr slot at Wptr[-1] and
- * hand the descriptor to __runp; see PSetup() in lib/transputer-conc.c. */
+ * hand the descriptor to __runp; see PSetup() in lib/transputer/transputer-conc.c. */
 void __startp(void *wptr, int entry_offset); /* Start process */
-void __endp(void);                          /* End process */
+void __endp(void *successor);               /* Join at successor workspace */
 void __runp(int descriptor);                /* Schedule Wptr|priority */
 void __stopp(void);                         /* Stop process */
 
@@ -1682,8 +1932,8 @@ int  __testpranal(void); /* 1 if the processor booted after Analyse */
  *
  * See include/conc.h for the wrapped form (ChanAlt/ChanSkipAlt/ChanTimerAlt).
  */
-void __alt(void);  int __altwt(void);  void __altend(void);
-void __talt(void); int __taltwt(void);
+void __alt(void);  void __altwt(void);  void __altend(void);
+void __talt(void); void __taltwt(void);
 void __enbc(int guard, const void *chan);   /* AReg=guard, BReg=chan */
 void __enbt(int guard, unsigned int time);  /* AReg=guard, BReg=time */
 void __enbs(int guard);
@@ -1775,7 +2025,7 @@ when the message got through, 1 when it was abandoned (and the channel
 reset), -1 for a workspace under `PROC_WS_MIN`.  The TimeFail pair had been
 declared but never defined (`REVIEW-afcc4dfe.md` item 23).
 
-- **How** (`lib/transputer-conc.c`, `xfail`): the transfer runs in a
+- **How** (`lib/transputer/transputer-conc.c`, `xfail`): the transfer runs in a
   high-priority helper process in the caller's `ws`; the caller ALTs on the
   helper's completion channel and the timer or kill channel, and on a
   timeout resets the channel - the helper, waiting on it, is then on no

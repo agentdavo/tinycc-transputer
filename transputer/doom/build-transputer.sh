@@ -12,23 +12,64 @@
 #   - uClibc-ng must be built (cd transputer/uClibc-ng && make)
 #   - transputer-elf2flt must be built (for bFLT conversion)
 #
+# SPINE=1 builds for the SPINE-chip display layout (see below), as
+# fbwm/build-fbwm.sh does.
+# DOOM_RECT_MOVE2D=1 enables the status-bar rectangle fast path when the
+# runtime preserves MOVE2D state across preemption.
+#
+# CPU=t805 (or t800, t425, t414) builds for that part into build-tp-$CPU
+# and links its libtcc1 (the soft-float helpers on the T425/T414).  The
+# default is the T9000, into build-tp.  uClibc-ng's lib/libc.a is built
+# for the T9000 (it has gtu, ls, ss), so another part links
+# lib/libc-$CPU.a, which transputer/scripts/build-uclibc-part.sh makes;
+# without it the link falls back to libc.a with a warning.
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOOM_SRC="$SCRIPT_DIR/linuxdoom-1.10"
 TRANS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$TRANS_DIR/.." && pwd)"
-BUILD_DIR="$SCRIPT_DIR/build-tp"
-UCLIBC="$TRANS_DIR/uClibc-ng"
+CPU="${CPU:-t9000}"
+case "$CPU" in
+    t9000) BUILD_DIR="$SCRIPT_DIR/build-tp"; LIBTCC1=transputer-libtcc1.a ;;
+    t805|t800) BUILD_DIR="$SCRIPT_DIR/build-tp-$CPU"; LIBTCC1=transputer-libtcc1-t800.a ;;
+    t425|t414) BUILD_DIR="$SCRIPT_DIR/build-tp-$CPU"; LIBTCC1=transputer-libtcc1-$CPU.a ;;
+    *) echo "ERROR: unknown CPU=$CPU (t9000, t805, t800, t425, t414)"; exit 1 ;;
+esac
+UCLIBC="${UCLIBC:-$TRANS_DIR/uClibc-ng}"
+LIBC="$UCLIBC/lib/libc.a"
+if [ "$CPU" != t9000 ]; then
+    if [ -f "$UCLIBC/lib/libc-$CPU.a" ]; then
+        LIBC="$UCLIBC/lib/libc-$CPU.a"
+    else
+        echo "WARNING: no $UCLIBC/lib/libc-$CPU.a: linking the T9000 libc.a," \
+             "which has instructions the $CPU lacks" \
+             "(transputer/scripts/build-uclibc-part.sh $CPU builds one)"
+    fi
+fi
 INITRAMFS="$TRANS_DIR/initramfs"
 
 TCC="$ROOT_DIR/transputer-tcc"
 ELF2FLT="$ROOT_DIR/transputer-elf2flt"
 
 # Compiler flags
-CFLAGS="-mt9000 -w"
+CFLAGS="-m$CPU -w"
+if [ "$CPU" != t414 ]; then
+    CFLAGS="$CFLAGS -DTPOS_HAVE_MOVE2D=1"
+    if [ "${DOOM_RECT_MOVE2D:-0}" = "1" ]; then
+        CFLAGS="$CFLAGS -DDOOM_RECT_MOVE2D=1"
+    fi
+fi
 CFLAGS="$CFLAGS -D__GNUC__=4 -D__GNUC_MINOR__=4 -D__GNUC_PATCHLEVEL__=0"
 CFLAGS="$CFLAGS -DNORMALUNIX -DTRANSPUTER"
+# SPINE=1: the SPINE-chip display addresses (frame buffer 0x81000000), for
+# a CONFIG_TRANSPUTER_SPINE_CHIP kernel, which tpos_defconfig is.  Without
+# it Doom draws at the T4 layout's 0x81e00000, which that kernel hands out
+# as ordinary RAM: the first screen clear then lands on Doom's own heap.
+if [ "${SPINE:-0}" = "1" ]; then
+    CFLAGS="$CFLAGS -DTPOS_SPINE_CHIP"
+fi
 CFLAGS="$CFLAGS -include $DOOM_SRC/doom_tp_config.h"
 CFLAGS="$CFLAGS -nostdinc"
 CFLAGS="$CFLAGS -I$ROOT_DIR/include/transputer -I$ROOT_DIR/include"
@@ -121,11 +162,19 @@ do_compile() {
         echo "    FAILED: fbwm_shm.c (see $BUILD_DIR/compile.log)"
         failed=$((failed + 1))
     fi
+
+    # FixedMul/FixedDiv (m_fixed.c leaves them to this under TRANSPUTER)
+    printf "  [++] m_fixed_tp.S\n"
+    if ! $TCC -m$CPU -c -o "$BUILD_DIR/m_fixed_tp.o" \
+            "$DOOM_SRC/m_fixed_tp.S" 2>>"$BUILD_DIR/compile.log"; then
+        echo "    FAILED: m_fixed_tp.S (see $BUILD_DIR/compile.log)"
+        failed=$((failed + 1))
+    fi
     if [ "$failed" -gt 0 ]; then
         echo "=== Compilation: $failed files FAILED ==="
         return 1
     else
-        echo "=== Compilation: $total files + fbwm_shm OK ==="
+        echo "=== Compilation: $total files + fbwm_shm + m_fixed_tp OK ==="
     fi
 }
 
@@ -135,7 +184,7 @@ do_link() {
     # Build CRT objects
     local crt1="$BUILD_DIR/crt1.o"
     if [ -f "$INITRAMFS/crt1.S" ]; then
-        $TCC -nostdlib -nostdinc -c -o "$crt1" "$INITRAMFS/crt1.S"
+        $TCC -m$CPU -nostdlib -nostdinc -c -o "$crt1" "$INITRAMFS/crt1.S"
     elif [ -f "$UCLIBC/lib/crt1.o" ]; then
         cp "$UCLIBC/lib/crt1.o" "$crt1"
     else
@@ -146,12 +195,17 @@ do_link() {
     # Build syscall stub
     local syscall_stub="$BUILD_DIR/syscall_stub.o"
     if [ -f "$TRANS_DIR/tests/syscall_stub.c" ]; then
-        $TCC -nostdlib -nostdinc \
+        local trap_syscall=0
+        if [ "$CPU" = t9000 ]; then
+            trap_syscall=${TP_USE_T9K_SYSCALL:-0}
+        fi
+        $TCC -m$CPU -nostdlib -nostdinc \
             -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
             -I"$UCLIBC/include" \
             -I"$UCLIBC/libc/sysdeps/linux/transputer" \
             -I"$UCLIBC/libc/sysdeps/linux/common" \
             -I"$TRANS_DIR/linux-2.6.39/include" \
+            "-DTP_USE_T9K_SYSCALL=$trap_syscall" \
             -c -o "$syscall_stub" "$TRANS_DIR/tests/syscall_stub.c"
     elif [ -f /tmp/tpsh_syscall_stub.o ]; then
         cp /tmp/tpsh_syscall_stub.o "$syscall_stub"
@@ -160,7 +214,7 @@ do_link() {
     # CRT bridge (if available)
     local crt_bridge=""
     if [ -f "$INITRAMFS/crt_bridge.c" ]; then
-        $TCC -nostdlib -nostdinc \
+        $TCC -m$CPU -nostdlib -nostdinc \
             -I"$ROOT_DIR/include/transputer" -I"$ROOT_DIR/include" \
             -I"$UCLIBC/include" \
             -I"$UCLIBC/libc/sysdeps/linux/transputer" \
@@ -180,14 +234,16 @@ do_link() {
     done
 
     # Link: CRT → CRT_BRIDGE → DOOM objects → SHM compositor → SYSCALL → LIBC
-    $TCC -nostdlib -nostdinc \
+    $TCC -m$CPU -nostdlib -nostdinc \
         -o "$BUILD_DIR/doom.elf" \
         "$crt1" \
         $crt_bridge \
         $objs \
+        "$BUILD_DIR/m_fixed_tp.o" \
         "$BUILD_DIR/fbwm_shm.o" \
         "$syscall_stub" \
-        "$UCLIBC/lib/libc.a"
+        "$LIBC" \
+        "$ROOT_DIR/$LIBTCC1"
 
     local size=$(stat -c%s "$BUILD_DIR/doom.elf" 2>/dev/null || echo "?")
     echo "=== Linked: doom.elf ($size bytes) ==="

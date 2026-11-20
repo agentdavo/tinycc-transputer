@@ -21,7 +21,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TCC_BIN="$ROOT_DIR/transputer-tcc"
 NETLOAD_BIN="$ROOT_DIR/transputer-netload"
-UCLIBC_DIR="$ROOT_DIR/transputer/uClibc-ng"
+UCLIBC_DIR="${UCLIBC:-$ROOT_DIR/transputer/uClibc-ng}"
+LIBTCC1="$ROOT_DIR/transputer-libtcc1.a"
 TESTS_DIR="$ROOT_DIR/transputer/tests"
 TCC_INCLUDE="$ROOT_DIR/include"
 KERNEL_TREE="${KERNEL_TREE:-linux-7}"
@@ -41,6 +42,11 @@ fi
 if [[ ! -f "$UCLIBC_DIR/lib/libc.a" ]]; then
     echo "ERROR: uClibc-ng libc.a not found. Build it first:"
     echo "  cd transputer/uClibc-ng && make ARCH=transputer defconfig && LD_LIBRARY_PATH='' make"
+    exit 1
+fi
+
+if [[ ! -f "$LIBTCC1" ]]; then
+    echo "ERROR: $LIBTCC1 is missing. Build the Transputer compiler runtime first."
     exit 1
 fi
 
@@ -112,31 +118,52 @@ cat > "$SHIM_DIR/math.h" << 'MATHEOF'
  * The full uClibc-ng math.h has complex macros that TCC cannot parse. */
 #ifndef _MATH_H
 #define _MATH_H 1
+#include <stdint.h>
 #define HUGE_VAL  (__builtin_huge_val())
 #define HUGE_VALF (__builtin_huge_valf())
 #define INFINITY  (__builtin_inff())
 #define NAN       (__builtin_nanf(""))
 extern double ldexp(double __x, int __exp);
-extern long double ldexpl(long double __x, int __exp);
+/* Native Transputer long double has the binary64 representation. */
+static long double ldexpl(long double x, int exp)
+{
+    union { uint64_t bits; double number; } scale;
+
+    /* Keep the final scale normal so a subnormal result rounds once. */
+    if (exp > 1023) {
+        x *= 0x1p1023;
+        exp -= 1023;
+        if (exp > 1023) {
+            x *= 0x1p1023;
+            exp -= 1023;
+            if (exp > 1023)
+                exp = 1023;
+        }
+    } else if (exp < -1022) {
+        x *= 0x1p-969;
+        exp += 969;
+        if (exp < -1022) {
+            x *= 0x1p-969;
+            exp += 969;
+            if (exp < -1022)
+                exp = -1022;
+        }
+    }
+    scale.bits = (uint64_t)(exp + 1023) << 52;
+    return x * scale.number;
+}
 extern double frexp(double __x, int *__exp);
 #endif
 MATHEOF
 
 # ---------------------------------------------------------------------------
-# Step 2: Build crt0.o from uClibc-ng (if not already built)
+# Step 2: Build the TransputerOS bFLT startup objects
 # ---------------------------------------------------------------------------
-CRT0_OBJ="$OUTDIR/crt0.o"
-CRT0_SRC="$UCLIBC_DIR/libc/sysdeps/linux/transputer/crt0.S"
-
-if [[ -f "$CRT0_SRC" ]]; then
-    "$TCC_BIN" -mt9000 -w -nostdlib -nostdinc \
-        -I"$TCC_INCLUDE/transputer" -I"$TCC_INCLUDE" \
-        -c -o "$CRT0_OBJ" "$CRT0_SRC"
-    echo "[2/5] Built crt0.o"
-else
-    echo "[2/5] SKIP: crt0.S not found (will use test_boot.S fallback)"
-    CRT0_OBJ=""
-fi
+"$TCC_BIN" -mt9000 -nostdlib -nostdinc -c -o "$OUTDIR/crt1.o" \
+    "$SCRIPT_DIR/initramfs/crt1.S"
+"$TCC_BIN" -mt9000 -nostdlib -nostdinc -c -o "$OUTDIR/crt_bridge.o" \
+    "$SCRIPT_DIR/initramfs/crt_bridge.c"
+echo "[2/5] Built TransputerOS startup objects"
 
 # ---------------------------------------------------------------------------
 # Step 3: Compile TCC in ONE_SOURCE mode for transputer
@@ -213,28 +240,18 @@ echo "    tcc.o size: $OBJ_SIZE bytes"
 # ---------------------------------------------------------------------------
 echo "[4/5] Linking native-tcc.elf..."
 
-# Build syscall stub if needed
-SYSCALL_OBJ="$TESTS_DIR/syscall_stub.o"
-if [[ ! -f "$SYSCALL_OBJ" ]]; then
-    "$TCC_BIN" -mt9000 -w -nostdlib -nostdinc \
-        -I"$TCC_INCLUDE/transputer" -I"$TCC_INCLUDE" -I"$UCLIBC_DIR/include" \
-        -I"$LINUX_ARCH_INCLUDE" -I"$LINUX_ARCH_GENERATED_INCLUDE" \
-        -I"$LINUX_UAPI_INCLUDE" \
-        -I"$LINUX_INCLUDE" \
-        -c -o "$SYSCALL_OBJ" "$TESTS_DIR/syscall_stub.c"
-    echo "    Built syscall_stub.o"
-fi
+# Build the ABI selected for this invocation.
+SYSCALL_OBJ="$OUTDIR/syscall_stub.o"
+"$TCC_BIN" -mt9000 -w -nostdlib -nostdinc \
+    -I"$TCC_INCLUDE/transputer" -I"$TCC_INCLUDE" -I"$UCLIBC_DIR/include" \
+    -I"$LINUX_ARCH_INCLUDE" -I"$LINUX_ARCH_GENERATED_INCLUDE" \
+    -I"$LINUX_UAPI_INCLUDE" -I"$LINUX_INCLUDE" \
+    "-DTP_USE_T9K_SYSCALL=${TP_USE_T9K_SYSCALL:-0}" \
+    -c -o "$SYSCALL_OBJ" "$TESTS_DIR/syscall_stub.c"
 
 # Link everything together
-# Order: crt0.o crt1.o tcc.o syscall_stub.o libc.a
-LINK_OBJS=()
-if [[ -n "$CRT0_OBJ" && -f "$CRT0_OBJ" ]]; then
-    LINK_OBJS+=("$CRT0_OBJ")
-fi
-LINK_OBJS+=("$UCLIBC_DIR/lib/crt1.o")
-LINK_OBJS+=("$OUTDIR/tcc.o")
-LINK_OBJS+=("$SYSCALL_OBJ")
-LINK_OBJS+=("$UCLIBC_DIR/lib/libc.a")
+LINK_OBJS=("$OUTDIR/crt1.o" "$OUTDIR/crt_bridge.o" "$OUTDIR/tcc.o"
+           "$SYSCALL_OBJ" "$UCLIBC_DIR/lib/libc.a" "$LIBTCC1")
 
 "$TCC_BIN" -mt9000 -w -nostdlib -static \
     -o "$OUTDIR/native-tcc.elf" \
@@ -287,5 +304,5 @@ echo "  bFLT: /tmp/native-tcc.flt"
 echo "  Build dir: $OUTDIR/"
 echo ""
 echo "To test (once transputer OS is running):"
-echo "  # Copy native-tcc.elf to transputer filesystem"
+echo "  # Copy native-tcc.flt to the Transputer filesystem as native-tcc"
 echo "  # Run: ./native-tcc -c -o hello.o hello.c"

@@ -32,6 +32,18 @@
 #include "fbwm.h"
 #include "fbwm_shm.h"
 
+#if defined(FBWM_DYNAMIC_SURFACES) || defined(FBWM_HOST)
+#include <errno.h>
+#include <stddef.h>
+#include <sys/mman.h>
+#ifdef FBWM_HOST
+#include <unistd.h>
+#else
+#include <bits/uClibc_page.h>
+#endif
+#define FBWM_MAPPED_SURFACES
+#endif
+
 /* ========================================================================
  * T800 MOVE/MOVE2D intrinsic declarations
  * These are built-in to the transputer-tcc backend (transputer-gen.c).
@@ -230,28 +242,81 @@ static unsigned int bench_pixels;
 /* ========================================================================
  * Retained surface pool
  *
- * Fixed-capacity slots avoid malloc on the freestanding target.  Slot 1
- * is sized for a terminal client (~640x400); the rest fit DOOM 320x240
- * and general utility windows.
+ * Slots bound the size and number of retained surfaces. Linux maps the
+ * requested pixels on demand and releases them when the surface is destroyed.
+ * Freestanding builds use fixed backing storage.
  * ======================================================================== */
 
 #define FBWM_SURF_POOL_SLOTS 4
 
+#ifdef FBWM_MAPPED_SURFACES
+static unsigned int *surf_pool_base[FBWM_SURF_POOL_SLOTS];
+static size_t surf_pool_len[FBWM_SURF_POOL_SLOTS];
+#ifndef FBWM_HOST
+#define TP_NR_MUNMAP_OWNED 2002
+extern long __transputer_syscall(long, long, long, long, long, long, long);
+#endif
+#else
 static unsigned int surf_pool_0[320 * 240];
-static unsigned int surf_pool_1[640 * 400];
-static unsigned int surf_pool_2[320 * 240];
-static unsigned int surf_pool_3[400 * 300];
+static unsigned int surf_pool_1[320 * 240];
+static unsigned int surf_pool_2[400 * 300];
+static unsigned int surf_pool_3[640 * 400];
 
 static unsigned int *const surf_pool_base[FBWM_SURF_POOL_SLOTS] = {
     surf_pool_0, surf_pool_1, surf_pool_2, surf_pool_3
 };
+#endif
+/* Prefer the smallest available slot that fits the client. */
 static const int surf_pool_cap_w[FBWM_SURF_POOL_SLOTS] = {
-    320, 640, 320, 400
+    320, 320, 400, 640
 };
 static const int surf_pool_cap_h[FBWM_SURF_POOL_SLOTS] = {
-    240, 400, 240, 300
+    240, 240, 300, 400
 };
 static int surf_pool_used[FBWM_SURF_POOL_SLOTS];
+
+#ifdef FBWM_MAPPED_SURFACES
+static size_t surface_pixel_bytes(int w, int h)
+{
+    return (size_t)w * h * sizeof(unsigned int);
+}
+
+static size_t surface_mapping_bytes(int slot, size_t requested)
+{
+#ifndef FBWM_HOST
+    static int owned_unmap;
+
+    /* Probe with an invalid length. Older kernels lack the syscall, so
+     * reserve the slot capacity to allow growth without leaking a mapping. */
+    if (!owned_unmap) {
+        long ret = __transputer_syscall(TP_NR_MUNMAP_OWNED, 0, 0, 0, 0, 0, 0);
+        owned_unmap = ret == -EINVAL ? 1 : -1;
+    }
+    if (owned_unmap < 0)
+        return surface_pixel_bytes(surf_pool_cap_w[slot], surf_pool_cap_h[slot]);
+#else
+    (void)slot;
+#endif
+    return requested;
+}
+
+static void surface_pool_unmap(int slot)
+{
+    void *pixels = surf_pool_base[slot];
+    size_t bytes = surf_pool_len[slot];
+#ifdef FBWM_HOST
+    int ret = munmap(pixels, bytes);
+#else
+    /* Older kernels can report success from munmap without freeing pages. */
+    long ret = __transputer_syscall(TP_NR_MUNMAP_OWNED, (long)pixels,
+                                    bytes, 0, 0, 0, 0);
+#endif
+    if (ret == 0) {
+        surf_pool_base[slot] = NULL;
+        surf_pool_len[slot] = 0;
+    }
+}
+#endif
 
 typedef struct {
     int             win_id;     /* -1 if free */
@@ -1280,20 +1345,28 @@ void wm_draw_taskbar(void)
  * Retained surfaces and compositor
  * ======================================================================== */
 
+static void surface_release(fbwm_surface_t *surf)
+{
+    if (surf->pool_slot >= 0 && surf->pixels) {
+#ifdef FBWM_MAPPED_SURFACES
+        surface_pool_unmap(surf->pool_slot);
+#endif
+        surf_pool_used[surf->pool_slot] = 0;
+    }
+    surf->win_id = -1;
+    surf->w = 0;
+    surf->h = 0;
+    surf->stride = 0;
+    surf->pixels = (void *)0;
+    surf->pool_slot = -1;
+    surf->dirty = 0;
+}
+
 static void surface_reset_all(void)
 {
     int i;
-    for (i = 0; i < FBWM_MAX_SURFACES; i++) {
-        wm_surfaces[i].win_id = -1;
-        wm_surfaces[i].w = 0;
-        wm_surfaces[i].h = 0;
-        wm_surfaces[i].stride = 0;
-        wm_surfaces[i].pixels = (void *)0;
-        wm_surfaces[i].pool_slot = -1;
-        wm_surfaces[i].dirty = 0;
-    }
-    for (i = 0; i < FBWM_SURF_POOL_SLOTS; i++)
-        surf_pool_used[i] = 0;
+    for (i = 0; i < FBWM_MAX_SURFACES; i++)
+        surface_release(&wm_surfaces[i]);
 }
 
 static fbwm_surface_t *surface_for_window(int win_id)
@@ -1316,13 +1389,52 @@ static fbwm_surface_t *surface_alloc_slot(void)
     return (void *)0;
 }
 
+static int surface_pool_fits(int slot, int w, int h)
+{
+    return surf_pool_cap_w[slot] >= w && surf_pool_cap_h[slot] >= h;
+}
+
+#ifdef FBWM_MAPPED_SURFACES
+static int surface_pool_reuse(const fbwm_surface_t *surf, int w, int h)
+{
+    int slot = surf ? surf->pool_slot : -1;
+    size_t bytes, page_mask;
+
+    if (slot < 0 || !surface_pool_fits(slot, w, h))
+        return -1;
+    bytes = surface_mapping_bytes(slot, surface_pixel_bytes(w, h));
+#ifdef FBWM_HOST
+    page_mask = (size_t)getpagesize() - 1;
+#else
+    page_mask = PAGE_SIZE - 1;
+#endif
+    /* Compare the page containing the last byte of each extent. */
+    if (((bytes - 1) & ~page_mask) != ((surf_pool_len[slot] - 1) & ~page_mask))
+        return -1;
+    return slot;
+}
+#endif
+
 static int surface_pool_claim(int w, int h)
 {
     int i;
     for (i = 0; i < FBWM_SURF_POOL_SLOTS; i++) {
-        if (!surf_pool_used[i] &&
-            surf_pool_cap_w[i] >= w &&
-            surf_pool_cap_h[i] >= h) {
+        if (!surf_pool_used[i] && surface_pool_fits(i, w, h)) {
+#ifdef FBWM_MAPPED_SURFACES
+            size_t requested = surface_pixel_bytes(w, h);
+            if (!surf_pool_base[i]) {
+                size_t bytes = surface_mapping_bytes(i, requested);
+                void *pixels = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+                if (pixels == MAP_FAILED)
+                    continue;
+                surf_pool_base[i] = pixels;
+                surf_pool_len[i] = bytes;
+            }
+            if (surf_pool_len[i] < requested)
+                continue;
+#endif
             surf_pool_used[i] = 1;
             return i;
         }
@@ -1373,7 +1485,7 @@ int wm_surface_create(int win_id)
     fbwm_window_t *win;
     fbwm_rect_t cr;
     fbwm_surface_t *surf;
-    int slot;
+    int slot = -1;
 
     win = wm_get(win_id);
     if (!win) return -1;
@@ -1381,14 +1493,18 @@ int wm_surface_create(int win_id)
     wm_client_rect(win_id, &cr);
     if (cr.w <= 0 || cr.h <= 0) return -1;
 
-    /* Replace any existing surface. */
-    wm_surface_destroy(win_id);
-
-    surf = surface_alloc_slot();
-    if (!surf) return -1;
-
-    slot = surface_pool_claim(cr.w, cr.h);
-    if (slot < 0) return -1;
+    surf = surface_for_window(win_id);
+#ifdef FBWM_MAPPED_SURFACES
+    slot = surface_pool_reuse(surf, cr.w, cr.h);
+#endif
+    if (slot < 0) {
+        if (surf)
+            surface_release(surf);
+        surf = surface_alloc_slot();
+        if (!surf) return -1;
+        slot = surface_pool_claim(cr.w, cr.h);
+        if (slot < 0) return -1;
+    }
 
     surf->win_id = win_id;
     surf->w = cr.w;
@@ -1434,15 +1550,7 @@ void wm_surface_destroy(int win_id)
 {
     fbwm_surface_t *surf = surface_for_window(win_id);
     if (!surf) return;
-    if (surf->pool_slot >= 0 && surf->pool_slot < FBWM_SURF_POOL_SLOTS)
-        surf_pool_used[surf->pool_slot] = 0;
-    surf->win_id = -1;
-    surf->w = 0;
-    surf->h = 0;
-    surf->stride = 0;
-    surf->pixels = (void *)0;
-    surf->pool_slot = -1;
-    surf->dirty = 0;
+    surface_release(surf);
 }
 
 unsigned int *wm_surface_pixels(int win_id)

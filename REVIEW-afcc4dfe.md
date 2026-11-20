@@ -1,5 +1,225 @@
 # Review of commit afcc4dfe ("transputer")
 
+## Checkout audit (2026-11-05)
+
+The current branch contains the earlier work in squash `63256c91`. The
+November 2 commit IDs below describe its development history. The finding
+numbers and line numbers in the original review refer to the older source.
+
+| Findings | Status in this checkout | Evidence |
+|---|---|---|
+| #1 | Fixed in the squash | The target header lives in `include/transputer/limits.h`. The Windows header is separately tracked. |
+| #2–9 | Fixed in the squash | Relaxation remaps local label symbols. Integer-result builtins and UMULL protect their result slots. The computed-goto, live-return, conversion, pointer-difference and narrow-argument UART regressions passed. |
+| #10–11 | Fixed for the reported cases | The peephole limits decoding to function ranges and skips relocated instructions. The linker skips non-allocated debug sections. A fresh `-g` link succeeded. |
+| #12 | Common storage fixed. Undefined-symbol policy remains a choice. | A `-g -fcommon` link placed a tentative definition in BSS. The strict linker suite rejects missing strong call targets with `T4_STRICT_UNRESOLVED_CALLS=1`. The default still warns. |
+| #13–14 | Fixed for instruction addends and the reported opcode and sizing cases. | `80ab498f` carries instruction addends in a nine-byte ELF REL slot. Tests check positive and negative addends, branch targets and partial links, and execute the result on T4. `rev`, `opr N`, `lddevid`, `start`, and `j 17` have regression coverage. |
+| #15–18 | Fixed in the squash | VLAs use an arena. Invalid jump patches report internal errors. The static call-frequency table is gone. Value-returning early exits use their own epilogue. The VLA and timeslice regressions passed. |
+| #19 | Fixed for the reported cases | The NaN comparison, signed-zero and conversion UART tests passed with `-mt800` on T4's T800 model (`-s8`). |
+| #20 | Fixed in `88d57e3d` | The new test starts and joins a child, checks signed word counts, and checks the void types of the timer and ALT waits. |
+| #21 | T414 lowering present | The backend uses software floating point and accounts for missing integer instructions. Soft-float, unsigned-comparison, process, ALT, timed-transfer and VLA tests passed with `-mt414` on `-s414`. |
+| #22 | Fixed in `6a8008d9` | Indexed and whole-archive links reported the exact member name for both padded and full-width fields. A native x86-64 binary linked and ran through both archive-loading paths. |
+| #23 | Timed transfers and a stopping trampoline were present. Workspace alignment fixed in `ce1da4af`. | `test_xlink` exercises timed transfers on soft channels. `test_conc_alt` starts processes at all four byte alignments. |
+| #24 | Fixed in the squash | The scheduler describes XWORD as binary. All 14 checks in `test_xword` printed a pass on the T9000 model. |
+
+MOVE2D coverage now checks rectangular copies with unequal byte strides,
+both conditional byte modes, zero width and zero rows, repeated setup, and
+side-effecting arguments on T425, T800 and T9000 emulators. A separate target
+test checks that all four builtins diagnose use on T414. The instruction
+pair requires fresh setup for each transfer and must not be separated by a
+deschedule. Source and destination overlap is outside the instruction's
+defined behavior.
+
+The separate T4 repository's `8177e21` adds the previously missing MOVE2D
+transfer cost to its T800 estimator. For nonzero valid dimensions it uses
+the INMOS `(2p+23)*rows` formula, rounding the byte width up to a nominal
+word count. Aligned whole-word rows follow the table; partial and unaligned
+rows are estimates because the table does not specify differing source and
+destination alignments. Zero or negative dimensions retain the existing
+generic estimate. This does not change execution, protection checks, or
+the separate T9000 group model. The host timing test checks all three
+transfer opcodes, prefix accounting, boundaries and wide arithmetic. T425,
+T800 and T9000 MOVE2D semantic tests and T414 target diagnostics passed.
+For the aligned 320-by-240 benchmark, the destination hash was unchanged
+at `2559167909`; the MOVE2D estimate changed from 1,151 to 1,910,567 cycles
+per 12 copies because transfer work is now counted. These are emulator
+estimates, not measured hardware cycles.
+
+**Other findings and remaining work**
+
+- **Packed call arguments.** Packed word lvalues can require byte-wise
+  reconstruction that uses more than one evaluation-stack position.
+  `tp_push_sv_is_pure` now excludes them from direct argument staging and
+  inline `memcpy`. The regression covers local and volatile global fields,
+  packed pointers, direct and indirect calls, and stacked arguments on T414,
+  T425, T800, T805, T9000 and T9000TVX. A code-generation check confirms aligned `memcpy`
+  still uses MOVE and the packed-length case calls `memcpy`.
+- **64-bit scalar call temporary alignment.** Fuzz seed 329 failed on
+  the `5afc5a61` compiler baseline. The published reduced case agrees
+  between GCC `-O0` with UBSan and GCC `-O2`; an independent T4 trace shows
+  that the shift count is 1, but the words supplied to `__ashrdi3` are
+  corrupted. The compiler stores the two words in aligned slots and reloads
+  them through addresses two bytes into those slots. `fc344c0b` aligns the
+  scalar call argument staging temporary and adds a focused regression.
+  Independently, the original seed matched its preserved host oracle on strict
+  T414 and T425, T800 and T9000 after the fix; all four had failed before it.
+  The fixed compiler was built from `fc344c0b` (SHA-256
+  `16d37539d96895502d88af11265a60676d4c3a2d70461cd953dbe8cd96042a33`).
+  The original source and oracle hashes were respectively
+  `5b4805b2ff3ebec87fb864693d000ccbd459a160884c5b52ffdaa3f2864b34f6`
+  and `ee6aa2c6dae28528975387090fb2fbe943c41271f0e2409553ef97b6a559fe80`;
+  the T4 binary hash was
+  `2c5972c20329d9730726ebea9ed966263c86f275c22ae4fa7c90f765dc1ce884`.
+- **Linker safety.** `310efe5b` validates boot load slots before writing and
+  propagates malformed optional-slot errors. Ordinary programs no longer
+  get the missing-kernel-symbol or absent-BSS-pair warnings. The final
+  linker now applies symbolic `.byte` and `.short` relocations and rejects
+  unsupported relocation types, malformed slots, and overflow. Absolute
+  narrow fields accept signed or unsigned results; PC-relative fields use
+  signed results. Their implicit REL addends must fit the signed field width.
+  Instruction addends use a new relocation type, so objects using them need
+  the updated linker. The linker conservatively preserves the layout of
+  sections referenced through these addends. Label boundaries clear the
+  backend's cached register and peephole history.
+- **PC-relative data words.** The assembler and linker handle `.long target - .`
+  and `.long target - anchor` using a distinct 32-bit PC-relative relocation.
+  The relocation regression checks separate objects, both input orders, and a
+  partial link. This also preserves the affected code sections during layout.
+- **§2–§4, implementation and maintenance.** The original broken
+  experimental inliner, compaction pass and call-frequency table are gone.
+  A separate, later inline expander was added in `9679d2c9`: it handles
+  restricted small scalar inline bodies, is enabled by default, and is
+  disabled by `TCC_TRANSPUTER_INLINE=0` or debug information. Its coverage
+  includes `transputer/tests/test_inline_expand.c`. Builtin dispatch uses
+  descriptors. Environment-controlled code generation, shared-file tracing,
+  symbol-repair paths, unconditional `.tccsym` output, standalone assembler
+  code, and kernel boot policy in the linker remain. The review's line-count
+  estimates describe the original commit. `T4_RELOC_SYMINFO=1` now enables
+  tracing for all symbols, while another value remains a substring filter.
+- **§5, generated code.** Same-section call relaxation, argument staging,
+  byte-load mask removal and capped inline memset are implemented. Debug
+  and switch-table functions still bypass compiler relaxation, dense switch
+  tables are opt-in. The 64-bit division runtime uses 32-bit division for
+  32-bit dividends and for larger dividends with divisors up to 65535. Larger
+  power-of-two divisors use shifts. Other 32-bit divisors use 32
+  iterations after dividing the high word. Other divisors wider than 32 bits
+  also use 32 restoring iterations because the high quotient word is zero.
+  For a wide divisor greater than the dividend, the runtime returns zero and
+  the original dividend as remainder without entering that loop. The target
+  regression checks adjacent values on both sides of the boundary; the host
+  differential test checks 30,000 such values. For 100 divisions just below
+  a wide divisor, estimated T800 cycles fell from 443,619 to 38,919. The
+  existing non-power-of-two `0x100000003` phase rose from 542,919 to 545,519
+  cycles in the same compiler snapshot; these are emulator estimates.
+  `test_u64_div_runtime` exercises
+  these paths on the T414, T800 and T9000 emulator models, including signed
+  limits, negative divisors, zero divisors and divisors with the high bit set.
+  `tests/bench/u64_div.sh` measures 100 calls with T4's estimated T800-cycle
+  counter. Against the runtime before `c6df9457`, the 32-bit-dividend phase
+  fell from 2,943,422 to 63,522 cycles, the divisor-65535 phase from 3,249,922
+  to 98,622, and the divisor-0xffffffff phase from 3,083,122 to 1,729,922.
+  The wide-divisor fallback increased from 3,044,422 to 3,056,422 cycles.
+  These totals include the loop and call overhead and are emulator estimates.
+  Adding the power-of-two path reduced the `0x80000000` phase from 1,768,122
+  to 168,822 estimated cycles per 100 calls. The `0xffffffff` phase increased
+  from 1,729,922 to 1,732,422 cycles and the wide-divisor phase increased
+  from 3,056,422 to 3,057,422 cycles.
+  The subsequent 64-bit power-of-two path reduced the `0x100000000` phase
+  from 3,057,422 to 63,222 estimated cycles per 100 calls. The `0xffffffff`
+  phase increased from 1,732,422 to 1,733,222 cycles.
+  On Transputer, power-of-two shifts use NORM to find the exponent. In the
+  current compiler snapshot, 100 divisions by `0x80000000` fell from 139,419
+  to 53,019 estimated T800 cycles, and by `0x10000000000` from 65,719 to
+  45,719. The divisor-65535 phase increased from 73,019 to 73,419 cycles.
+  Shortening the remaining loop reduced the non-power-of-two `0x100000003`
+  phase from 3,059,022 to 1,661,022 estimated cycles per 100 calls.
+  Replacing the loop's struct-by-value helper calls with direct word operations
+  reduced that phase to 562,022 cycles. The `0xffffffff` phase fell from
+  1,680,222 to 571,922 cycles. The regression includes borrow and high-bit
+  boundaries. `test_u64_div_host.py` checks 100,000 deterministic signed and
+  unsigned quotient/remainder pairs against host integer arithmetic, plus
+  every divisor from 1 through 65539 with full-width dividends to cover the
+  small-divisor path and its boundary.
+  Simplifying two-word negation removed an extra struct-by-value helper call.
+  Estimated cycles per 100 signed divisions fell from 163,522 to 124,322
+  for `-65535`, and from 633,122 to 593,922 for `0x100000003`.
+  Directly initializing the division wrappers' word unions avoided additional
+  struct-return calls. The corresponding signed phases fell to 110,322 and
+  580,222 cycles, and the 32-bit-dividend unsigned phase fell from 60,422 to
+  47,022 cycles per 100 calls.
+  Returning the quotient from the internal divider as a 64-bit scalar avoids
+  another struct-return copy. In the same benchmark the 32-bit-dividend phase
+  fell from 44,119 to 41,219 estimated cycles per 100 calls. The exact totals
+  reflect the compiler snapshot used for that comparison.
+  The signed negation helper now takes and returns a 64-bit scalar as well.
+  In a subsequent isolated comparison, the two signed phases fell from
+  105,219 to 88,819 and from 575,119 to 558,719 estimated cycles per 100 calls.
+  The shift helpers likewise initialize their word unions directly. Their new
+  regression checks every count from 0 through 64 on T414, T425, T800, T805,
+  T9000 and T9000TVX. The benchmark's 100 variable logical-right shifts fell from
+  24,883 to 17,605 estimated T800 cycles. The logical shift helpers now lower
+  to native LSHL/LSHR, reducing that phase to 11,765 cycles. Arithmetic right
+  shift still uses word operations. `test_u64_shift_codegen.sh` checks the
+  native instructions and absence of recursive helper calls for each part.
+  `test_u64_shift_host.py` also
+  checks 5,006 values against host arithmetic for every shift count from 0
+  through 65.
+  A separate trial staged native shift operands directly, reserving result
+  slots before emission and retaining the complex-load fallback. It changed
+  a small shift object but did not change any of the three application ELFs
+  below, so the trial was not merged. `test_shift_staging.c` checks counts
+  0, 1, 31, 32, 33, 63, 64 and 65, live values, packed loads, nested calls and
+  signed shifts on all six targets with both compilers. The last two counts
+  record the existing lowering convention; such C shifts are undefined.
+
+  The matched `-mt800` comparison used compiler source `5afc5a61` (baseline
+  compiler SHA-256 `47d708f6a3c7418bd907f9b74dff48d42f1b29a8572d9cee3d7324c4fc6cec6f`,
+  trial `6ac7731efe3848bff6dc5e7a959cc0c9f87c42209f767fbbf277834789587aa2`),
+  runtime archive `dbb6d39c4e13aec053eea8fbae2d550e1dbc64bc3cfb1b8b6fa5b006f3169e06`,
+  and T4 binary `2c5972c20329d9730726ebea9ed966263c86f275c22ae4fa7c90f765dc1ce884`.
+  Doom's benchmark reported `check 0` and identical phase hashes and estimated
+  cycles before and after: column `b6eadcb0`/2,608,228; tcolumn
+  `5a9ca119`/721,001; span `05d26359`/4,413,304; segloop
+  `6b9d321f`/2,445,729; fixedmul `58d667ae`/663,647; fixeddiv
+  `63da69d9`/816,598; palblit `23091322`/1,718,015; rowcopy
+  `23091322`/170,250; fill `a9ac55c5`/992,020; masked
+  `9c0f0700`/1,463,818; mapplane `e3973655`/8,783,742. Its unused Doom
+  functions had unresolved references under the linker's warning policy.
+  One-iteration CoreMark had 5,008,259 estimated cycles in each build, seed
+  CRC `e9f5`, list `e714`, matrix `1fd7`, and state `8e3a`. The model-3,
+  256x256, one-node raytracer matched the reference image in both runs and
+  measured 3,655,261,764 estimated cycles and 1,176,409,704 instructions.
+  For this count, a private T4 build from `2e44501` printed its existing
+  cycle counter from the worker at exit (binary SHA-256
+  `5be8f05ddd56002cfa20813f10a4711b91352b2cbe8cef09d12fc96ffd78f617`).
+  These are T800 emulator estimates, not hardware timings or CoreMark scores.
+- **§6, compiler speed.** The compiler limits the relaxer's relocation
+  scans to the current function. The linker indexes symbol names once before
+  relocation, preserving the repair pass's symbol ordering and handling of
+  duplicate local names. Inline-section placement now scans deferred bodies
+  only when reachable. The per-call scan of the inline-function list remains.
+  The linker's relocation index now retains each symbol's name bucket and
+  skips repair scans when only the original symbol occupies it. A measured
+  Linux link saved about 1–2 ms at the cost of an extra word per symbol;
+  the [profile and output checks](transputer/tests/bench/linker-reloc-index-2026-11-06.md)
+  include stress cases where no speedup was established. Postcommit builds of
+  `f792e755` and its exact parent passed matched Doom, fixed-seed CoreMark and
+  reference raytracer runs, with identical ELFs, linker diagnostics and
+  relocation listings.
+
+Verification covered focused compiler, linker and UART regressions. The
+kernel boot, full test corpus, physical hardware, and the historical size
+and timing measurements were outside this run.
+
+The [Doom benchmark link audit](transputer/tests/bench/doom-harness-audit-2026-11-06.md)
+replaces unexercised source bodies with fail-fast stubs in generated copies,
+rejects linker diagnostics and incomplete or incorrect phase results, and
+documents the former unresolved references. The original and stricter builds
+produced identical phase hashes on T414, T425, T800 and T9000 with matched
+inputs; code layout changed a few cycle estimates, so those timings need a
+fresh common harness for performance comparisons.
+
+## Historical fix log (2026-11-02)
+
 > **Fix status (2026-11-02).** These are fixed in commits on top of the squashed "transputer" commit:
 > - #1 limits.h (folded into bf3c2923)
 > - #4 and #5 conversions, with #7 `long double` constants (09b2f8c1)
@@ -35,13 +255,6 @@
 >
 > Fifth batch: call slots. Calls to an earlier function in the same section get a narrow slot at compile time, with ICF told not to fold their callees (f44e4d4b; corpus 274167 → 268554 at `-mt9000`, 312790 → 307199 at `-mt800`). The linker then shrinks the remaining same-section call slots after ICF, in the functions the compiler lists in `.note.tprelax` (bb8c2d95). linux-7 vmlinux: 5714528 → 5680652 → 5511560 bytes (−3.6%), boots to the desktop. The 8-byte `ldc sym` slots stay: about 8 KB of kernel for a lot of risk.
 >
-> Still open:
-> - #10 linker peephole
-> - the undefined-symbol policy in #12 (a deliberate default, left for the user)
-> - #15 VLAs
-> - #16 jump patching
-> - #17-24
-> - everything in §2-§6.
 
 The commit has 29 files and +21,908/−5 lines. Every line was read: I read the shared TinyCC files myself, and five parallel reviewers took the backend, linker, assembler, tools and runtime, about 3,500 lines each.
 

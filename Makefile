@@ -133,6 +133,10 @@ TCCDOCS = tcc.1 tcc-doc.html tcc-doc.info
 
 all: $(PROGS) $(TCCLIBS) $(TCCDOCS)
 
+transputer-elf2flt transputer-netload transputer-mksd: %: $(TOPSRC)/transputer/tools/%.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+transputer-elf2flt transputer-netload: $(TOPSRC)/elf.h
+
 # cross compiler targets to build
 TCC_X = i386 x86_64 i386-win32 x86_64-win32 x86_64-osx arm arm64 arm64-win32 arm-wince c67
 TCC_X += riscv64 arm64-osx transputer
@@ -218,7 +222,13 @@ arm64-osx_FILES = $(arm64_FILES) tccmacho.c
 arm64-win32_FILES = $(arm64_FILES) tccpe.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
-transputer_FILES = $(CORE_FILES) transputer-gen.c transputer-link.c transputer-asm.c transputer-enc.h transputer-opcodes.h lib/transputer-tvx/tvx.h
+transputer_FILES = $(CORE_FILES) transputer-gen.c transputer-link.c transputer-asm.c transputer-enc.h transputer-hist.h transputer-front.h transputer-fnopt.h transputer-call.h transputer-int.h transputer-fp.h transputer-linkopt.h transputer-linux.h transputer-knobs.h transputer-opcodes.h lib/transputer/tvx/tvx.h
+
+# The transputer back end is written against tccgen.c's own statics (the
+# value stack, gind(), gvtst(), ...), so it builds only as one source file.
+ifeq ($(T)-$(ONE_SOURCE),transputer-no)
+$(error the transputer target builds only as one source file: leave ONE_SOURCE unset)
+endif
 
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 
@@ -369,7 +379,7 @@ INSTALLBIN = install -m 755 $(STRIP_$(CONFIG_strip))
 STRIP_yes = -s
 
 LIBTCC1_W = $(filter %-win32-libtcc1.a %-wince-libtcc1.a,$(LIBTCC1_CROSS))
-LIBTCC1_U = $(filter-out $(LIBTCC1_W),$(wildcard *-libtcc1.a))
+LIBTCC1_U = $(filter-out $(LIBTCC1_W),$(wildcard *-libtcc1.a transputer-libtcc1-t*.a))
 IB = $(if $1,$(IM) mkdir -p $2 && $(INSTALLBIN) $1 $2)
 IBw = $(call IB,$(wildcard $1),$2)
 IF = $(if $1,$(IM) mkdir -p $2 && $(INSTALL) $1 $2)

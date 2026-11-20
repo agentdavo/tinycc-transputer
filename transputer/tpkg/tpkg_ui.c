@@ -8,9 +8,14 @@
  * Uses direct framebuffer writes (same approach as DOOM video driver).
  *
  * Reads package database from /var/lib/tpkg/<pkg>/info.
- * Invokes "tpkg install/remove" for actual operations.
+ * Shares the installer and removal code with the CLI.
  */
 
+#include "tpkg.h"
+#include "tpz.h"
+#include "../fbwm/fbwm_theme.h"
+#include <fcntl.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,9 +25,9 @@
 /* ---------------------------------------------------------------------------
  * Framebuffer hardware
  * --------------------------------------------------------------------------- */
-#define FB_BASE         0x81E00000
-#define FB_WIDTH        800
-#define FB_HEIGHT       600
+#define FB_BASE         TPOS_FB_BASE
+#define FB_WIDTH        TPOS_FB_WIDTH
+#define FB_HEIGHT       TPOS_FB_HEIGHT
 
 /* Keyboard UART */
 #define KBD_UART_DATA   0x11000000
@@ -68,7 +73,7 @@
 #define LIST_Y          (CLIENT_Y + 24)
 #define LIST_W          (CLIENT_W - 8)
 #define LIST_ROW_H      14
-#define LIST_ROWS       ((CLIENT_H - 60) / LIST_ROW_H)
+#define LIST_ROWS       ((CLIENT_H - 82) / LIST_ROW_H)
 
 /* Status bar */
 #define STATUS_Y        (CLIENT_Y + CLIENT_H - 16)
@@ -206,6 +211,29 @@ static pkg_entry_t packages[MAX_PKG];
 static int npkg = 0;
 static int selected = 0;
 static int scroll = 0;
+static char archive_path[TPZ_PATH];
+static unsigned path_length;
+static int entering_path;
+static const char *message;
+
+enum { KEY_UP = 256, KEY_DOWN };
+enum { TP_OPEN = 1024, TP_GETDENTS64 = 61, TP_CLOSE = 57 };
+
+extern long __transputer_syscall(long, long, long, long, long, long, long);
+
+struct package_dirent {
+    unsigned long long inode;
+    long long offset;
+    unsigned short length;
+    unsigned char type;
+    char name[];
+};
+
+static void mark(const char *text)
+{
+    while (*text)
+        mmio_w(0x10000000, (unsigned char)*text++);
+}
 
 static const char *read_info_field(const char *path, const char *key)
 {
@@ -232,57 +260,76 @@ static const char *read_info_field(const char *path, const char *key)
     return vbuf;
 }
 
+static void add_package(const char *name)
+{
+    static char info[128];
+    pkg_entry_t *package = &packages[npkg];
+    const char *version;
+
+    if (name[0] == '.' || strlen(name) >= sizeof(package->name))
+        return;
+    snprintf(info, sizeof(info), "/var/lib/tpkg/%s/info", name);
+    version = read_info_field(info, "Version");
+    if (!*version)
+        return;
+    memset(package, 0, sizeof(*package));
+    strcpy(package->name, name);
+    strncpy(package->version, version, sizeof(package->version) - 1);
+    strncpy(package->desc, read_info_field(info, "Description"),
+            sizeof(package->desc) - 1);
+    strncpy(package->license, read_info_field(info, "License"),
+            sizeof(package->license) - 1);
+    package->size = atoi(read_info_field(info, "Size"));
+    npkg++;
+}
+
 static void load_packages(void)
 {
-    char cmd[128];
-    char line[MAX_NAME];
-    char infopath[128];
-    FILE *f;
+    static unsigned int buffer[256];
+    const int name_offset = offsetof(struct package_dirent, name);
+    long fd, bytes;
+    int pos;
 
-    npkg = 0;
-    snprintf(cmd, sizeof(cmd), "ls /var/lib/tpkg 2>/dev/null");
-    f = popen(cmd, "r");
-    if (!f) return;
-
-    while (fgets(line, sizeof(line), f) && npkg < MAX_PKG) {
-        int len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
-            line[--len] = 0;
-        if (len == 0) continue;
-
-        snprintf(infopath, sizeof(infopath), "/var/lib/tpkg/%s/info", line);
-        if (access(infopath, 0) != 0) continue;
-
-        strncpy(packages[npkg].name, line, MAX_NAME - 1);
-
-        {
-            const char *v = read_info_field(infopath, "Version");
-            strncpy(packages[npkg].version, v, 15);
+    npkg = selected = scroll = 0;
+    fd = __transputer_syscall(TP_OPEN, (long)"/var/lib/tpkg",
+                             O_RDONLY | O_DIRECTORY, 0, 0, 0, 0);
+    if (fd < 0)
+        return;
+    while (npkg < MAX_PKG) {
+        bytes = __transputer_syscall(TP_GETDENTS64, fd, (long)buffer,
+                                     sizeof(buffer), 0, 0, 0);
+        if (bytes <= 0 || bytes > sizeof(buffer))
+            break;
+        for (pos = 0; pos + name_offset < bytes && npkg < MAX_PKG; ) {
+            const struct package_dirent *entry =
+                (const void *)((const char *)buffer + pos);
+            int length = entry->length;
+            if (length <= name_offset || length > bytes - pos)
+                break;
+            if (memchr(entry->name, 0, length - name_offset))
+                add_package(entry->name);
+            pos += length;
         }
-        {
-            const char *d = read_info_field(infopath, "Description");
-            strncpy(packages[npkg].desc, d, 79);
-        }
-        {
-            const char *l = read_info_field(infopath, "License");
-            strncpy(packages[npkg].license, l, 15);
-        }
-        {
-            const char *s = read_info_field(infopath, "Size");
-            packages[npkg].size = atoi(s);
-        }
-
-        npkg++;
     }
-    pclose(f);
-
-    if (selected >= npkg) selected = npkg > 0 ? npkg - 1 : 0;
+    __transputer_syscall(TP_CLOSE, fd, 0, 0, 0, 0, 0);
 }
 
 /* ---------------------------------------------------------------------------
  * UI rendering
  * --------------------------------------------------------------------------- */
-static void flip(void) { }
+static void flip(void)
+{
+    mmio_w(0xA0000014, FB_BASE);
+}
+
+static void draw_path_prompt(void)
+{
+    unsigned start = path_length > 76 ? path_length - 76 : 0;
+    fill(LIST_X, STATUS_Y - 38, LIST_W, 36, COL_WINBG);
+    draws(LIST_X, STATUS_Y - 36, "ARCHIVE PATH   ENTER:INSTALL  ESC:CANCEL",
+          COL_ACCENT, COL_WINBG);
+    draws(LIST_X, STATUS_Y - 20, archive_path + start, COL_TITLE_TEXT, COL_WINBG);
+}
 
 static void draw_window(void)
 {
@@ -342,20 +389,23 @@ static void draw_window(void)
     if (npkg == 0) {
         draws_c(CLIENT_X, LIST_Y + 40, CLIENT_W,
                 "NO PACKAGES INSTALLED", COL_STATUS, COL_WINBG);
-        draws_c(CLIENT_X, LIST_Y + 56, CLIENT_W,
-                "USE: TPKG INSTALL FILE.TPZ", COL_STATUS, COL_WINBG);
     }
 
     /* Status bar */
     fill(CLIENT_X, STATUS_Y, CLIENT_W, 14, COL_SCROLLBAR);
     {
         char status[80];
-        snprintf(status, sizeof(status), "%d PACKAGES   UP/DOWN:SELECT  R:REMOVE  Q:QUIT", npkg);
+        snprintf(status, sizeof(status),
+                 "%d PACKAGES   UP/DOWN:SELECT  I:INSTALL  R:REMOVE  Q:QUIT", npkg);
         draws(CLIENT_X + 4, STATUS_Y + 3, status, COL_VERSION, COL_SCROLLBAR);
     }
 
     /* Selected package detail (below list, above status) */
-    if (npkg > 0) {
+    if (entering_path) {
+        draw_path_prompt();
+    } else if (message) {
+        draws(LIST_X, STATUS_Y - 20, message, COL_ACCENT, COL_WINBG);
+    } else if (npkg > 0) {
         int dy = STATUS_Y - 22;
         fill(CLIENT_X + 4, dy, CLIENT_W - 8, 16, COL_WINBG);
 
@@ -387,8 +437,8 @@ static int getkey(void)
         if (c2 == '[') {
             if (!(mmio_r(KBD_UART_STATUS) & UART_RXAVAIL)) return 0;
             int c3 = mmio_r(KBD_UART_DATA) & 0xFF;
-            if (c3 == 'A') return 'U';  /* Up */
-            if (c3 == 'B') return 'D';  /* Down */
+            if (c3 == 'A') return KEY_UP;
+            if (c3 == 'B') return KEY_DOWN;
             return 0;
         }
         return 0x1B;
@@ -396,76 +446,102 @@ static int getkey(void)
     return ch;
 }
 
-/* ---------------------------------------------------------------------------
- * Main
- * --------------------------------------------------------------------------- */
-int main(int argc, char **argv)
+static void present(void)
 {
-    int running = 1;
-
-    fb = (unsigned int *)FB_BASE;
-
-    load_packages();
     draw_window();
     flip();
+}
 
-    while (running) {
+static void apply_package(int installing)
+{
+    int result;
+    entering_path = 0;
+    message = installing ? "INSTALLING..." : "REMOVING...";
+    present();
+    if (installing)
+        result = tpkg_install(archive_path);
+    else
+        result = tpkg_remove(packages[selected].name);
+    load_packages();
+    if (result)
+        message = installing ? "INSTALL FAILED" : "REMOVE FAILED";
+    else
+        message = installing ? "PACKAGE INSTALLED" : "PACKAGE REMOVED";
+    present();
+    if (result)
+        mark("TPKG_UI_FAILED\r\n");
+    else
+        mark(installing ? "TPKG_UI_INSTALLED\r\n" : "TPKG_UI_REMOVED\r\n");
+}
+
+static void edit_path(int key)
+{
+    if (key == '\r' || key == '\n') {
+        if (path_length)
+            apply_package(1);
+        return;
+    }
+    if (key == 27) {
+        entering_path = 0;
+        present();
+        return;
+    }
+    if (key == 8 || key == 127) {
+        if (path_length)
+            archive_path[--path_length] = 0;
+    } else if (key >= ' ' && key < 127 && path_length + 1 < sizeof(archive_path)) {
+        archive_path[path_length++] = (char)key;
+        archive_path[path_length] = 0;
+    }
+    draw_path_prompt();
+    flip();
+}
+
+static void navigate(int delta)
+{
+    int next = selected + delta;
+    if (next < 0 || next >= npkg)
+        return;
+    selected = next;
+    if (selected < scroll)
+        scroll = selected;
+    else if (selected >= scroll + LIST_ROWS)
+        scroll = selected - LIST_ROWS + 1;
+    message = NULL;
+    present();
+}
+
+int main(int argc, char **argv)
+{
+    fb = (unsigned int *)FB_BASE;
+    if (argc > 1 && argv[1][0] == '/' && strlen(argv[1]) < sizeof(archive_path)) {
+        strcpy(archive_path, argv[1]);
+        path_length = strlen(archive_path);
+        entering_path = 1;
+    }
+    load_packages();
+    present();
+    mark("TPKG_UI_READY\r\n");
+    for (;;) {
         int key = getkey();
-        int redraw = 0;
-
-        switch (key) {
-        case 0:
-            /* No input — small delay to avoid busy spin */
-            { volatile int d; for (d = 0; d < 50000; d++); }
-            break;
-
-        case 'U': /* Up */
-            if (selected > 0) {
-                selected--;
-                if (selected < scroll) scroll = selected;
-                redraw = 1;
-            }
-            break;
-
-        case 'D': /* Down */
-            if (selected < npkg - 1) {
-                selected++;
-                if (selected >= scroll + LIST_ROWS)
-                    scroll = selected - LIST_ROWS + 1;
-                redraw = 1;
-            }
-            break;
-
-        case 'r':
-        case 'R':
-            if (npkg > 0) {
-                char cmd[128];
-                snprintf(cmd, sizeof(cmd), "tpkg remove %s", packages[selected].name);
-                system(cmd);
-                load_packages();
-                redraw = 1;
-            }
-            break;
-
-        case 'q':
-        case 'Q':
-        case 0x1B: /* ESC */
-            running = 0;
-            break;
-
-        default:
-            break;
-        }
-
-        if (redraw) {
-            draw_window();
-            flip();
+        if (!key) {
+            volatile int delay;
+            for (delay = 0; delay < 1000; delay++)
+                ;
+        } else if (entering_path) {
+            edit_path(key);
+        } else if (key == 'q' || key == 'Q' || key == 27) {
+            /* Package operations close their own streams. Return directly to fbwm. */
+            _exit(0);
+        } else if (key == 'i' || key == 'I') {
+            strcpy(archive_path, "/sd/");
+            path_length = 4;
+            entering_path = 1;
+            present();
+        } else if ((key == 'r' || key == 'R') && npkg) {
+            apply_package(0);
+        } else if (key == KEY_UP || key == KEY_DOWN) {
+            navigate(key == KEY_UP ? -1 : 1);
         }
     }
-
-    /* Restore desktop */
-    fill(0, 0, FB_WIDTH, FB_HEIGHT, COL_DESKTOP);
-    flip();
-
-    return 0;
 }
