@@ -4270,7 +4270,7 @@ ST_FUNC void vstore(void)
 #endif
     int sbt, dbt, ft, r, size, align, bit_size, bit_pos, delayed_cast;
 #ifdef TCC_TARGET_TRANSPUTER
-    int double_copy;
+    int double_copy, ext_done = 0;
 #endif
 
     ft = vtop[-1].type.t;
@@ -4418,6 +4418,18 @@ ST_FUNC void vstore(void)
                     )
                     force_charshort_cast();
                 delayed_cast = 1;
+#ifdef TCC_TARGET_TRANSPUTER
+                /* A char or short lvalue of the destination's own type
+                   and signedness is loaded already extended (lbx, or lb
+                   and xword; ls/lsx or the byte pair and xword), so the
+                   value stored is the value the assignment yields: no
+                   re-extension when it is used.  `while ((*d++ = *s++))`
+                   tested the byte with a second xbword, or ldc 255; and;
+                   ldc 128; xword on parts without lbx. */
+                ext_done = (vtop->r & (VT_LVAL | VT_MUSTCAST)) == VT_LVAL
+                    && !(vtop->type.t & VT_BITFIELD)
+                    && ((vtop->type.t ^ ft) & (VT_BTYPE | VT_UNSIGNED)) == 0;
+#endif
             } else {
                 gen_cast(&vtop[-1].type);
             }
@@ -4433,6 +4445,9 @@ ST_FUNC void vstore(void)
             gv(RC_TYPE(dbt)); /* generate value */
 
             if (delayed_cast) {
+#ifdef TCC_TARGET_TRANSPUTER
+                if (!ext_done)
+#endif
                 vtop->r |= BFVAL(VT_MUSTCAST, (sbt == VT_LLONG) + 1);
                 //tcc_warning("deley cast %x -> %x", sbt, dbt);
                 vtop->type.t = ft & VT_TYPE;
