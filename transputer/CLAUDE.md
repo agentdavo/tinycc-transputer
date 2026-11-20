@@ -954,6 +954,10 @@ the occam compiler does, and what new codegen should be held to:
   at -mt9000).  `TCC_TRANSPUTER_SWITCH_THREAD=0`; `test_switch_thread.c`.
 - The scheduler runs once more after tp_hoist and tp_strength_reduce,
   which leave round trips of their own (`TCC_TRANSPUTER_RESCHED=0`).
+- On the T9000 a `bsub` straight after a load is emitted as `sum` (same
+  A + B): the grouper's address stage may not follow a load, the ALU may
+  (`TCC_TRANSPUTER_SUM_AFTER_LOAD=0`; `coremark/transputer/cm-groups.py`
+  counts groups with MODERNISE's issue model).
 - `-mstrict-aliasing` (off by default: TinyCC has no type-based alias
   analysis and Linux relies on that): a loop's `*p op= v` whose other
   reads are all halfword is kept in a frame word, stored once on the way

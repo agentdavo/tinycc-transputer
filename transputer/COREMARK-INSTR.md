@@ -797,6 +797,37 @@ products for N = 0..8 against index sums, and a char reader that really
 overlaps the accumulator, a call, an int reader that is the accumulator
 and a moving pointer, none of which is promoted.
 
+## D79: instructions per T9000 group (20 November 2026)
+
+Lever 3 of MODERNISE's issue-width study raises instructions per group,
+not instruction count.  `coremark/transputer/cm-groups.py` measures it
+without an RTL trace: it imports `form_groups` from MODERNISE's
+`issue_model.py` (tp repo, `test/modern/prof/`; `ISSUE_MODEL=` names it)
+and applies the base R7 template (L* A? M? E? W? B?, 8 bytes, 2 prefix
+bytes, 2 workspace reads) to every straight run between branches and
+labels, weighted by the T4_OPHIST counts.  Groups never cross a branch,
+so that is the whole count.  `--site "a -> b"` lists the code behind a
+boundary.  opt7's recipe: 677,696 instructions, 322,689 groups an
+iteration, 2.100 a group.  The commonest boundaries: `stl -> ldl` 11.9%
+and `stnl -> ldl` 5.2% (a write ends the group: the template, not the
+code), `bsub -> ldl` 4.2%, `gt -> cj [prefix]` 2.5%, `adc -> lsx` 1.2%.
+
+- **bsub after a load is sum** (`TCC_TRANSPUTER_SUM_AFTER_LOAD`, T9000
+  only).  `bsub` is the address stage, which may not follow a load; in
+  `ldl p; ldnl 0; bsub` (C[i] += v) it adds loaded values, and `sum` -
+  the same A + B, no overflow check either - is an ALU op that may.
+  322,689 → 316,533 groups (−1.9%), 2.141 a group, the same instructions.
+- `adc -> lsx` (lever 3's address-plus-constant): the hot site is
+  core_list_find's `ldl; ldnl 1; adc 2; lsx`, a load, an address step and
+  a load again, which no reordering fits in one group (A must come before
+  M); the rest is about 1 K groups an iteration.  Not done.
+- `gt -> cj [prefix]` (lever 1): the hot ones are loop bottom tests,
+  `ldl 27; ldl 30; gt; cj back`, where both words are above 15 (the
+  hoisted and strength-reduced words go on top of the frame) and the
+  backward `cj` needs a prefix too.  Moving those words below 16 means
+  letting the slot remap move tp_hoist's words, which it now leaves
+  alone; open.
+
 ## Step 3: instructions the compiler would use
 
 Measured on the final `-mt9000` image: how many instructions per iteration

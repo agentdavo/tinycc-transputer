@@ -9816,6 +9816,32 @@ static int tp_relax_function(void)
     if (tp_thread_jumps(&r))
         r.grown = 1;
 
+    /* 2b'''. T9000 grouping: `bsub` is the address stage, which may not
+     * follow a load in a group (L* A? M? E? W?); right after one it adds
+     * loaded values, `ldl p; ldnl 0; bsub` in C[i] += v, and `sum` - the
+     * same A + B without the overflow check - is an ALU op that may.
+     * No instruction changes count: CoreMark -1.9% groups (D79 lever 2).
+     * TCC_TRANSPUTER_SUM_AFTER_LOAD=0 turns it off. */
+    {
+        static int off = -1;
+        int i, p;
+        if (!tpk_off(TPK_TCC_TRANSPUTER_SUM_AFTER_LOAD, &off, 1) &&
+            tp_have_t9000_feat(TP_T9K_GTU))
+            for (i = 0; i < r.n; i++) {
+                if (r.ins[i].opcode != TP_ENC_OPR ||
+                    r.ins[i].operand != TP_OPR_BSUB || r.ins[i].pinned ||
+                    (p = tpf_prev(r.ins, i)) < 0)
+                    continue;
+                if (r.ins[p].opcode == TP_ENC_LDNL ||
+                    (r.ins[p].opcode == TP_ENC_OPR &&
+                     (r.ins[p].operand == TP_OPR_LB ||
+                      r.ins[p].operand == TP_OPR_LBX ||
+                      r.ins[p].operand == TP_OPR_LS ||
+                      r.ins[p].operand == TP_OPR_LSX)))
+                    tpn_put(&r.ins[i], TP_ENC_OPR, TP_OPR_SUM);
+            }
+    }
+
     /* 2b'. Renumber the frame by use.  Moving a cold unit up can widen an
      * access, which the growth pass below then makes room for. */
     if (tp_slot_remap(r.ins, r.n, tpg.n + tp_hoist_w))
