@@ -9567,8 +9567,17 @@ static int tp_relax_function(void)
     tp_hoist(&r, tpg.n);
     if (tp_hoist_w)
         r.grown = 1;
-    if (tp_strength_reduce(&r, tpg.n))
-        r.grown = 1;
+    {
+        int sr = tp_strength_reduce(&r, tpg.n);
+        static int resched_off = -1;
+        if (sr)
+            r.grown = 1;
+        /* the round trips the hoisting and the strength reduction leave
+         * (`ldl p; stl t; ldl t; ldl t` for p[i] += c), scheduled away */
+        if ((sr || tp_hoist_w) &&
+            !tpk_off(TPK_TCC_TRANSPUTER_RESCHED, &resched_off, 1))
+            tp_sched_function(r.ins, r.n, size, tpg.n + tp_hoist_w);
+    }
     if (tp_thread_jumps(&r))
         r.grown = 1;
 

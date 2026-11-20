@@ -53,6 +53,7 @@
     K(TCC_TRANSPUTER_PARK_UNARY, "0...: a pushed value is parked while the one under it is worked on") \
     K(TCC_TRANSPUTER_POSTINC_SINK, "0...: *d++ = e parks the old d while e is computed") \
     K(TCC_TRANSPUTER_DUP_STL, "1: stl x; ldl x with x live after becomes dup; stl x (same count)") \
+    K(TCC_TRANSPUTER_RESCHED, "0...: no scheduling again after the hoisting and strength reduction") \
     K(TCC_TRANSPUTER_SWITCH_THREAD, "0...: a loop's way back to its switch tests and dispatches the state again") \
     K(TCC_TRANSPUTER_HOIST_LOAD, "0...: the hoisting leaves loop-invariant loads in the loop") \
     K(TCC_TRANSPUTER_CRC_IDIOM, "1/0: bit-serial reflected CRC loops become crcbyte, overriding -m[no-]crc-idiom") \
