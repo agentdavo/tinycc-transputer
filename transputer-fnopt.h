@@ -3711,6 +3711,8 @@ struct tpsm_work {
     int nu;
     int lo, hi;                 /* the movable slots are [lo, hi) */
     int stats;
+    int m;                      /* units laid out: uorder[0..m) */
+    int drop;                   /* frame words the shrink removes */
 };
 
 /* No GAJW, and no AJW but the prologue's and an epilogue's. */
@@ -3887,7 +3889,74 @@ static void tpsm_layout(struct tpsm_work *g)
             unew[uorder[k]] = pos;
             pos += usize[uorder[k]];
         }
+        g->m = m;
     }
+}
+
+/*
+ * Frame shrink.  Units nothing names - the pseudo-registers and scratch
+ * words whose uses the scheduler deleted, say - sort to the end of the
+ * layout (density 0), and the frame keeps their words: matrix_mul_matrix
+ * in CoreMark had 17 such words under its locals, which pushed the hoisted
+ * invariants and the parameters above them to slots 21-35, outside the
+ * T9000's 32-word workspace cache and past the one-byte encodings.  When
+ * the frame has the shape tp_gaddr_cache also asks for (`ajw -F` first,
+ * every other AJW `ajw F; ret`, no process instructions, nothing pinned),
+ * everything from the end of the movable slots up - a pinned unit, the
+ * words tp_gaddr_cache and tp_hoist put on top, the return address and the
+ * parameters - moves down by those words together, and the AJWs shrink to
+ * match; nothing at or above that point changes its distance from
+ * anything else there.  TCC_TRANSPUTER_FRAME_SHRINK=0 turns it off.
+ */
+static int tpsm_frame_shape(struct tpsm_work *g)
+{
+    struct tp_relax_insn *ins = g->ins;
+    const int n = g->n;
+    const int FW = func_frame_words;
+    int first, i, j;
+
+    for (first = 0; first < n && ins[first].opcode == -1; first++)
+        ;
+    if (first >= n || ins[first].opcode != TP_ENC_AJW ||
+        ins[first].operand != -FW)
+        return 0;
+    for (i = 0; i < n; i++) {
+        int opc = ins[i].opcode;
+        if (opc == TP_ENC_OPR && (ins[i].operand == TP_OPR_GAJW ||
+                                  ins[i].operand == TP_OPR_STARTP ||
+                                  ins[i].operand == TP_OPR_ENDP ||
+                                  ins[i].operand == TP_OPR_RUNP))
+            return 0;
+        if (ins[i].icall)
+            continue;
+        if (ins[i].pinned && (opc == TP_ENC_LDL || opc == TP_ENC_STL ||
+                              opc == TP_ENC_LDLP || opc == TP_ENC_AJW))
+            return 0;
+        if (opc == TP_ENC_AJW && i != first) {
+            for (j = i + 1; j < n && ins[j].opcode == -1; j++)
+                ;
+            if (ins[i].operand != FW || j == n ||
+                ins[j].opcode != TP_ENC_OPR || ins[j].operand != TP_OPR_RET)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static void tpsm_shrink(struct tpsm_work *g)
+{
+    static int off = -1;
+    int k;
+
+    g->drop = 0;
+    if (off < 0) {
+        const char *e = tp_knob(TPK_TCC_TRANSPUTER_FRAME_SHRINK);
+        off = (e && *e == '0') ? 1 : 0;
+    }
+    if (off || !tpsm_frame_shape(g))
+        return;
+    for (k = g->m; k > 0 && g->uweight[g->uorder[k - 1]] == 0; k--)
+        g->drop += g->usize[g->uorder[k - 1]];
 }
 
 /* Is the function smaller with the new numbering? */
@@ -3909,6 +3978,11 @@ static int tpsm_gain(struct tpsm_work *g)
         if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
             continue;
         s = ins[i].operand;
+        if (s >= hi && g->drop) {
+            old_bytes += tp_encode_len(opc, s);
+            new_bytes += tp_encode_len(opc, s - g->drop);
+            continue;
+        }
         if (s < lo || s >= hi)
             continue;
         u = unit[s];
@@ -3916,10 +3990,13 @@ static int tpsm_gain(struct tpsm_work *g)
         new_bytes += tp_encode_len(opc, s - ustart[u] + unew[u]);
     }
     if (stats && old_bytes)
-        fprintf(stderr, "[SLOTMAP] %s: %d -> %d bytes%s\n",
-                funcname ? funcname : "?", old_bytes, new_bytes,
-                new_bytes < old_bytes ? "" : " (kept)");
-    if (new_bytes >= old_bytes)
+        fprintf(stderr, "[SLOTMAP] %s: %d -> %d bytes, frame -%d%s\n",
+                funcname ? funcname : "?", old_bytes, new_bytes, g->drop,
+                new_bytes < old_bytes || (g->drop && new_bytes <= old_bytes)
+                    ? "" : " (kept)");
+    /* a smaller frame pays even at the same size: what moves down comes
+     * into the T9000's workspace cache */
+    if (new_bytes > old_bytes || (new_bytes == old_bytes && !g->drop))
         return 0;
     return 1;
 }
@@ -3938,15 +4015,27 @@ static void tpsm_apply(struct tpsm_work *g)
 
     for (i = 0; i < n; i++) {
         int opc = ins[i].opcode, u;
+        if (opc == TP_ENC_AJW && g->drop && !ins[i].icall) {
+            ins[i].operand += ins[i].operand < 0 ? g->drop : -g->drop;
+            ins[i].new_len = tp_encode_len(opc, ins[i].operand);
+            continue;
+        }
         if (opc != TP_ENC_LDL && opc != TP_ENC_STL && opc != TP_ENC_LDLP)
             continue;
         s = ins[i].operand;
+        if (s >= hi && g->drop) {
+            ins[i].operand = s - g->drop;
+            ins[i].new_len = tp_encode_len(opc, ins[i].operand);
+            continue;
+        }
         if (s < lo || s >= hi)
             continue;
         u = unit[s];
         ins[i].operand = s - ustart[u] + unew[u];
         ins[i].new_len = tp_encode_len(opc, ins[i].operand);
     }
+    if (g->drop)
+        func_frame_words -= g->drop;
 }
 
 /*
@@ -4013,6 +4102,7 @@ static int tp_slot_remap(struct tp_relax_insn *ins, int n, int top)
     if (ok) {
         tpsm_units(&g);
         tpsm_layout(&g);
+        tpsm_shrink(&g);
         ok = tpsm_gain(&g);
     }
     if (ok)

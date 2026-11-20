@@ -43,6 +43,7 @@
     K(TP_SCHED_BISECT, "lo-hi: rule S11 only in functions whose name hashes into the range") \
     K(TP_SCHED_DBL, "0: decline functions with a double access to a register pair; 1: follow those, not FP accesses to locals") \
     K(TP_NO_SLOTMAP, "set: no renumbering of workspace slots") \
+    K(TCC_TRANSPUTER_FRAME_SHRINK, "0...: frame words nothing names stay in the frame") \
     K(TP_NO_COPY3_MOVE, "set: keep terminal triples of double copies separate") \
     K(TCC_TRANSPUTER_GADDR, "0...: no cache of global addresses in frame words")     K(TCC_TRANSPUTER_NARROW_LOCAL, "0...: char and short locals stay byte/halfword accessed")     K(TCC_TRANSPUTER_BOOL_SELECT, "0...: keep the branches of `c ? 1 : 0'")     K(TCC_TRANSPUTER_HOIST, "0...: no hoisting of loop-invariant arithmetic") \
     K(TCC_TRANSPUTER_INLINE_LEAF, "0...: no inlining of tiny leaf functions at their direct calls") \
